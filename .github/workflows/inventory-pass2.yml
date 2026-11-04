@@ -1,0 +1,110 @@
+name: Inventory pass 2
+
+# Passe 2 séparée de la passe 1 (inventory-probe.yml) pour ne pas payer
+# 60 min de `sleep` : le cron tourne 1 h après la passe 1 hebdo (lundi 04:00
+# UTC), ou à la main au moins 1 h après un dispatch de la passe 1.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branche ou commit d'antenly (privé) à tester"
+        type: string
+        default: main
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  pass2:
+    name: probe pass 2 + report + PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Download latest pass 1 (>= 1 h old)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN=$(gh run list -R "$GITHUB_REPOSITORY" -w inventory-probe.yml  \
+            -s success -L 1 --json databaseId,updatedAt --jq '.[0].databaseId // empty')
+          if [ -z "$RUN" ]; then echo "::error::aucune passe 1 réussie"; exit 1; fi
+          DONE=$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json updatedAt --jq .updatedAt)
+          AGE=$(( $(date +%s) - $(date -d "$DONE" +%s) ))
+          if [ "$AGE" -lt 3600 ]; then echo "::error::passe 1 ($RUN) trop récente : ${AGE}s < 3600s (règle 2 échecs espacés >= 1 h)"; exit 1; fi
+          rm -rf data/inventory && mkdir -p data/inventory
+          gh run download "$RUN" -R "$GITHUB_REPOSITORY" -n inventory-pass1 -D data/inventory
+          echo "PASS1=$(ls -1 "$PWD"/data/inventory/probes/*-pass1.jsonl | tail -n 1)" >> "$GITHUB_ENV"
+
+      - name: Probe pass 2 (échecs seulement)
+        id: pass2
+        working-directory: tools/inventory
+        run: |
+          set -euo pipefail
+          OUT=$(uv run python probe.py --streams ../../data/inventory/streams.csv \
+            --out ../../data/inventory/probes --pass 2 --workers 6 \
+            --retry-from "$PASS1" --print-path-only)
+          echo "pass2=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Merge pass 1 + pass 2
+        working-directory: tools/inventory
+        env:
+          PASS2: ${{ steps.pass2.outputs.pass2 }}
+        run: uv run python probe.py --merge "$PASS1" "$PASS2"
+
+      - name: Report (génération honnête)
+        working-directory: tools/inventory
+        run: uv run python report.py --data ../../data/inventory
+
+      - name: Gates (--check et --check-respondes)
+        working-directory: tools/inventory
+        run: |
+          uv run python report.py --data ../../data/inventory --check
+          uv run python report.py --data ../../data/inventory --check-respondes
+
+      - name: Upload artifacts (mesures d'inventaire)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventory-data-${{ github.run_id }}
+          path: data/inventory
+          retention-days: 14
+          if-no-files-found: warn
+
+      # PR automatique (décision Papa 2026-11-04) : jamais de push direct sur
+      # la base, merge seulement avec l'OK de Papa.
+      - name: Open inventory PR (data/inventory)
+        if: success()
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: data/inventory/**
+          branch: inventory/auto-update
+          delete-branch: true
+          commit-message: "inventory: mesures du run ${{ github.run_id }}"
+          title: "Inventaire : mesures du run ${{ github.run_id }}"
+          body: |
+            Mesures (passe 1 + passe 2) du run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) sur `LordThiouk/antenly@${{ inputs.ref || 'main' }}`.
+            Gates `--check` et `--check-respondes` passées. Merge seulement avec l'OK de Papa.
+          labels: inventory
+          token: ${{ secrets.ANTENLY_TOKEN }}

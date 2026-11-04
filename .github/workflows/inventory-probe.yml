@@ -1,0 +1,156 @@
+name: Inventory probe
+
+on:
+  # Cron hebdo : preuve < 7 jours (ISC-3). GitHub n'exécute un schedule que
+  # depuis la branche par défaut — actif après merge. Décision Papa
+  # 2026-11-04 : plus de déclencheur push ; les preuves ISC-3/ISC-5 sont
+  # produites par le cron hebdo et, à la demande, par workflow_dispatch.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branche ou commit d'antenly (privé) à tester"
+        type: string
+        default: main
+      second_pass:
+        description: "Deuxième passe 1 h plus tard via inventory-pass2.yml (à lancer à la main pour un dispatch)"
+        type: boolean
+        default: true
+
+# contents/pull-requests en écriture : uniquement pour ouvrir la PR
+# automatique des mesures (jamais de push sur la branche de base).
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  inventory:
+    name: discover + probe 60 s + report
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # uv.lock est commité ; le cache uv de setup-uv peut être vide au premier run :
+      # pas de --offline (il tuerait le job sur un runner neuf).
+      - name: Unit tests (fixtures only)
+        working-directory: tools/inventory
+        run: uv run pytest -q
+
+      - name: Discover public sources -> data/inventory
+        working-directory: tools/inventory
+        run: uv run python discover.py --out ../../data/inventory
+        env:
+          TNT_CNRA_URLS: ""
+
+      # --print-path-only : une seule imprimée ligne (le chemin), capture directe —
+      # pas de `| head -n 1`, qui peut tuer le process par SIGPIPE sur un print tardif.
+      - name: Probe pass 1 (ffmpeg 60 s par flux)
+        id: pass1
+        working-directory: tools/inventory
+        run: |
+          set -euo pipefail
+          OUT=$(uv run python probe.py --streams ../../data/inventory/streams.csv \
+            --out ../../data/inventory/probes --pass 1 --workers 6 --print-path-only)
+          echo "pass1=$OUT" >> "$GITHUB_OUTPUT"
+
+      # Passe 2 dans un workflow séparé (inventory-pass2.yml, 1 h plus tard) :
+      # plus de `sleep 3600` facturé. Sans passe 2 (dispatch second_pass=false),
+      # le rapport et la PR sont produits ici.
+      # Génération : écrit REPORT.md + PRD-GAP.md à partir des probes réels du run.
+      - name: Report (génération honnête)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.second_pass == false }}
+        working-directory: tools/inventory
+        run: |
+          uv run python report.py --data ../../data/inventory
+      # Gates honnêteté : strictes, pas de continue-on-error (ISC-5/6/7).
+      - name: Gates (--check et --check-respondes)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.second_pass == false }}
+        working-directory: tools/inventory
+        run: |
+          uv run python report.py --data ../../data/inventory --check
+          uv run python report.py --data ../../data/inventory --check-respondes
+
+      # PR automatique des mesures (décision Papa 2026-11-04) : jamais de push
+      # direct sur la branche de base, merge seulement avec l'OK de Papa.
+      # Requiert « Allow GitHub Actions to create and approve pull requests ».
+      - name: Open inventory PR (data/inventory)
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.second_pass == false }}
+        uses: peter-evans/create-pull-request@v7
+        with:
+          add-paths: data/inventory/**
+          branch: inventory/auto-update
+          delete-branch: true
+          commit-message: "inventory: mesures du run ${{ github.run_id }}"
+          title: "Inventaire : mesures du run ${{ github.run_id }}"
+          body: |
+            Mesures générées par le run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) sur `LordThiouk/antenly@${{ inputs.ref || 'main' }}`.
+            Gates `--check` et `--check-respondes` passées. Merge seulement avec l'OK de Papa.
+          labels: inventory
+          token: ${{ secrets.ANTENLY_TOKEN }}
+
+      - name: Upload artifacts (mesures d'inventaire)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventory-pass1
+          path: data/inventory
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Notification finale OpenCLI (toujours, même en échec). Secrets
+      # OC_NOTIFY_URL/OC_NOTIFY_KEY invisibles : jamais echo, jamais dans
+      # l'URL — header exclusivement. Étape ignorée si les secrets sont
+      # vides ; une notification d'échec ne modifie jamais la conclusion
+      # affichée (job.status est lue avant tout POST).
+      - name: Notify inv47-gha (OpenCLI board)
+        if: always()
+        env:
+          OC_NOTIFY_URL: ${{ secrets.OC_NOTIFY_URL }}
+          OC_NOTIFY_KEY: ${{ secrets.OC_NOTIFY_KEY }}
+        run: |
+          if [ -z "${OC_NOTIFY_URL}" ] || [ -z "${OC_NOTIFY_KEY}" ]; then
+            echo "secrets OC_NOTIFY_URL / OC_NOTIFY_KEY absents : notification ignorée"
+            exit 0
+          fi
+          conclusion="${{ job.status }}"
+          case "$conclusion" in
+            success) status="done" ;;
+            *)       status="failed" ;;
+          esac
+          payload="$(jq -nc \
+            --arg status "$status" \
+            --arg summary "run ${{ github.run_id }} $conclusion" \
+            '{source:"gha", board:"antenly", task:"inv47-gha", status:$status,
+              title:"inventory probe", summary:$summary}')"
+          # Silencieux sur le corps de réponse (pas de secret en log) ;
+          # un échec du POST reste visible dans l'étape, sans casser la
+          # conclusion déjà enregistrée du job.
+          curl -sS --max-time 30 -X POST "$OC_NOTIFY_URL" \
+            -H "Authorization: Bearer ${OC_NOTIFY_KEY}" \
+            -H "X-Automation-Key: ${OC_NOTIFY_KEY}" \
+            -H "Content-Type: application/json" \
+            -o /dev/null -w "notify POST : HTTP %{http_code}\n" \
+            || echo "::warning::notification inv47-gha non livrée (statut job déjà $conclusion)"
+
+# Ce workflow ne pousse jamais sur la branche de base : à chaque run réussi,
+# il ouvre (ou met à jour) la PR `inventory/auto-update` avec data/inventory
+# (probes/, REPORT.md, PRD-GAP.md, CSV), aussi gardés en artifacts 14 jours.
+# Le merge reste une décision de Papa. Le cron hebdo garde les preuves < 7 jours (ISC-3).
