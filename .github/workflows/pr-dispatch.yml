@@ -1,0 +1,61 @@
+name: PR dispatch
+
+# antenly n'a plus de minutes Actions : ce cron déclenche ci.yml ici pour chaque
+# SHA de tête de PR ouverte qui n'a encore aucun statut `antenly-ci`.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: pr-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Le pending est posé avant le dispatch : un cron suivant ne relance pas un SHA
+      # dont le run est encore en file. Seuls numéro de PR et SHA court sont journalisés.
+      - name: Déclencher ci.yml pour chaque SHA de tête sans statut antenly-ci
+        env:
+          ANTENLY_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml
+        run: |
+          set -euo pipefail
+          A=LordThiouk/antenly
+          ag() { GH_TOKEN="$ANTENLY_TOKEN" gh api "$@"; }
+          post() {
+            ag -X POST "repos/$A/statuses/$1" -f state="$2" -f context="antenly-ci" \
+              -f target_url="$QUEUE_URL" -f description="$3" >/dev/null
+          }
+          PRS=$(ag --paginate "repos/$A/pulls?state=open&per_page=100" \
+            --jq '.[] | "\(.number) \(.head.sha) \(.head.repo.full_name // "-")"')
+          FAILED=0
+          while read -r PR SHA REPO <&3; do
+            [ -n "${SHA:-}" ] || continue
+            if [ "$REPO" != "$A" ]; then
+              echo "::notice::PR #$PR ignorée : branche hors du dépôt antenly (pas de secret pour du code de fork)"
+              continue
+            fi
+            N=$(ag "repos/$A/commits/$SHA/status?per_page=100" --jq '[.statuses[] | select(.context == "antenly-ci")] | length')
+            if [ "$N" -gt 0 ]; then
+              echo "PR #$PR ${SHA:0:7} : statut antenly-ci déjà posé"
+              continue
+            fi
+            post "$SHA" pending "En file d'attente"
+            if gh workflow run ci.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f ref="$SHA"; then
+              echo "PR #$PR ${SHA:0:7} : ci.yml déclenché"
+            else
+              post "$SHA" error "Dispatch échoué : relancer ci.yml à la main avec ce SHA"
+              echo "::error::PR #$PR ${SHA:0:7} : dispatch de ci.yml échoué"
+              FAILED=1
+            fi
+          done 3<<< "$PRS"
+          exit "$FAILED"
