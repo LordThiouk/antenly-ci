@@ -44,7 +44,7 @@ jobs:
               echo "::notice::PR #$PR ignorée : branche hors du dépôt antenly (pas de secret pour du code de fork)"
               continue
             fi
-            N=$(ag "repos/$A/commits/$SHA/status" --jq '[.statuses[] | select(.context == "antenly-ci")] | length')
+            N=$(ag "repos/$A/commits/$SHA/status?per_page=100" --jq '[.statuses[] | select(.context == "antenly-ci")] | length')
             if [ "$N" -gt 0 ]; then
               echo "PR #$PR ${SHA:0:7} : statut antenly-ci déjà posé"
               continue
