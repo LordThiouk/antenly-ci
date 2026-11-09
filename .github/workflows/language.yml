@@ -1,0 +1,245 @@
+name: Language pass
+
+# Passe de langue language-v1 des segments `parole` du corpus full-v1.
+# La detection tourne ici (minutes GitHub Actions gratuites), le code reste dans
+# antenly : chaque job checkout `LordThiouk/antenly` au SHA resolu par `prepare`.
+# Aucun push, aucun PAT d'ecriture : l'artefact sort en artifact GitHub et Papa
+# le commit dans antenly.
+run-name: Language pass full-v1 @ ${{ inputs.ref || 'main' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branche ou commit d'antenly (prive) a analyser"
+        type: string
+        default: main
+      model:
+        description: "Detecteur Hugging Face (doit lister wol, ex. facebook/mms-lid-256)"
+        type: string
+        default: facebook/mms-lid-256
+      limit:
+        description: "0 = tous les segments parole ; >0 = artefact partiel (smoke test)"
+        type: string
+        default: "0"
+      stations:
+        description: "Stations a traiter, separees par des virgules (vide = toutes)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: language-${{ inputs.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare (HF_TOKEN, SHA, stations, sha256)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      sha256: ${{ steps.segments.outputs.sha256 }}
+      stations: ${{ steps.segments.outputs.stations }}
+    steps:
+      # Garde explicite : le dataset est prive, sans HF_TOKEN la detection ne peut
+      # rien lire. Un job qui partirait quand meme produirait un faux vert sur un
+      # artefact vide ; ici il echoue en nommant l'acte requis.
+      - name: Garde HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "${HF_TOKEN:-}" ]; then
+            echo "::error::HF_TOKEN absent de antenly-ci (acte Papa requis)"
+            exit 1
+          fi
+
+      - name: Resoudre la ref antenly (un seul SHA pour tous les jobs)
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+          REF: ${{ inputs.ref || 'main' }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh api "repos/LordThiouk/antenly/commits/$REF" --jq .sha)
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::SHA antenly invalide pour la ref demandee"
+            exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "antenly $SHA"
+
+      - name: Checkout antenly
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ steps.resolve.outputs.sha }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Lire segments.csv (stations JSON + sha256)
+        id: segments
+        env:
+          SEGMENTS: data/corpus/preannotation/full-v1/segments.csv
+          STATIONS_INPUT: ${{ inputs.stations }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$SEGMENTS" ]; then
+            echo "::error::segments.csv absent ou vide sur ce SHA"
+            exit 1
+          fi
+          echo "sha256=$(sha256sum "$SEGMENTS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' > /tmp/stations.json
+          import csv
+          import json
+          import os
+
+          requested = [
+              part.strip()
+              for part in os.environ.get("STATIONS_INPUT", "").split(",")
+              if part.strip()
+          ]
+          with open(os.environ["SEGMENTS"], newline="", encoding="utf-8") as handle:
+              rows = list(csv.DictReader(handle))
+          available = sorted({row["station"] for row in rows})
+          unknown = sorted(set(requested) - set(available))
+          if unknown:
+              raise SystemExit(f"stations inconnues dans segments.csv : {unknown}")
+          stations = requested or available
+          if not stations:
+              raise SystemExit("segments.csv ne declare aucune station")
+          print(json.dumps(stations))
+          PY
+          printf 'stations=%s\n' "$(cat /tmp/stations.json)" >> "$GITHUB_OUTPUT"
+          cat /tmp/stations.json
+
+  detect:
+    name: detect (${{ matrix.station }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        station: ${{ fromJSON(needs.prepare.outputs.stations) }}
+    steps:
+      - name: Checkout antenly
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: scripts/corpus/language-requirements.txt
+
+      - name: Installer ffmpeg (decodage 16 kHz mono)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Dependances epinglees (torch CPU + transformers)
+        run: |
+          set -euo pipefail
+          uv venv .venv-lang
+          uv pip install --python .venv-lang/bin/python \
+            --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu
+          uv pip install --python .venv-lang/bin/python \
+            -r scripts/corpus/language-requirements.txt
+
+      - name: Detecter la langue des segments parole de ${{ matrix.station }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          MODEL: ${{ inputs.model }}
+          LIMIT: ${{ inputs.limit }}
+          STATION: ${{ matrix.station }}
+        run: |
+          set -euo pipefail
+          .venv-lang/bin/python scripts/corpus/language_pass.py \
+            --segments data/corpus/preannotation/full-v1/segments.csv \
+            --download \
+            --hf-repo LordThiouk/antenly-corpus \
+            --model "$MODEL" \
+            --limit "$LIMIT" \
+            --stations "$STATION" \
+            --output "language-$STATION.json"
+
+      - name: Publier le fragment ${{ matrix.station }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.station }}-language
+          path: language-${{ matrix.station }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  merge:
+    name: merge (0 trou + artefact final)
+    needs: [prepare, detect]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout antenly
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: false
+
+      - name: Garder l'entree atteste (sha256 du prepare)
+        env:
+          ATTENDU: ${{ needs.prepare.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          SEGMENTS=data/corpus/preannotation/full-v1/segments.csv
+          ACTUEL=$(sha256sum "$SEGMENTS" | cut -d' ' -f1)
+          if [ "$ACTUEL" != "$ATTENDU" ]; then
+            echo "::error::segments.csv a change entre prepare et merge ($ACTUEL != $ATTENDU)"
+            exit 1
+          fi
+
+      - name: Telecharger tous les fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-language"
+          path: fragments
+          merge-multiple: true
+
+      - name: Fusionner et verifier 0 trou sur tous les segments parole
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+          python3 scripts/corpus/language_pass.py \
+            --segments data/corpus/preannotation/full-v1/segments.csv \
+            --merge-dir fragments \
+            --output data/annotation/language/full-v1.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          artifact = json.loads(Path("data/annotation/language/full-v1.json").read_text())
+          assert artifact["partial"] is False, "artefact final partiel"
+          assert artifact["processed"] == artifact["expected"], "trou detectable"
+          print(
+              f"language-v1 : {artifact['processed']} declarations, "
+              f"0 trou, modele {artifact['model']}, entree {artifact['source_segments_sha256'][:12]}"
+          )
+          PY
+
+      - name: Publier l'artefact final
+        uses: actions/upload-artifact@v4
+        with:
+          name: language-full-v1
+          path: data/annotation/language/full-v1.json
+          if-no-files-found: error
+          retention-days: 90
