@@ -52,8 +52,10 @@ absent, d'une autre entrée (`source_segments_sha256`) ou s'il laisse un segment
 `parole` sans langue. Committer ensuite le fichier dans `antenly`. Ce dépôt
 n'écrit jamais dans `antenly` : aucun push, aucun PAT d'écriture, `main` intact.
 
-**Coût/temps.** Un run complet détecte ~12 000 segments sur 6 stations ; chaque
-job est plafonné à 350 min. Utiliser `limit` pour un smoke test avant un run
-complet. Les dépendances sont épinglées dans
-`scripts/corpus/language-requirements.txt` (torch CPU installé à part depuis
-`download.pytorch.org/whl/cpu`).
+**Coût/temps.** Un run complet détecte les 5 066 segments `parole` des 6
+stations (fenêtre plafonnée à 30 s par segment). Chaque job est plafonné à
+350 min ; le plus chargé est `sudfm` (1 142 segments). Utiliser `limit` pour
+un smoke test avant un run complet. Les dépendances sont épinglées dans
+`scripts/corpus/language-requirements.txt` (torch CPU 2.5.1, installé à part
+depuis `download.pytorch.org/whl/cpu` dans un venv Python 3.12 : cette roue
+n'existe pas pour Python 3.14, défaut actuel de `ubuntu-latest`).

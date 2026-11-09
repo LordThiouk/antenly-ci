@@ -136,6 +136,11 @@ jobs:
           token: ${{ secrets.ANTENLY_TOKEN }}
           persist-credentials: false
 
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -150,7 +155,7 @@ jobs:
       - name: Dependances epinglees (torch CPU + transformers)
         run: |
           set -euo pipefail
-          uv venv .venv-lang
+          uv venv .venv-lang --python 3.12
           uv pip install --python .venv-lang/bin/python \
             --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu
           uv pip install --python .venv-lang/bin/python \
