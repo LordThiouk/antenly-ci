@@ -10,3 +10,50 @@ avec le secret `ANTENLY_TOKEN` (jeton fine-grained limité à `antenly`).
 - `inventory-pass2.yml` : passe 2 1 h plus tard (cron lundi 05:00 UTC), rapport, gates, PR `inventory/auto-update` sur `antenly`.
 
 Les logs et artifacts de ce dépôt sont publics. Aucun push direct sur une branche de base d'`antenly` ; le merge reste manuel.
+
+## Passe de langue (`language.yml`)
+
+Détection de langue des segments `parole` du corpus `full-v1` (`facebook/mms-lid-256`
+par défaut), pour l'artefact `data/annotation/language/full-v1.json` attendu par
+`antenly` (ISC-6). La détection tourne ici, le code et le corpus restent dans
+`antenly` et sur le dataset privé `LordThiouk/antenly-corpus`.
+
+**Lancer.** Onglet Actions → `Language pass` → `Run workflow` :
+
+- `ref` : branche ou commit d'`antenly` à analyser (défaut `main`).
+- `model` : détecteur Hugging Face ; il doit lister `wol` (`mms-lid-256` le fait,
+  `faster-whisper` non).
+- `limit` : `0` = tous les segments `parole` ; `>0` produit un artefact
+  explicitement `partial: true` (smoke test, jamais accepté par `merge`).
+- `stations` : filtre CSV optionnel, séparé par des virgules (vide = toutes).
+
+Le job `prepare` résout un SHA unique, publie les stations en JSON et le sha256
+de `segments.csv`. Le job matrice `detect` télécharge **seulement** les fichiers
+audio de sa station via `huggingface_hub.hf_hub_download(repo_type="dataset")`,
+puis publie un fragment `<station>-language`. Le job `merge` concatène les
+fragments et **échoue si un seul segment `parole` reste sans langue**.
+
+**Secret requis.** `HF_TOKEN` (lecture du dataset privé `LordThiouk/antenly-corpus`).
+Si le secret est absent, le job `prepare` échoue explicitement avec
+`HF_TOKEN absent de antenly-ci (acte Papa requis)` — jamais un faux vert.
+`ANTENLY_TOKEN` reste nécessaire pour lire le dépôt privé `antenly`.
+
+**Récupérer et committer l'artefact.** Télécharger l'artifact
+`language-full-v1` du run, puis dans `antenly` :
+
+```bash
+mkdir -p data/annotation/language
+cp full-v1.json data/annotation/language/full-v1.json
+cd api && ANTENLY_REQUIRE_LANGUAGE=1 uv run pytest tests/annotation/test_language.py -q
+```
+
+La dernière commande est la face corpus d'ISC-6 : elle échoue si l'artefact est
+absent, d'une autre entrée (`source_segments_sha256`) ou s'il laisse un segment
+`parole` sans langue. Committer ensuite le fichier dans `antenly`. Ce dépôt
+n'écrit jamais dans `antenly` : aucun push, aucun PAT d'écriture, `main` intact.
+
+**Coût/temps.** Un run complet détecte ~12 000 segments sur 6 stations ; chaque
+job est plafonné à 350 min. Utiliser `limit` pour un smoke test avant un run
+complet. Les dépendances sont épinglées dans
+`scripts/corpus/language-requirements.txt` (torch CPU installé à part depuis
+`download.pytorch.org/whl/cpu`).
