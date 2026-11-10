@@ -5,6 +5,11 @@ name: Language pass
 # antenly : chaque job checkout `LordThiouk/antenly` au SHA resolu par `prepare`.
 # Aucun push, aucun PAT d'ecriture : l'artefact sort en artifact GitHub et Papa
 # le commit dans antenly.
+#
+# Decoupe par tranches (offset/limit) : un job matrice par morceau de segments
+# parole, pour rester sous le plafond 350 min des runners GitHub. Le SHA `ref`
+# doit inclure les flags CLI `--offset` / `--limit` de language_pass.py (branche
+# antenly `fullrun/annotation-tool-f2` ou descendant — pas d58da6d seul).
 run-name: Language pass full-v1 @ ${{ inputs.ref || 'main' }}
 
 on:
@@ -19,9 +24,13 @@ on:
         type: string
         default: facebook/mms-lid-256
       limit:
-        description: "0 = tous les segments parole ; >0 = artefact partiel (smoke test)"
+        description: "0 = tous les segments parole (decoupe par chunk_size) ; >0 = smoke test (1 tranche/station, partial)"
         type: string
         default: "0"
+      chunk_size:
+        description: "Segments parole max par job detect quand limit=0 (anti-timeout 350 min)"
+        type: string
+        default: "250"
       stations:
         description: "Stations a traiter, separees par des virgules (vide = toutes)"
         type: string
@@ -36,13 +45,13 @@ concurrency:
 
 jobs:
   prepare:
-    name: prepare (HF_TOKEN, SHA, stations, sha256)
+    name: prepare (HF_TOKEN, SHA, chunks, sha256)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       sha256: ${{ steps.segments.outputs.sha256 }}
-      stations: ${{ steps.segments.outputs.stations }}
+      chunks: ${{ steps.segments.outputs.chunks }}
     steps:
       # Garde explicite : le dataset est prive, sans HF_TOKEN la detection ne peut
       # rien lire. Un job qui partirait quand meme produirait un faux vert sur un
@@ -82,11 +91,13 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Lire segments.csv (stations JSON + sha256)
+      - name: Lire segments.csv (matrice chunks JSON + sha256)
         id: segments
         env:
           SEGMENTS: data/corpus/preannotation/full-v1/segments.csv
           STATIONS_INPUT: ${{ inputs.stations }}
+          CHUNK_SIZE_INPUT: ${{ inputs.chunk_size }}
+          SMOKE_LIMIT: ${{ inputs.limit }}
         run: |
           set -euo pipefail
           if [ ! -s "$SEGMENTS" ]; then
@@ -94,17 +105,55 @@ jobs:
             exit 1
           fi
           echo "sha256=$(sha256sum "$SEGMENTS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          python3 - <<'PY' > /tmp/stations.json
+          python3 - <<'PY' | tee /tmp/chunks.json
           import csv
+          import importlib.util
           import json
           import os
+          import sys
+          from pathlib import Path
 
+          segments_path = Path(os.environ["SEGMENTS"])
           requested = [
               part.strip()
               for part in os.environ.get("STATIONS_INPUT", "").split(",")
               if part.strip()
           ]
-          with open(os.environ["SEGMENTS"], newline="", encoding="utf-8") as handle:
+          try:
+              chunk_size = int(os.environ.get("CHUNK_SIZE_INPUT", "250"))
+          except ValueError as exc:
+              raise SystemExit(f"chunk_size invalide : {exc}") from exc
+          if chunk_size <= 0:
+              raise SystemExit("chunk_size doit etre > 0")
+          try:
+              smoke_limit = int(os.environ.get("SMOKE_LIMIT", "0"))
+          except ValueError as exc:
+              raise SystemExit(f"limit (smoke) invalide : {exc}") from exc
+          if smoke_limit < 0:
+              raise SystemExit("limit (smoke) doit etre >= 0")
+
+          lp_path = Path("scripts/corpus/language_pass.py")
+          if not lp_path.is_file():
+              raise SystemExit("scripts/corpus/language_pass.py absent sur ce SHA antenly")
+
+          spec = importlib.util.spec_from_file_location("language_pass", lp_path)
+          language_pass = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(language_pass)
+
+          if hasattr(language_pass, "is_parole_row"):
+              is_parole = language_pass.is_parole_row
+          elif hasattr(language_pass, "is_parole_segment"):
+              is_parole = language_pass.is_parole_segment
+          else:
+              kind = getattr(language_pass, "PAROLE_KIND", "parole")
+
+              def is_parole(row: dict) -> bool:
+                  for key in ("kind", "class", "segment_class", "type"):
+                      if row.get(key) == kind:
+                          return True
+                  return False
+
+          with segments_path.open(newline="", encoding="utf-8") as handle:
               rows = list(csv.DictReader(handle))
           available = sorted({row["station"] for row in rows})
           unknown = sorted(set(requested) - set(available))
@@ -113,20 +162,67 @@ jobs:
           stations = requested or available
           if not stations:
               raise SystemExit("segments.csv ne declare aucune station")
-          print(json.dumps(stations))
+
+          station_set = set(stations)
+          counts: dict[str, int] = {station: 0 for station in stations}
+          for row in rows:
+              if row.get("station") not in station_set:
+                  continue
+              if not is_parole(row):
+                  continue
+              counts[row["station"]] += 1
+
+          chunks: list[dict[str, int | str]] = []
+          if smoke_limit > 0:
+              for station in stations:
+                  if counts[station] == 0:
+                      raise SystemExit(f"aucun segment parole pour {station}")
+                  chunks.append(
+                      {"station": station, "offset": 0, "limit": smoke_limit}
+                  )
+          else:
+              for station in stations:
+                  total = counts[station]
+                  if total == 0:
+                      raise SystemExit(f"aucun segment parole pour {station}")
+                  offset = 0
+                  while offset < total:
+                      take = min(chunk_size, total - offset)
+                      chunks.append(
+                          {"station": station, "offset": offset, "limit": take}
+                      )
+                      offset += take
+
+          max_matrix = 256
+          if len(chunks) > max_matrix:
+              raise SystemExit(
+                  f"{len(chunks)} jobs detect > {max_matrix} (plafond matrice GitHub). "
+                  f"Augmentez chunk_size (actuel {chunk_size}) via workflow_dispatch "
+                  f"plutot que de tronquer des stations."
+              )
+
+          print(json.dumps(chunks))
+          print(
+              f"chunks: {len(chunks)} jobs, chunk_size={chunk_size}, "
+              f"stations={','.join(stations)}",
+              file=sys.stderr,
+          )
           PY
-          printf 'stations=%s\n' "$(cat /tmp/stations.json)" >> "$GITHUB_OUTPUT"
-          cat /tmp/stations.json
+          {
+            echo "chunks<<EOF"
+            cat /tmp/chunks.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
   detect:
-    name: detect (${{ matrix.station }})
+    name: detect (${{ matrix.station }} o${{ matrix.offset }})
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
-        station: ${{ fromJSON(needs.prepare.outputs.stations) }}
+        include: ${{ fromJSON(needs.prepare.outputs.chunks) }}
     steps:
       - name: Checkout antenly
         uses: actions/checkout@v4
@@ -161,29 +257,32 @@ jobs:
           uv pip install --python .venv-lang/bin/python \
             -r scripts/corpus/language-requirements.txt
 
-      - name: Detecter la langue des segments parole de ${{ matrix.station }}
+      - name: Detecter parole ${{ matrix.station }} (offset ${{ matrix.offset }}, limit ${{ matrix.limit }})
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_TELEMETRY: "1"
           MODEL: ${{ inputs.model }}
-          LIMIT: ${{ inputs.limit }}
           STATION: ${{ matrix.station }}
+          OFFSET: ${{ matrix.offset }}
+          LIMIT: ${{ matrix.limit }}
         run: |
           set -euo pipefail
+          OUT="language-${{ matrix.station }}-o${{ matrix.offset }}.json"
           .venv-lang/bin/python scripts/corpus/language_pass.py \
             --segments data/corpus/preannotation/full-v1/segments.csv \
             --download \
             --hf-repo LordThiouk/antenly-corpus \
             --model "$MODEL" \
-            --limit "$LIMIT" \
             --stations "$STATION" \
-            --output "language-$STATION.json"
+            --offset "$OFFSET" \
+            --limit "$LIMIT" \
+            --output "$OUT"
 
-      - name: Publier le fragment ${{ matrix.station }}
+      - name: Publier le fragment ${{ matrix.station }}-o${{ matrix.offset }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.station }}-language
-          path: language-${{ matrix.station }}.json
+          name: ${{ matrix.station }}-o${{ matrix.offset }}-language
+          path: language-${{ matrix.station }}-o${{ matrix.offset }}.json
           if-no-files-found: error
           retention-days: 30
 
@@ -213,7 +312,7 @@ jobs:
             exit 1
           fi
 
-      - name: Telecharger tous les fragments
+      - name: Telecharger tous les fragments (tranches)
         uses: actions/download-artifact@v4
         with:
           pattern: "*-language"

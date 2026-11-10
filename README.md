@@ -18,20 +18,34 @@ par défaut), pour l'artefact `data/annotation/language/full-v1.json` attendu pa
 `antenly` (ISC-6). La détection tourne ici, le code et le corpus restent dans
 `antenly` et sur le dataset privé `LordThiouk/antenly-corpus`.
 
+**Prérequis antenly.** Le SHA pointé par `ref` doit inclure les flags CLI
+`--offset` et `--limit` dans `scripts/corpus/language_pass.py` (par ex. la branche
+`fullrun/annotation-tool-f2` ou un descendant). Un commit plus ancien (ex. `d58da6d`
+seul) ne les expose pas : le workflow échouera sur `detect`.
+
 **Lancer.** Onglet Actions → `Language pass` → `Run workflow` :
 
 - `ref` : branche ou commit d'`antenly` à analyser (défaut `main`).
 - `model` : détecteur Hugging Face ; il doit lister `wol` (`mms-lid-256` le fait,
   `faster-whisper` non).
-- `limit` : `0` = tous les segments `parole` ; `>0` produit un artefact
-  explicitement `partial: true` (smoke test, jamais accepté par `merge`).
+- `limit` : `0` = run complet découpé en tranches ; `>0` = smoke test (une tranche
+  par station, artefact explicitement `partial: true`, jamais accepté tel quel par
+  `merge` sur un run de production).
+- `chunk_size` : nombre max de segments `parole` par job `detect` quand `limit=0`
+  (défaut `250`, réglable sans modifier le YAML — Love FM ~289 segments / ~30 min
+  sert de repère pour rester sous le plafond 350 min par job).
 - `stations` : filtre CSV optionnel, séparé par des virgules (vide = toutes).
 
-Le job `prepare` résout un SHA unique, publie les stations en JSON et le sha256
-de `segments.csv`. Le job matrice `detect` télécharge **seulement** les fichiers
-audio de sa station via `huggingface_hub.hf_hub_download(repo_type="dataset")`,
-puis publie un fragment `<station>-language`. Le job `merge` concatène les
-fragments et **échoue si un seul segment `parole` reste sans langue**.
+Le job `prepare` résout un SHA unique, calcule une matrice JSON de tranches
+`{station, offset, limit}` couvrant tous les segments `parole` (sans trou ni
+chevauchement), publie le sha256 de `segments.csv`, et **échoue** si le nombre de
+jobs dépasserait 256 (plafond matrice GitHub) en demandant d'augmenter `chunk_size`.
+Chaque job matrice `detect` appelle `language_pass.py` avec `--stations`,
+`--offset`, `--limit`, télécharge **seulement** les fichiers audio de sa station via
+`huggingface_hub.hf_hub_download(repo_type="dataset")`, puis publie un fragment
+`<station>-o<offset>-language`. Le job `merge` télécharge toutes les tranches et
+concatène via `--merge-dir` ; il **échoue** si une tranche manque, est marquée
+`partial: true`, ou s'il reste un segment `parole` sans langue.
 
 **Secret requis.** `HF_TOKEN` (lecture du dataset privé `LordThiouk/antenly-corpus`).
 Si le secret est absent, le job `prepare` échoue explicitement avec
@@ -54,8 +68,9 @@ n'écrit jamais dans `antenly` : aucun push, aucun PAT d'écriture, `main` intac
 
 **Coût/temps.** Un run complet détecte les 5 066 segments `parole` des 6
 stations (fenêtre plafonnée à 30 s par segment). Chaque job est plafonné à
-350 min ; le plus chargé est `sudfm` (1 142 segments). Utiliser `limit` pour
-un smoke test avant un run complet. Les dépendances sont épinglées dans
+350 min ; les grosses stations (ex. `sudfm`, ~1 142 segments) sont découpées en
+plusieurs jobs selon `chunk_size`. Utiliser `limit` pour un smoke test avant un
+run complet. Les dépendances sont épinglées dans
 `scripts/corpus/language-requirements.txt` (torch CPU 2.5.1, installé à part
 depuis `download.pytorch.org/whl/cpu` dans un venv Python 3.12 : cette roue
 n'existe pas pour Python 3.14, défaut actuel de `ubuntu-latest`).
