@@ -96,8 +96,17 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: scripts/corpus/preannot/requirements.txt
-      - name: ffmpeg (décodage par inaSpeechSegmenter)
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg
         if: steps.preannot.outputs.present == 'true'
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: steps.preannot.outputs.present == 'true' && steps.ffmpeg.outcome != 'success'
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       # Recette de requirements.txt, version ina de la branche tools/preannot. Pas de
       # --no-cache-dir : sans répertoire de cache, le Post Run de `cache: pip` échoue.

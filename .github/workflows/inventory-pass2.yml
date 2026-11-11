@@ -37,10 +37,17 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: steps.ffmpeg.outcome != 'success'
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Download latest pass 1 (>= 1 h old)
         env:
