@@ -14,9 +14,9 @@ Tu tournes sur un runner GitHub Actions public, pas sur la box.
 - **Logs publics, mais ta sortie n'y est jamais affichée.** N'écris quand même aucun secret
   nulle part (fichiers, commits, rapport).
 - Rapport final : écris-le dans `$OC_REPORT` (hors dépôt). Le workflow le versionne dans
-  `.fullrun/$OC_JOB_DONE.md` sur la branche. Mets-y : étapes faites, commits, compte des
+  `.fullrun/${OC_JOB}_DONE.md` sur la branche. Mets-y : étapes faites, commits, compte des
   tests, verdicts avec SHA, ISC cochés/total, ce qui reste et l'étape de reprise.
-- **Reprise.** Ce run peut être une relance. Avant d'agir, lis `.fullrun/$OC_JOB_DONE.md`
+- **Reprise.** Ce run peut être une relance. Avant d'agir, lis `.fullrun/${OC_JOB}_DONE.md`
   s'il existe et l'état de l'ISA sur la branche, puis reprends à la première étape non
   terminée au lieu de tout refaire.
 - Modèles : principal et Forge `$OC_MODEL_MAIN`, Max `$OC_MODEL_MAX` (gratuits opencode).

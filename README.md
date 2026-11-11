@@ -89,8 +89,8 @@ job (le workflow s'arrête à 350 min, opencode à 310 min pour laisser le temps
 interdits à l'IA), `opencode/ci-preamble.md` (contexte CI ajouté avant le prompt) et
 `opencode/run-fullrun.sh`. Les agents (Nix, Vera, Serena, Forge, Max…), commandes, plugin
 LifeOS et prompt Nix restent **privés** dans `LordThiouk/lifeos`, dossier `opencode/`
-(entrée `lifeos_ref`, défaut `ci/opencode-config-2026-11-11` tant que cette branche n'est
-pas mergée dans `lifeos/main`).
+(entrée `lifeos_ref`, défaut `main` : merger `lifeos` PR #3 avant le premier run, ou passer
+`lifeos_ref=ci/opencode-config-2026-11-11` en attendant).
 
 **Secrets à créer (Settings → Secrets → Actions)** — noms seulement, jamais dans un fichier :
 

@@ -34,7 +34,7 @@ on:
       lifeos_ref:
         description: "Branche de LordThiouk/lifeos (skills, agents, config opencode privée)"
         type: string
-        default: ci/opencode-config-2026-11-11
+        default: main
 
 permissions:
   contents: read
@@ -135,7 +135,7 @@ jobs:
           [ -d "$L/opencode/agent" ] || { echo "::error::lifeos@$IN_LIFEOS_REF sans dossier opencode/"; exit 1; }
           mkdir -p "$HOME/.claude" "$HOME/.config/opencode" "$HOME/.local/share/opencode-lifeos" \
                    "$HOME/.claude/LIFEOS/MEMORY/STATE"
-          rsync -a --exclude .git --exclude secrets --exclude opencode "$L/" "$HOME/.claude/"
+          rsync -a --exclude /.git --exclude /secrets --exclude /opencode "$L/" "$HOME/.claude/"
           cp "$L/settings.template.json" "$HOME/.claude/settings.json"
           (cd "$HOME/.claude" && bun install --silent >/dev/null 2>&1) || echo "::warning::bun install ~/.claude incomplet"
           C="$HOME/.config/opencode"
@@ -169,6 +169,7 @@ jobs:
         run: |
           set +x
           cd "$ANTENLY_DIR"
+          # shellcheck disable=SC2153 # IN_BRANCH vient de l'env du job
           [ "$(git rev-parse --abbrev-ref HEAD)" = "$IN_BRANCH" ] || git checkout -q -B "$IN_BRANCH" "origin/$IN_BRANCH"
           git config user.name "Nix"
           git config user.email "nix@antenly.local"
@@ -250,10 +251,27 @@ jobs:
           # Secrets : gitleaks sur les seuls commits du run, sortie jamais affichée.
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP" gitleaks
-          cfg=(); [ -f .gitleaks.toml ] && cfg=(--config .gitleaks.toml)
-          if ! "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --log-opts="$BASE_SHA..HEAD" --redact --no-banner \
+          # Config et ignores pris au SHA de départ : l'IA ne peut pas assouplir le contrôle.
+          cfg=()
+          if git cat-file -e "$BASE_SHA:.gitleaks.toml" 2>/dev/null; then
+            git show "$BASE_SHA:.gitleaks.toml" > "$OC_WORK/gitleaks.toml"; cfg=(--config "$OC_WORK/gitleaks.toml")
+          fi
+          mkdir -p "$OC_WORK/gl-ignore"
+          if git cat-file -e "$BASE_SHA:.gitleaksignore" 2>/dev/null; then
+            git show "$BASE_SHA:.gitleaksignore" > "$OC_WORK/gl-ignore/.gitleaksignore"
+          fi
+          if ! "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --gitleaks-ignore-path "$OC_WORK/gl-ignore" \
+                 --log-opts="$BASE_SHA..HEAD" --redact --no-banner \
                  --report-path "$OC_WORK/gitleaks.json" >/dev/null 2>&1; then
             echo "::error::gitleaks a trouvé un secret probable dans les commits du run : push refusé"; exit 1
+          fi
+          # Clé ISA (non détectable par gitleaks : 64 hex) : refus si elle apparaît dans un commit du run.
+          K="$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key"
+          if [ -s "$K" ]; then
+            git log -p --binary --format= "$BASE_SHA..HEAD" > "$OC_WORK/run.diff"
+            if grep -qiF -- "$(tr -d '\n' < "$K")" "$OC_WORK/run.diff"; then
+              echo "::error::la clé ISA apparaît dans les commits du run : push refusé"; exit 1
+            fi
           fi
           echo "commits=$(git rev-list --count "$BASE_SHA..HEAD")" >> "$GITHUB_OUTPUT"
           echo "Contrôles OK : $(git rev-list --count "$BASE_SHA..HEAD") commit(s) à pousser"
