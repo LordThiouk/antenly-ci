@@ -55,10 +55,13 @@ env:
   OPENCODE_VERSION: "1.19.4"
   BUN_VERSION: "1.4.4"
   GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   RIPGREP_VERSION: "14.1.1"
   RIPGREP_SHA256: "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e"
   RTK_VERSION: "1.2.0"
   RTK_SHA256: "70fee7b4a548c43dde94c77e2335550981b0bc2fb013691d8c8109b5bd0eda37"
+  AGE_VERSION: "1.2.1"
+  AGE_SHA256: "7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50"
 
 defaults:
   run:
@@ -172,6 +175,18 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/rtk" /usr/local/bin/rtk
           rtk --version
 
+      # Chiffrement du journal opencode quand les contrôles refusent le push : sans age, le
+      # journal disparaît avec le runner et personne ne sait ce que l'agent a fait.
+      - name: Installer age (épinglé, sha256 vérifié)
+        run: |
+          f="$RUNNER_TEMP/age.tgz"
+          curl -sSfL -o "$f" "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz"
+          echo "${AGE_SHA256}  $f" | sha256sum -c --quiet
+          tar -xzf "$f" -C "$RUNNER_TEMP" age/age age/age-keygen
+          sudo install -m 0755 "$RUNNER_TEMP/age/age" /usr/local/bin/age
+          sudo install -m 0755 "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/age-keygen
+          age --version
+
       - name: Reconstituer ~/.claude et ~/.config/opencode
         run: |
           set +x
@@ -244,6 +259,73 @@ jobs:
           cat "$p" >> "$OC_WORK/prompt.md"
           echo "Prompt prêt ($(wc -l < "$OC_WORK/prompt.md") lignes), base $(git rev-parse --short HEAD)"
 
+      # Avant opencode : gitleaks (épinglé, sha256 vérifié), les scripts de masquage, de chiffrement
+      # et du journal en direct, et le destinataire age sont copiés en root dans /opt/fullrun-tools.
+      # opencode ne peut plus les modifier (sans sudo) : les contrôles et l'artefact publié après le
+      # run s'appuient sur ces copies, pas sur $CI_DIR (modifiable par opencode).
+      - name: Outils de contrôle figés (root, avant opencode)
+        env:
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+          BASE_SHA: ${{ steps.prep.outputs.base }}
+        run: |
+          set +x
+          T=/opt/fullrun-tools; L=/opt/fullrun-live
+          f="$RUNNER_TEMP/gitleaks.tgz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c --quiet
+          mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$f" -C "$RUNNER_TEMP/gl" gitleaks
+          sudo install -d -o root -g root -m 0755 "$T" "$L"
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
+            "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" "$T/"
+          sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
+          rm -rf "$RUNNER_TEMP/gl" "$f"
+          # Config gitleaks d'antenly au SHA de départ (même règle que le contrôle avant push).
+          cd "$ANTENLY_DIR"
+          if git cat-file -e "$BASE_SHA:.gitleaks.toml" 2>/dev/null; then
+            git show "$BASE_SHA:.gitleaks.toml" | sudo tee "$T/gitleaks.toml" >/dev/null
+            sudo chmod 0644 "$T/gitleaks.toml"
+          fi
+          # Clé ISA pour le masquage du journal en direct : root, 0600.
+          printf '%s' "${ISA_STAMP_KEY:-}" | sudo sh -c 'umask 077; cat > /opt/fullrun-live/isa.key'
+          "$T/gitleaks" version
+          echo "Outils figés dans $T (root)"
+
+      # Journal en direct : un démon root pousse toutes les 10 min un instantané masqué du journal
+      # sur fullrun-logs/<job>-<run> d'antenly (privé) ; chiffré avec age si gitleaks y trouve encore
+      # un secret. Le jeton lui arrive sur stdin : il n'est ni dans l'environnement d'opencode, ni
+      # dans un fichier, ni dans une URL. Facultatif : un échec ici n'arrête jamais le run.
+      - name: Journal en direct (démon root, jeton hors d'opencode)
+        id: live
+        continue-on-error: true
+        env:
+          PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          OC_LOG: ${{ runner.temp }}/oc/opencode.log
+        run: |
+          set +x
+          T=/opt/fullrun-tools; L=/opt/fullrun-live
+          [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && "$RUN_ID" =~ ^[0-9]{1,20}$ ]] \
+            || { echo "::warning::job ou run invalide : pas de journal en direct"; exit 0; }
+          [ -n "${PUSH_TOKEN:-}" ] || { echo "::warning::ANTENLY_PUSH_TOKEN absent : pas de journal en direct"; exit 0; }
+          LOGB="fullrun-logs/${IN_JOB}-${RUN_ID}"
+          gcfg=""; [ -f "$T/gitleaks.toml" ] && gcfg="$T/gitleaks.toml"
+          # shellcheck disable=SC2024 # sortie d'état du démon dans un fichier du runner : voulu
+          printf '%s\n' "$PUSH_TOKEN" | sudo -n env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$L" \
+            LIVE_STATE="$L" LIVE_LOG="$OC_LOG" LIVE_JOB="$IN_JOB" LIVE_RUN="$RUN_ID" \
+            LIVE_GITLEAKS="$T/gitleaks" LIVE_GL_CONFIG="$gcfg" LIVE_ISA_KEY_FILE="$L/isa.key" \
+            LIVE_READ_UID="$(id -u)" LIVE_READ_GID="$(id -g)" LIVE_TOKEN_STDIN=1 \
+            setsid nice -n 10 "$T/livelog.sh" daemon > "$RUNNER_TEMP/live.out" 2>&1 &
+          ok=0
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            pid=$(sudo -n cat "$L/pid" 2>/dev/null || true)
+            if [[ "$pid" =~ ^[0-9]{1,9}$ ]] && sudo -n kill -0 "$pid" 2>/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { echo "::warning::démon du journal en direct non démarré : le run continue sans"; exit 0; }
+          echo "branch=$LOGB" >> "$GITHUB_OUTPUT"
+          echo "- Journal en direct : branche \`$LOGB\` d'antenly, instantané toutes les 10 min (chiffré si secret probable)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Journal en direct démarré → antenly@$LOGB"
+
       - name: opencode run (sortie jamais affichée, suivi filtré toutes les 10 min)
         id: oc
         continue-on-error: true
@@ -263,6 +345,7 @@ jobs:
           OC_POLL_SEC: "30"
           OC_KILL_GRACE: "60"
           OC_PROGRESS_INTERVAL: "600"
+          OC_LIVE_BRANCH: ${{ steps.live.outputs.branch }}
           BASE_SHA: ${{ steps.prep.outputs.base }}
         run: |
           set +x
@@ -274,8 +357,8 @@ jobs:
           # opencode doit être arrêté (grâce SIGINT et dernier sondage compris) avant plafond - marge.
           OC_DEADLINE_EPOCH=$(( t0 + (OC_JOB_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
           export OC_DEADLINE_EPOCH
-          "$CI_DIR/opencode/progress.sh" start || true
-          "$CI_DIR/opencode/progress.sh" loop & mon=$!
+          /opt/fullrun-tools/progress.sh start || true
+          /opt/fullrun-tools/progress.sh loop & mon=$!
           # opencode tourne dans sa propre session : une annulation (SIGINT/SIGTERM au step) est
           # relayée au moniteur, qui l'arrête proprement avant les steps de rapport et de push.
           "$CI_DIR/opencode/run-fullrun.sh" & runner=$!
@@ -294,7 +377,7 @@ jobs:
           esac
           echo "stop=$stop" >> "$GITHUB_OUTPUT"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          "$CI_DIR/opencode/progress.sh" once fin "$stop" || true
+          /opt/fullrun-tools/progress.sh once fin "$stop" || true
           echo "**Arrêt d'opencode : ${why}**" >> "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -eq 0 ]; then
             echo "opencode : terminé (code 0)"
@@ -334,13 +417,66 @@ jobs:
           # Filet : un opencode encore vivant (step interrompu) ne doit plus écrire pendant les contrôles.
           pkill -KILL -f '(^|[ /])opencode run ' 2>/dev/null || true
           cd "$ANTENLY_DIR"
+          # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age.
+          T=/opt/fullrun-tools; L=/opt/fullrun-live
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh log-recipient.txt; do
+            [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
+          done
+          # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.
+          ART="$RUNNER_TEMP/fullrun-artifact"; rm -rf "$ART"; mkdir -p "$ART"
           # Hooks et fsmonitor du dépôt neutralisés : l'IA a pu les écrire dans .git/config.
           G=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false)
+          mkdir -p "$OC_WORK"
+          # Fichiers de travail : jamais ceux qu'opencode aurait pu poser avant ce step.
+          rm -f "$OC_WORK/log.redacted" "$OC_WORK/gitleaks.json" "$OC_WORK/log.index" "$OC_WORK/run.diff"
+          # Journal en direct : démon arrêté (il finit l'instantané en cours) avant le journal de
+          # fin, qui se pose par-dessus son dernier commit (avance rapide, jamais de force).
+          live_tip=""; t=""
+          if pid=$(sudo -n cat "$L/pid" 2>/dev/null) && [[ "$pid" =~ ^[0-9]{1,9}$ ]]; then
+            sudo -n kill -TERM "$pid" 2>/dev/null || true
+            for _ in $(seq 1 75); do sudo -n kill -0 "$pid" 2>/dev/null || break; sleep 2; done
+            sudo -n kill -KILL "$pid" 2>/dev/null || true
+            t=$(sudo -n cat "$L/tip" 2>/dev/null | tr -dc '0-9a-f' || true)
+            if [[ "$t" =~ ^[0-9a-f]{40}$ ]] && [ -f "$L/live.bundle" ] \
+               && "${G[@]}" fetch -q --no-tags "$L/live.bundle" "+refs/heads/live:refs/fullrun-live/tip" >/dev/null 2>&1 \
+               && [ "$(git rev-parse -q --verify refs/fullrun-live/tip)" = "$t" ]; then
+              live_tip="$t"
+            fi
+            st=$(sudo -n cat "$L/status" 2>/dev/null || true)
+            echo "- Journal en direct : $(grep -c 'envoyé (clair)' <<<"$st") instantané(s) en clair, $(grep -c 'envoyé (chiffré)' <<<"$st") chiffré(s), $(grep -c 'envoi impossible\|non envoyé\|échec' <<<"$st") échec(s)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Clé ISA prise du secret (pas du fichier de $HOME, modifiable par l'IA).
+          K="$OC_WORK/isa-check.key"; ( umask 077; printf '%s' "${ISA_STAMP_KEY:-}" > "$K" )
+          trap 'rm -f "$K" "$OC_WORK/run.diff" "$OC_WORK/log.redacted" "$OC_WORK/log.index"' EXIT
+          # Journal masqué puis chiffré pour le destinataire age public : sans ça, le runner
+          # effacé emporte la seule trace du run quand gitleaks refuse le push. Jamais fatal.
+          archive_log() {
+            local reason="$1" red="$OC_WORK/log.redacted" f
+            [ -s "$OC_WORK/opencode.log" ] || return 0
+            if [ ! -s "$red" ]; then
+              OC_ISA_KEY_FILE="$K" "$T/redact-log.sh" "$OC_WORK/opencode.log" "$red" || return 0
+            fi
+            if f=$("$T/leaklog.sh" "$red" "$OC_WORK/gitleaks.json" "$IN_JOB" "$RUN_ID" "$ART" \
+                     "$reason" "$RUN_URL" "$IN_BRANCH" "$BASE_SHA"); then
+              echo "artifact=$(basename "$f")" >> "$GITHUB_OUTPUT"
+              echo "- Journal chiffré en artefact \`$(basename "$f")\` (age, rétention 7 j, jamais en clair)" >> "$GITHUB_STEP_SUMMARY"
+              echo "Journal chiffré : $(basename "$f")"
+            else
+              echo "::warning::chiffrement du journal impossible : artifact non publié"
+            fi
+          }
+          # fail_check <code> <message> : refuse le push, chiffre le journal, sort en échec.
+          fail_check() {
+            echo "reason=$1" >> "$GITHUB_OUTPUT"
+            archive_log "$1"
+            echo "::error::$2"
+            exit 1
+          }
           br=$(git rev-parse --abbrev-ref HEAD)
-          [ "$br" = "$IN_BRANCH" ] || { echo "::error::opencode a changé de branche : push refusé"; exit 1; }
-          git merge-base --is-ancestor "$BASE_SHA" HEAD || { echo "::error::historique réécrit depuis le SHA de départ : push refusé"; exit 1; }
+          [ "$br" = "$IN_BRANCH" ] || fail_check branche "opencode a changé de branche : push refusé"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD || fail_check historique "historique réécrit depuis le SHA de départ : push refusé"
           if git diff --name-only "$BASE_SHA" HEAD | grep -q '^\.github/workflows/'; then
-            echo "::error::modification de .github/workflows : push refusé"; exit 1
+            fail_check workflows "modification de .github/workflows : push refusé"
           fi
           # Travail non commité : conservé dans un commit explicite pour la reprise.
           if [ -n "$("${G[@]}" status --porcelain)" ]; then
@@ -353,16 +489,14 @@ jobs:
           LOGREL=".fullrun/logs/${IN_JOB}-${RUN_ID}.log"
           # Pas d'écriture à travers un lien symbolique posé par l'IA (ex. vers .git/config).
           for p in .fullrun "$R"; do
-            [ ! -L "$p" ] || { echo "::error::lien symbolique inattendu dans .fullrun : push refusé"; exit 1; }
+            [ ! -L "$p" ] || fail_check lien "lien symbolique inattendu dans .fullrun : push refusé"
           done
-          mkdir -p .fullrun "$OC_WORK"
-          # ISC pour la notification : nombres seulement, script lancé sans la clé ISA (avant son écriture sur disque).
+          mkdir -p .fullrun
+          # ISC pour la notification : nombres seulement, copie figée de progress.sh (pas celle de
+          # $CI_DIR, modifiable par opencode, alors que la clé ISA est déjà sur disque), sans la clé dans l'env.
           isc=$(env -u ISA_STAMP_KEY OC_LOG="$OC_WORK/opencode.log" OC_START=0 OC_PROMPT_FILE="$OC_WORK/prompt.md" \
-                OC_ISA_PATH="${OC_ISA_PATH:-}" BASE_SHA="$BASE_SHA" "$CI_DIR/opencode/progress.sh" isc 2>/dev/null | head -n1)
+                OC_ISA_PATH="${OC_ISA_PATH:-}" BASE_SHA="$BASE_SHA" "$T/progress.sh" isc 2>/dev/null | head -n1)
           [[ "$isc" =~ ^([0-9]{1,7}|\?)/([0-9]{1,7}|\?)$ ]] || isc="?/?"
-          # Clé ISA prise du secret (pas du fichier de $HOME, modifiable par l'IA).
-          K="$OC_WORK/isa-check.key"; ( umask 077; printf '%s' "${ISA_STAMP_KEY:-}" > "$K" )
-          trap 'rm -f "$K" "$OC_WORK/run.diff" "$OC_WORK/log.redacted" "$OC_WORK/log.index"' EXIT
           {
             echo "# Run CI $IN_JOB"
             echo
@@ -389,16 +523,17 @@ jobs:
           } > "$R"
           "${G[@]}" add -- "$R"
           "${G[@]}" commit -q -m "chore(ci): rapport du run $IN_JOB" || true
-          # Journal opencode complet (sans ANSI, jetons masqués, 5 Mo max) : un seul commit orphelin
-          # (sans parent) sur $LOGB, construit hors de l'arbre de travail.
+          # Journal opencode complet (sans ANSI, jetons masqués, 5 Mo max) : un commit sur $LOGB,
+          # construit hors de l'arbre de travail ; parent = dernier instantané en direct s'il y en a
+          # (le journal de fin remplace le fichier), sinon commit orphelin.
           log_state="absent"; log_sha=""
-          if [ -s "$OC_WORK/opencode.log" ] && OC_ISA_KEY_FILE="$K" "$CI_DIR/opencode/redact-log.sh" "$OC_WORK/opencode.log" "$OC_WORK/log.redacted"; then
+          if [ -s "$OC_WORK/opencode.log" ] && OC_ISA_KEY_FILE="$K" "$T/redact-log.sh" "$OC_WORK/opencode.log" "$OC_WORK/log.redacted"; then
             rm -f "$OC_WORK/log.index"
             if blob=$("${G[@]}" hash-object -w --no-filters "$OC_WORK/log.redacted") \
                && GIT_INDEX_FILE="$OC_WORK/log.index" "${G[@]}" update-index --add --cacheinfo "100644,$blob,$LOGREL" \
                && tree=$(GIT_INDEX_FILE="$OC_WORK/log.index" "${G[@]}" write-tree) \
                && log_sha=$(GIT_AUTHOR_NAME=Nix GIT_AUTHOR_EMAIL=nix@antenly.local GIT_COMMITTER_NAME=Nix \
-                    GIT_COMMITTER_EMAIL=nix@antenly.local "${G[@]}" commit-tree "$tree" \
+                    GIT_COMMITTER_EMAIL=nix@antenly.local "${G[@]}" commit-tree "$tree" ${live_tip:+-p "$live_tip"} \
                     -m "chore(ci): journal opencode du run $IN_JOB ($RUN_ID) — branche à supprimer après lecture") \
                && "${G[@]}" update-ref "refs/heads/$LOGB" "$log_sha"; then
               log_state="prêt"
@@ -406,9 +541,13 @@ jobs:
               log_sha=""; echo "::warning::commit du journal impossible : journal non poussé"
             fi
           fi
-          # Secrets : gitleaks sur les seuls commits du run, sortie jamais affichée.
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP" gitleaks
+          # Instantanés en direct poussés mais chaîne illisible ici : le journal de fin ne pourra pas
+          # s'y poser sans force ; il part aussi chiffré en artefact pour ne pas être perdu.
+          if [[ "$t" =~ ^[0-9a-f]{40}$ ]] && [ -z "$live_tip" ]; then
+            echo "::warning::chaîne du journal en direct illisible : journal de fin aussi chiffré en artefact"
+            archive_log journal-direct
+          fi
+          # Secrets : gitleaks (copie figée avant opencode) sur les seuls commits du run, sortie jamais affichée.
           # Config et ignores pris au SHA de départ : l'IA ne peut pas assouplir le contrôle.
           cfg=()
           if git cat-file -e "$BASE_SHA:.gitleaks.toml" 2>/dev/null; then
@@ -430,7 +569,7 @@ jobs:
           # scan <branche> <sha attendu> <plage> : 0 = propre, 1 = gitleaks, 2 = clé ISA, 3 = copie impossible.
           scan() {
             snap "$1" "$2" || return 3
-            "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --gitleaks-ignore-path "$OC_WORK/gl-ignore" \
+            "$T/gitleaks" git "${cfg[@]}" --gitleaks-ignore-path "$OC_WORK/gl-ignore" \
               --log-opts="$3" --redact --no-banner \
               --report-path "$OC_WORK/gitleaks.json" "$S" >/dev/null 2>&1 || return 1
             if [ -s "$K" ]; then
@@ -443,13 +582,23 @@ jobs:
             case "$1" in 2) echo "la clé ISA apparaît" ;; 3) echo "copie de contrôle impossible" ;; *) echo "gitleaks a trouvé un secret probable" ;; esac
           }
           src=0; scan "$IN_BRANCH" "$(git rev-parse HEAD)" "$BASE_SHA..refs/heads/$IN_BRANCH" || src=$?
-          [ "$src" -eq 0 ] || { echo "::error::$(why "$src") dans les commits du run : push refusé"; exit 1; }
+          if [ "$src" -ne 0 ]; then
+            case "$src" in
+              2) fail_check cle "la clé ISA apparaît dans les commits du run : push refusé" ;;
+              3) fail_check copie "copie de contrôle impossible : push refusé" ;;
+              *) fail_check gitleaks "gitleaks a trouvé un secret probable dans les commits du run : push refusé" ;;
+            esac
+          fi
           if [ -n "$log_sha" ]; then
-            src=0; scan "$LOGB" "$log_sha" "refs/heads/$LOGB" || src=$?
+            # Seul le journal de fin est examiné : les instantanés en direct l'ont été avant envoi.
+            rng="refs/heads/$LOGB"; [ -n "$live_tip" ] && rng="$live_tip..refs/heads/$LOGB"
+            src=0; scan "$LOGB" "$log_sha" "$rng" || src=$?
             if [ "$src" -ne 0 ]; then
               git update-ref -d "refs/heads/$LOGB" 2>/dev/null || true
               log_sha=""; log_state="retiré (contrôle anti-secrets)"
               echo "::warning::$(why "$src") dans le journal : journal non poussé (le travail l'est)"
+              # Le journal ne part pas sur la branche : il part chiffré, sinon il est perdu.
+              if [ "$src" -eq 2 ]; then archive_log journal-cle; else archive_log journal-gitleaks; fi
             fi
           fi
           {
@@ -461,6 +610,18 @@ jobs:
           lb=""; [ -n "$log_sha" ] && lb=" → branche \`$LOGB\` (antenly, à supprimer après lecture)"
           echo "- Journal opencode privé : ${log_state}${lb}" >> "$GITHUB_STEP_SUMMARY"
           echo "Contrôles OK : $(git rev-list --count "$BASE_SHA..HEAD") commit(s) à pousser ; journal ${log_state}"
+
+      # Seul l'archive chiffrée sort du runner : le journal en clair ne quitte jamais la machine.
+      # Publier même quand le step de contrôle a échoué (c'est justement le cas qui la produit).
+      - name: Publier le journal chiffré (artefact 7 jours)
+        if: always() && steps.check.outputs.artifact != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.check.outputs.artifact }}
+          path: ${{ runner.temp }}/fullrun-artifact/${{ steps.check.outputs.artifact }}
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
 
       - name: Push sur la branche de fonctionnalité (jamais main, jamais force) et journal à part
         id: push
@@ -520,7 +681,8 @@ jobs:
           else
             echo "::error::push refusé (branche avancée ailleurs, ou jeton sans droit) : rien n'a été forcé"
           fi
-          # Journal : nouvelle branche dédiée (un commit orphelin). Si elle existe déjà, refus (pas de force).
+          # Journal : branche dédiée. Créée par les instantanés en direct, le journal de fin s'y pose
+          # par-dessus (avance rapide) ; si elle a bougé autrement, refus (jamais de force).
           logp=""
           if [[ "$LOG_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             if copie "$LOGB" "$LOG_SHA" && pousse "$LOG_SHA" "$LOGB"; then
@@ -572,6 +734,9 @@ jobs:
           OC_MODEL_MAIN: ${{ inputs.model_main }}
           PUSH_OUTCOME: ${{ steps.push.outcome }}
           LOG_BRANCH: ${{ steps.push.outputs.log_branch }}
+          LIVE_BRANCH: ${{ steps.live.outputs.branch }}
+          CHECK_REASON: ${{ steps.check.outputs.reason }}
+          LOG_ARTIFACT: ${{ steps.check.outputs.artifact }}
           HEAD_SHA: ${{ steps.check.outputs.head }}
           ISC: ${{ steps.check.outputs.isc }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -596,14 +761,24 @@ jobs:
             *) status="échec"; why="opencode non lancé ou interrompu" ;;
           esac
           if [ "$JOB_STATUS" = cancelled ] && [ "$status" != "annulé" ]; then status="annulé"; why="annulé ($why)"; fi
+          if [ "${CHECK_REASON:-}" = gitleaks ]; then
+            status="bloqué"
+            if [ -n "${LOG_ARTIFACT:-}" ]; then why="bloqué par gitleaks, journal chiffré en artefact"
+            else why="bloqué par gitleaks, journal chiffré impossible"; fi
+          fi
           [ "$JOB_STATUS" = success ] || [ "$status" != fini ] || { status="échec"; why="terminé, mais contrôles ou push en échec"; }
           now=$(date +%s); t0="$OC_JOB_T0"
           [[ "$t0" =~ ^[0-9]{9,11}$ && "$t0" -le "$now" ]] && dur=$(( now - t0 )) || dur=0
           [[ "$OC_RC" =~ ^[0-9]{1,3}$ ]] || OC_RC="?"
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$PUSH_OUTCOME" = success ]] && sha="${HEAD_SHA:0:7}" || sha="aucun"
           [[ "$ISC" =~ ^([0-9]{1,7}|\?)/([0-9]{1,7}|\?)$ ]] || ISC="?/?"
-          [[ "$LOG_BRANCH" =~ ^fullrun-logs/[A-Za-z0-9._-]{1,90}$ ]] || LOG_BRANCH="aucun"
-          tail="exit=${OC_RC} · raison=${why} · sha poussé=${sha} · journal=${LOG_BRANCH} · ISC ${ISC} · modèle ${OC_MODEL_MAIN} · run ${RUN_URL}"
+          if ! [[ "$LOG_BRANCH" =~ ^fullrun-logs/[A-Za-z0-9._-]{1,90}$ ]]; then
+            # Journal de fin non poussé : la branche du journal en direct reste lisible.
+            if [[ "${LIVE_BRANCH:-}" =~ ^fullrun-logs/[A-Za-z0-9._-]{1,90}$ ]]; then LOG_BRANCH="${LIVE_BRANCH} (direct seulement)"
+            else LOG_BRANCH="aucun"; fi
+          fi
+          [[ "$LOG_ARTIFACT" =~ ^fullrun-log-[A-Za-z0-9._-]{1,80}\.age$ ]] || LOG_ARTIFACT="aucun"
+          tail="exit=${OC_RC} · raison=${why} · sha poussé=${sha} · journal=${LOG_BRANCH} · artefact=${LOG_ARTIFACT} · ISC ${ISC} · modèle ${OC_MODEL_MAIN} · run ${RUN_URL}"
           id=$(printf '%s:%s:%s:%s' "$IN_JOB" "$RUN_ID" "$RUN_ATTEMPT" "$status" | sha256sum | cut -d' ' -f1)
           body="$RUNNER_TEMP/notify.json"
           jq -nc --arg job "$IN_JOB" --arg status "$status" --argjson duration "$dur" --arg log_tail "$tail" \

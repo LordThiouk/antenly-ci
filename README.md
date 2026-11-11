@@ -173,15 +173,16 @@ Une annulation du run est relayée au moniteur, qui arrête opencode avant les s
 
 **Journal complet (privé, branche à part).** À la fin, même si opencode a échoué, a été arrêté ou
 le run annulé, le log opencode est poussé sur une **branche dédiée** d'`antenly`,
-`fullrun-logs/<job>-<run_id>` : un seul commit orphelin (sans parent) contenant
-`.fullrun/logs/<job>-<run_id>.log`. Il ne va **jamais** sur la branche de travail (seul le rapport
+`fullrun-logs/<job>-<run_id>` : un commit contenant `.fullrun/logs/<job>-<run_id>.log`, posé
+par-dessus le dernier instantané du journal en direct (voir plus bas), ou orphelin s'il n'y en a pas. Il ne va **jamais** sur la branche de travail (seul le rapport
 `.fullrun/<job>_DONE.md` y va, avec le nom de la branche de journal). Avant : codes ANSI retirés ;
 jetons `ghp_`/`github_pat_`/`hf_`/`sk-`/AWS/Slack/JWT, en-têtes `Authorization`, identifiants d'URL,
 clé ISA et toute valeur de 64 hex masqués ; au-delà de 5 Mo, début et fin gardés avec une mention de
 troncature. Ce commit passe les mêmes contrôles que le travail (gitleaks avec la config du SHA de
 départ, recherche de la clé ISA, dans un dépôt nu neuf) : s'il est signalé, seul le journal n'est pas
-poussé (le Summary affiche « retiré ») ; le travail, lui, est poussé s'il est propre. La branche est
-créée sans force : si elle existe déjà, le journal n'est pas poussé (avertissement). Le nom de la
+poussé (le Summary affiche « retiré ») et part chiffré en artefact (voir plus bas) ; le travail, lui,
+est poussé s'il est propre. Jamais de force : si la branche a bougé autrement que par le journal en
+direct, le journal n'est pas poussé (avertissement). Le nom de la
 branche est dans le Summary, le rapport et la notification.
 
 Lire : GitHub → `antenly` → branche `fullrun-logs/…`. **À supprimer après lecture** (par Papa) :
@@ -190,12 +191,59 @@ Lire : GitHub → `antenly` → branche `fullrun-logs/…`. **À supprimer aprè
 git push origin --delete fullrun-logs/<job>-<run_id>
 ```
 
+**Journal en direct (privé, pendant le run).** Toutes les 10 min (même rythme que les lignes
+`[suivi]`), un instantané du journal opencode est poussé sur la même branche
+`fullrun-logs/<job>-<run_id>` d'`antenly` (privé) : un commit normal qui remplace le fichier, jamais
+sur la branche de travail ni sur main, jamais de force. La première ligne `[suivi]` l'annonce
+(`· journal en direct : fullrun-logs/<job>-<run_id>`). Chaque instantané passe par
+`redact-log.sh`, puis par gitleaks en mode fichier (`dir --redact`, config d'`antenly` au SHA de
+départ) et la recherche de la clé ISA : si quelque chose est trouvé, l'instantané part **chiffré**
+(`.fullrun/logs/<job>-<run_id>.age`, archive age : journal + rapport) au lieu du clair. Un échec
+d'envoi ne touche pas le run : 2 essais de 60 s au plus, puis on passe au prochain instantané (qui
+rattrape le manqué). Le journal de fin se pose ensuite par-dessus, sans conflit.
+
+Le pousseur (`opencode/livelog.sh daemon`) est lancé **avant** opencode, en root, avec ses outils
+copiés en root dans `/opt/fullrun-tools` (gitleaks épinglé et vérifié, scripts, destinataire age).
+Le jeton `ANTENLY_PUSH_TOKEN` lui arrive sur l'entrée standard : il n'est ni dans l'environnement
+d'opencode, ni dans un fichier, ni dans une URL, ni à l'écran ; il ne passe à `git push` que par
+l'environnement de ce process root (en-tête `http.extraheader`, comme le step push). Le journal
+brut est lu avec les droits de l'utilisateur du run (un lien posé par opencode vers un fichier root
+est refusé). Le step de contrôle arrête le démon (il finit l'instantané en cours) avant le journal
+de fin ; le Summary donne le nombre d'instantanés en clair, chiffrés et en échec.
+
+**Journal chiffré quand un contrôle refuse le push.** Si gitleaks (ou un autre contrôle avant push :
+clé ISA, branche, historique, workflows, lien symbolique) échoue, les commits ne sont **pas** poussés
+— comportement inchangé, le step reste en échec — mais le journal opencode masqué et le rapport
+gitleaks (réduit à fichier, lignes, règle, commit : jamais la valeur) sont chiffrés avec `age` pour
+la clé publique `opencode/log-recipient.txt`, puis publiés en artefact `fullrun-log-<job>-<run>.age`
+(rétention 7 jours). Même chose quand seul le journal de fin est refusé par gitleaks. Seule
+l'archive chiffrée sort du runner (en-tête age vérifié avant publication) : le journal en clair
+n'est jamais publié. age est épinglé (version + sha256 vérifié, comme ripgrep et rtk).
+
+Déchiffrement sur la box (la clé privée reste dans `~/.config/age/`, jamais dans ce dépôt) :
+
+```bash
+# artefact d'un run bloqué
+gh run download <run_id> -R LordThiouk/antenly-ci -n fullrun-log-<job>-<run_id>.age -D log
+mkdir -p journal && age -d -i ~/.config/age/fullrun-logs.key log/fullrun-log-<job>-<run_id>.age | tar -xz -C journal/
+# instantané en direct chiffré (branche fullrun-logs/<job>-<run_id> d'antenly)
+git show origin/fullrun-logs/<job>-<run_id>:.fullrun/logs/<job>-<run_id>.age \
+  | age -d -i ~/.config/age/fullrun-logs.key | tar -xz -C journal/
+```
+
+`journal/` contient `opencode.log`, `gitleaks.json` (quand il y en a un) et `meta.txt`. La
+notification de fin annonce alors `bloqué par gitleaks, journal chiffré en artefact` et le nom de
+l'artefact (`artefact=…`).
+
+Tests locaux (sans réseau réel, sauf téléchargement de gitleaks s'il manque) :
+`opencode/tests/leaklog-test.sh` et `opencode/tests/livelog-test.sh`.
+
 **Notification de fin.** Dernier step, toujours exécuté (fin, échec, blocage, annulation) : POST au
 webhook opencode-notify, même format que `oc-run` sur la box (`job`, `status` = `fini` / `échec` /
 `bloqué` / `annulé`, `duration` en secondes réelles depuis le début du job, `pr_url` vide,
 `log_tail`, `event_id`, `run_id`, en-têtes `Authorization: Bearer`, `X-Automation-Key`,
 `Idempotency-Key`). `log_tail` est neutre : code de sortie, raison d'arrêt, SHA poussé, branche de
-journal, ISC cochés/total, modèle et URL du run ; jamais de texte du modèle. URL et clé passent à
+journal, artefact chiffré éventuel, ISC cochés/total, modèle et URL du run ; jamais de texte du modèle. URL et clé passent à
 curl par l'entrée standard (jamais en argument ni à l'écran). Trois essais au plus (10 s puis 20 s
 d'attente) ; un échec de notification ne change pas le résultat du job.
 
@@ -210,15 +258,20 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 
 **Risques connus.**
 - Tout ce qui s'affiche dans le log est public : ne jamais ajouter `cat`/`tee` du log
-  opencode ni `actions/upload-artifact` à ce workflow. Le suivi n'affiche que des valeurs de
+  opencode, ni `actions/upload-artifact` d'autre chose que l'archive `.age` (artefacts publics). Le suivi n'affiche que des valeurs de
   liste blanche ; ajouter un champ à `progress.sh` = le filtrer de la même façon.
-- Le journal privé est sur une branche `fullrun-logs/…` d'`antenly` (jusqu'à 5 Mo par run) tant
-  qu'elle n'est pas supprimée ; le masquage est un filet en plus de gitleaks, pas une garantie : un
+- Le journal privé est sur une branche `fullrun-logs/…` d'`antenly` (jusqu'à 5 Mo par instantané,
+  un commit toutes les 10 min) tant qu'elle n'est pas supprimée ; le masquage est un filet en plus de gitleaks, pas une garantie : un
   secret de forme inconnue peut y rester. Supprimer la branche après lecture.
 - Le garde-fou de silence mesure l'activité réelle (journal, CPU de l'arbre opencode, fichiers de
   session) : un opencode qui écrit en boucle sans avancer, ou un outil qui consomme du CPU sans
   progresser, n'est pas « silencieux » (seul le plafond l'arrête). Un run dont l'arbre entier dort
   plus de `idle_minutes` est arrêté : monter `idle_minutes` si besoin.
+- Sur les runners GitHub, opencode a `sudo` sans mot de passe : les copies root (`/opt/fullrun-tools`,
+  démon du journal en direct) protègent contre une modification par erreur ou opportuniste, pas
+  contre un agent qui userait délibérément de `sudo` pour lire la mémoire du démon. Comme pour les
+  autres secrets du job, la vraie barrière reste le jeton à droits minimaux (contenu d'`antenly`
+  seulement) et la protection de `main`.
 - Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
   `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
   push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui

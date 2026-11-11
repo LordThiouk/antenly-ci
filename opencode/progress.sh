@@ -3,6 +3,7 @@
 # N'émet que des valeurs filtrées : heure, durée, phase et agent pris dans une liste blanche,
 # compteurs numériques, booléen 429. Jamais de texte du modèle, de chemin ni de code ; tout
 # ce qui ne passe pas le filtre devient « ? ».
+# OC_LIVE_BRANCH (facultatif) : branche du journal en direct, citée sur la première ligne.
 #   progress.sh start | once [fin [ok|silence|plafond|erreur|annulation]] | loop | isc
 set +x
 set -uo pipefail
@@ -90,7 +91,7 @@ line() {
   phase=$(pick "${phase:-}" "$PHASES"); agent=$(pick "${agent:-}" "$AGENTS")
   ok=$(num "$ok"); total=$(num "$total"); commits=$(num "$commits"); el=$(num "$el"); idle=$(num "$idle")
   if [ "$tag" = fin ]; then tag="fin${why:+ : $why} · "; else tag=""; fi
-  echo "[suivi] ${tag}${now} Dakar · +${el} min · phase ${phase} · agent ${agent} · ISC ${ok}/${total} · commits ${commits} · silence ${idle} min · 429/limite ${lim}"
+  echo "[suivi] ${tag}${now} Dakar · +${el} min · phase ${phase} · agent ${agent} · ISC ${ok}/${total} · commits ${commits} · silence ${idle} min · 429/limite ${lim}${LIVE_NOTE:-}"
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] && \
     echo "| ${tag}${now} | ${el} | ${idle} | ${phase} | ${agent} | ${ok}/${total} | ${commits} | ${lim} |" >> "$GITHUB_STEP_SUMMARY"
   return 0
@@ -103,6 +104,9 @@ case "${1:-}" in
         echo "| heure (Dakar) | min | silence (min) | phase | dernier agent | ISC cochés | commits | 429/limite |"
         echo "|---|---|---|---|---|---|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
     fi
+    # Première ligne seulement : où lire le journal en direct (nom de branche filtré).
+    LIVE_NOTE=""
+    [[ "${OC_LIVE_BRANCH:-}" =~ ^fullrun-logs/[A-Za-z0-9._-]{1,90}$ ]] && LIVE_NOTE=" · journal en direct : ${OC_LIVE_BRANCH}"
     line ;;
   once) line "${2:-}" "${3:-}" ;;
   isc) isc; echo ;;
