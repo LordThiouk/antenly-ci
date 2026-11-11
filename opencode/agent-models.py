@@ -23,3 +23,12 @@ errs = c.execute("""select distinct coalesce(json_extract(m.data,'$.agent'),'?')
 if errs:
     print("\n### Erreurs de messages\n")
     for a, e in errs: print(f"- {a} : {e}")
+# Diagnostic des arrêts prématurés : derniers textes de l'agent principal (tronqués).
+last = c.execute("""select substr(json_extract(p.data,'$.text'),1,600) from part p join session s on s.id=p.session_id
+  where s.parent_id is null and json_extract(p.data,'$.type')='text' and json_extract(p.data,'$.synthetic') is not 1
+  and p.message_id in (select id from message where json_extract(data,'$.role')='assistant')
+  order by p.time_created desc limit 3""").fetchall()
+if last:
+    print("\n### Derniers messages de l'agent principal (600 car. max, du plus récent au plus ancien)\n")
+    for (t,) in last:
+        print("> " + (t or "").replace("\n", "\n> ") + "\n")

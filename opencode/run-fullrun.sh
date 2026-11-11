@@ -25,4 +25,18 @@ if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$(remaining)" -gt 600 ] \
   rc=$?
   echo "fallback_rc=$rc" >>"$OC_LOG.status"
 fi
+# Fin de tour prématurée : le modèle s'arrête (code 0) sans avoir écrit le rapport final.
+# Relance la même session tant que le rapport manque, dans la limite du temps et de OC_MAX_CONTINUE.
+n=0
+while [ "$rc" -eq 0 ] && [ ! -s "${OC_REPORT:-/nonexistent}" ] && [ "$n" -lt "${OC_MAX_CONTINUE:-6}" ] \
+      && [ "$(remaining)" -gt 300 ]; do
+  n=$((n+1))
+  model="$OC_MODEL_MAIN"; grep -q '^fallback=1' "$OC_LOG.status" && model="$OC_MODEL_FALLBACK"
+  timeout --signal=INT --kill-after=60 "$(remaining)" \
+    opencode run --continue --model "$model" \
+    "Tu t'es arrêté avant la fin : le rapport final n'est pas écrit dans $OC_REPORT. Personne ne répondra à une question. Reprends à la première étape non terminée du prompt initial et va jusqu'au bout, rapport compris." \
+    >>"$OC_LOG" 2>&1
+  rc=$?
+  echo "continue_${n}_rc=$rc" >>"$OC_LOG.status"
+done
 exit "$rc"
