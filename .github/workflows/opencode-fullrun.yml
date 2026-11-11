@@ -186,6 +186,7 @@ jobs:
           echo "Clé ISA écrite (0600)"
 
       - name: Préparer le dépôt antenly et le prompt
+        id: prep
         run: |
           set +x
           cd "$ANTENLY_DIR"
@@ -197,7 +198,8 @@ jobs:
           printf '#!/bin/sh\necho "push interdit pendant le run opencode" >&2\nexit 1\n' > .git/hooks/pre-push
           chmod +x .git/hooks/pre-push
           mkdir -p "$OC_WORK"
-          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          # SHA de départ en sortie de step : opencode peut écrire dans $GITHUB_ENV, pas ici.
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           src="${IN_PROMPT%%:*}"; rel="${IN_PROMPT#*:}"
           if [ "$src" = antenly ]; then root="$ANTENLY_DIR"; else root="$CI_DIR"; fi
           p=$(realpath -e "$root/$rel" 2>/dev/null) || { echo "::error::prompt introuvable"; exit 1; }
@@ -221,6 +223,7 @@ jobs:
           OC_LOG: ${{ runner.temp }}/oc/opencode.log
           OC_DEADLINE_MIN: "310"
           OC_PROGRESS_INTERVAL: "600"
+          BASE_SHA: ${{ steps.prep.outputs.base }}
         run: |
           set +x
           # Suivi : lignes [suivi] à valeurs filtrées (liste blanche / nombres), jamais le log lui-même.
@@ -239,12 +242,29 @@ jobs:
 
       - name: Rapport, journal privé et contrôles avant push
         id: check
-        if: always() && env.BASE_SHA != ''
+        if: always() && steps.prep.outputs.base != ''
         env:
           OC_OUTCOME: ${{ steps.oc.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Valeurs du step > $GITHUB_ENV : opencode ne peut ni changer la branche, ni la base,
+          # ni injecter BASH_ENV / LD_PRELOAD dans les steps de contrôle et de push.
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_JOB: ${{ inputs.job_name }}
+          BASE_SHA: ${{ steps.prep.outputs.base }}
+          OC_WORK: ${{ runner.temp }}/oc
+          ANTENLY_DIR: ${{ github.workspace }}/antenly
+          CI_DIR: ${{ github.workspace }}/ci
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
         run: |
           set +x
+          # PATH fixe : $GITHUB_PATH (écrit par opencode) ne doit pas remplacer git, grep, curl…
+          export PATH=/usr/local/bin:/usr/bin:/bin
           cd "$ANTENLY_DIR"
           # Hooks et fsmonitor du dépôt neutralisés : l'IA a pu les écrire dans .git/config.
           G=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false)
@@ -265,7 +285,10 @@ jobs:
           for p in .fullrun .fullrun/logs "$R" "$LOGREL"; do
             [ ! -L "$p" ] || { echo "::error::lien symbolique inattendu dans .fullrun : push refusé"; exit 1; }
           done
-          mkdir -p .fullrun/logs
+          mkdir -p .fullrun/logs "$OC_WORK"
+          # Clé ISA prise du secret (pas du fichier de $HOME, modifiable par l'IA).
+          K="$OC_WORK/isa-check.key"; ( umask 077; printf '%s' "${ISA_STAMP_KEY:-}" > "$K" )
+          trap 'rm -f "$K" "$OC_WORK/run.diff"' EXIT
           {
             echo "# Run CI $IN_JOB"
             echo
@@ -287,7 +310,7 @@ jobs:
           # Journal opencode complet (sans ANSI, jetons masqués, 5 Mo max), commité en DERNIER :
           # il passe les mêmes contrôles que le reste et peut être retiré seul s'il est signalé.
           log_state="absent"; log_commit=""
-          if [ -s "$OC_WORK/opencode.log" ] && "$CI_DIR/opencode/redact-log.sh" "$OC_WORK/opencode.log" "$LOGREL"; then
+          if [ -s "$OC_WORK/opencode.log" ] && OC_ISA_KEY_FILE="$K" "$CI_DIR/opencode/redact-log.sh" "$OC_WORK/opencode.log" "$LOGREL"; then
             "${G[@]}" add -f -- "$LOGREL"
             if "${G[@]}" commit -q -m "chore(ci): journal opencode du run $IN_JOB ($GITHUB_RUN_ID)"; then
               log_commit=$(git rev-parse HEAD); log_state="commité"
@@ -305,19 +328,29 @@ jobs:
           if git cat-file -e "$BASE_SHA:.gitleaksignore" 2>/dev/null; then
             git show "$BASE_SHA:.gitleaksignore" > "$OC_WORK/gl-ignore/.gitleaksignore"
           fi
-          K="$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key"
+          # Scan dans un dépôt nu neuf : ni .git/config ni attributs du run (diff.external,
+          # textconv…) ne peuvent masquer un contenu à gitleaks ou à la recherche de la clé.
+          S="$RUNNER_TEMP/scan.git"
+          snap() {
+            rm -rf "$S" && git init -q --bare "$S" \
+              && git -C "$S" fetch -q --no-tags "file://$ANTENLY_DIR" "+refs/heads/$IN_BRANCH:refs/heads/$IN_BRANCH" >/dev/null 2>&1 \
+              && [ "$(git -C "$S" rev-parse "refs/heads/$IN_BRANCH")" = "$(git rev-parse HEAD)" ]
+          }
           # 0 = propre, 1 = gitleaks, 2 = clé ISA (64 hex, non détectable par gitleaks).
           scan() {
+            snap || return 3
             "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --gitleaks-ignore-path "$OC_WORK/gl-ignore" \
-              --log-opts="$BASE_SHA..HEAD" --redact --no-banner \
-              --report-path "$OC_WORK/gitleaks.json" >/dev/null 2>&1 || return 1
+              --log-opts="$BASE_SHA..refs/heads/$IN_BRANCH" --redact --no-banner \
+              --report-path "$OC_WORK/gitleaks.json" "$S" >/dev/null 2>&1 || return 1
             if [ -s "$K" ]; then
-              git log -p --binary --format= "$BASE_SHA..HEAD" > "$OC_WORK/run.diff"
+              git -C "$S" log -p --binary --no-ext-diff --no-textconv --format= "$BASE_SHA..refs/heads/$IN_BRANCH" > "$OC_WORK/run.diff"
               if grep -qiF -- "$(tr -d '\n' < "$K")" "$OC_WORK/run.diff"; then return 2; fi
             fi
             return 0
           }
-          why() { [ "$1" = 2 ] && echo "la clé ISA apparaît" || echo "gitleaks a trouvé un secret probable"; }
+          why() {
+            case "$1" in 2) echo "la clé ISA apparaît" ;; 3) echo "copie de contrôle impossible" ;; *) echo "gitleaks a trouvé un secret probable" ;; esac
+          }
           src=0; scan || src=$?
           if [ "$src" -ne 0 ]; then
             if [ -n "$log_commit" ] && [ "$(git rev-parse HEAD)" = "$log_commit" ]; then
@@ -343,13 +376,25 @@ jobs:
         env:
           PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
           HEAD_SHA: ${{ steps.check.outputs.head }}
+          IN_BRANCH: ${{ inputs.branch }}
+          ANTENLY_DIR: ${{ github.workspace }}/antenly
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
         run: |
           set +x
-          case "${IN_BRANCH,,}" in main|master) echo "::error::push vers main/master refusé"; exit 1 ;; esac
+          export PATH=/usr/bin:/bin
+          # Mêmes règles que la garde d'entrée, revérifiées ici (la valeur vient de l'entrée, pas de $GITHUB_ENV).
+          [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "::error::branche invalide : push refusé"; exit 1; }
+          case "${IN_BRANCH,,}" in
+            main|master|head|refs/*|*..*|*/|*.lock) echo "::error::branche interdite : push refusé"; exit 1 ;;
+          esac
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA contrôlé absent : push refusé"; exit 1; }
           [ -n "${PUSH_TOKEN:-}" ] || { echo "::error::secret ANTENLY_PUSH_TOKEN absent (acte Papa requis)"; exit 1; }
           # Push depuis un dépôt nu neuf : ni .git/config ni ~/.gitconfig (écrits par l'IA) ne s'appliquent.
-          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
           B="$RUNNER_TEMP/push.git"; rm -rf "$B"
           env -u PUSH_TOKEN git init -q --bare "$B"
           env -u PUSH_TOKEN git -C "$B" -c protocol.file.allow=always fetch -q --no-tags \
@@ -359,9 +404,13 @@ jobs:
             || { echo "::error::la branche a bougé après les contrôles : push refusé"; exit 1; }
           auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
-          if git -C "$B" -c core.hooksPath=/dev/null \
-               -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-               push --no-verify --porcelain "https://github.com/LordThiouk/antenly.git" \
+          # En-tête passé par l'environnement de git seul (pas en argument visible dans ps), env vidé
+          # des proxys / GIT_* qu'opencode aurait pu poser via $GITHUB_ENV.
+          if env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+               GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
+               GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+               GIT_CONFIG_KEY_1=http.https://github.com/.extraheader GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $auth" \
+               /usr/bin/git -C "$B" push --no-verify --porcelain "https://github.com/LordThiouk/antenly.git" \
                "$HEAD_SHA:refs/heads/$IN_BRANCH" >/dev/null 2>&1; then
             echo "Push OK : antenly@$IN_BRANCH → ${HEAD_SHA:0:7}"
           else

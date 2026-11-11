@@ -167,9 +167,17 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   liste blanche ; ajouter un champ à `progress.sh` = le filtrer de la même façon.
 - Le journal privé reste dans l'historique d'`antenly` (jusqu'à 5 Mo par run) ; le masquage est
   un filet en plus de gitleaks, pas une garantie : un secret de forme inconnue peut y rester.
-- opencode a `sudo` sur le runner : il pourrait en théorie modifier les outils (git, curl) utilisés
-  par les steps suivants. Le push se fait depuis un dépôt nu neuf, sans `.git/config` ni
-  `~/.gitconfig` du run, et vérifie le SHA contrôlé, mais ne protège pas d'un binaire remplacé.
+- Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
+  `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
+  push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui
+  priment sur `$GITHUB_ENV`) et vident `BASH_ENV`/`LD_PRELOAD` ; hooks et fsmonitor du dépôt sont
+  ignorés ; gitleaks et la recherche de la clé ISA (prise du secret, pas de `$HOME`) tournent dans
+  un dépôt nu neuf (sans `diff.external`/textconv du run) ; le push part d'un autre dépôt nu neuf,
+  env vidé (`env -i`), après vérification du SHA contrôlé, sans force.
+- Limite restante : opencode a `sudo` sur le runner et le même utilisateur que les steps suivants.
+  Un processus laissé en arrière-plan ou un binaire système remplacé pourrait encore lire le jeton
+  de push. Seule parade complète : pousser depuis un **autre job** (VM neuve) qui reçoit les commits
+  chiffrés par clé publique — à faire dans une PR à part (nouveau secret requis).
 - Le prompt FullRun est lu depuis `antenly` (privé) ou ce dépôt (public) : un prompt mis
   ici est public.
 - `ANTENLY_PUSH_TOKEN` peut techniquement écrire sur toute branche d'`antenly` ; il n'est

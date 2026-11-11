@@ -5,6 +5,9 @@ set +x
 set -uo pipefail
 : "${ANTENLY_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" "${OC_MODEL_FALLBACK:?}" "${OC_DEADLINE_MIN:?}"
 cd "$ANTENLY_DIR" || exit 90
+# opencode ne reçoit pas les fichiers de commandes du runner : il ne peut ni poser de variables
+# ou de PATH pour les steps suivants, ni écrire dans le Summary public, ni de sorties de step.
+unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
 PROMPT=$(cat "$OC_PROMPT_FILE")
 mkdir -p "$(dirname "$OC_LOG")"
 start=$(date +%s)
