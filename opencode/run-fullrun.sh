@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Lance opencode run sans jamais écrire sa sortie dans le log public du job, sous un moniteur :
-#  - silence : si $OC_LOG ne grossit plus pendant OC_IDLE_MIN minutes, arrêt propre (code 125) ;
+#  - silence : si le run ne montre plus aucune activité pendant OC_IDLE_MIN minutes, arrêt propre
+#    (code 125). L'activité n'est pas que la croissance de $OC_LOG : le CPU cumulé de l'arbre
+#    d'opencode et les fichiers de session comptent aussi (un sous-agent travaille sans écrire
+#    dans le flux principal) ;
 #  - plafond : à OC_DEADLINE_EPOCH (heure absolue, marge de push prise par le workflow), arrêt
 #    propre (code 124).
 # Arrêt propre = SIGINT au groupe de processus d'opencode et à tous ses descendants, puis SIGKILL
@@ -32,6 +35,40 @@ mkdir -p "$(dirname "$OC_LOG")"
 : >>"$OC_LOG"
 remaining() { echo $(( OC_DEADLINE_EPOCH - $(date +%s) )); }
 size() { stat -c %s "$OC_LOG" 2>/dev/null || echo 0; }
+
+# Horodatage partagé de la dernière activité (lu par progress.sh pour la colonne « silence »)
+# et stockage des sessions opencode (sous-agents compris).
+OC_ACT="${OC_ACT:-$OC_LOG.act}"
+OC_STORE_DIR="${OC_STORE_DIR:-$HOME/.local/share/opencode}"
+
+# utime+stime d'un PID : champs 14 et 15 de /proc/<pid>/stat, donc indices 12 et 13 après le
+# « ) » qui termine le nom de la commande.
+cpu_of() {
+  local s
+  s=$(cat "/proc/$1/stat" 2>/dev/null) || { echo 0; return; }
+  # shellcheck disable=SC2086 # champs volontairement découpés
+  set -- ${s##*) }
+  echo $(( ${12} + ${13} ))
+}
+# CPU cumulé de tout l'arbre (PID inclus) ; les processus disparus comptent 0.
+cpu_tree() {
+  local p total=0
+  for p in "$1" $(tree "$1"); do total=$(( total + $(cpu_of "$p") )); done
+  echo "$total"
+}
+# Activité réelle : journal qui grossit, CPU de l'arbre qui bouge, ou fichier de session modifié
+# depuis le dernier passage. Toute activité rafraîchit $OC_ACT.
+active() {
+  local pid="$1" cur cur_cpu
+  cur=$(size); cur_cpu=$(cpu_tree "$pid")
+  if [ "$cur" != "${LAST_SIZE:-}" ] || [ "$cur_cpu" != "${LAST_CPU:-}" ] \
+     || [ -n "$(find "$OC_STORE_DIR" -newer "$OC_ACT" -print -quit 2>/dev/null)" ]; then
+    LAST_SIZE="$cur"; LAST_CPU="$cur_cpu"
+    touch "$OC_ACT" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
 
 # Descendants (récursifs) d'un PID, y compris ceux qui ont changé de groupe ou de session.
 tree() {
@@ -71,7 +108,7 @@ stop_tree() {
 # Lance "$@" (sortie ajoutée à $OC_LOG) dans sa propre session, surveille silence et plafond.
 # Pose WATCH_RC (code d'opencode, ou 124 plafond / 125 silence).
 run_watched() {
-  local pid pgid last_size cur last_act now reason=""
+  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU
   # --wait : si setsid devait forker, $! reste le parent qui attend opencode (jamais de faux « fini »).
   setsid --wait "$@" >>"$OC_LOG" 2>&1 </dev/null &
   pid=$!; CUR_PID=$pid; CUR_PGID=""
@@ -80,11 +117,11 @@ run_watched() {
   pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
   [[ "$pgid" =~ ^[0-9]+$ && "$pgid" -gt 1 && "$pgid" != "$(ps -o pgid= -p $$ | tr -d ' ')" ]] || pgid=""
   CUR_PGID=$pgid
-  last_size=$(size); last_act=$(date +%s)
+  : >>"$OC_ACT"
+  LAST_SIZE=$(size); LAST_CPU=$(cpu_tree "$pid"); last_act=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
-    cur=$(size)
-    if [ "$cur" != "$last_size" ]; then last_size="$cur"; last_act="$now"; fi
+    if active "$pid"; then last_act="$now"; fi
     if [ "$now" -ge "$OC_DEADLINE_EPOCH" ]; then reason=plafond; break; fi
     if [ $(( now - last_act )) -ge "$IDLE_SEC" ]; then reason=silence; break; fi
     sleep "$POLL" & wait $! 2>/dev/null

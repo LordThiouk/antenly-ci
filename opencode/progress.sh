@@ -67,18 +67,23 @@ isc() {
 }
 
 line() {
-  local tag="${1:-}" why now el clean phase agent ok total commits='?' lim='?' idle='?' mt
+  local tag="${1:-}" why now el clean phase agent ok total commits='?' lim='?' idle='?' mt stamp
   why=$(reason_label "${2:-}")
   now=$(TZ=Africa/Dakar date '+%H:%M')
   el=$(( ( $(date +%s) - OC_START ) / 60 ))
-  # Minutes depuis la dernière écriture du journal opencode (date de modification du fichier).
-  mt=$(stat -c %Y "$OC_LOG" 2>/dev/null) && [[ "$mt" =~ ^[0-9]+$ ]] && idle=$(( ( $(date +%s) - mt ) / 60 ))
+  # Minutes depuis la dernière activité réelle du run, telle que mesurée par run-fullrun.sh
+  # (journal, CPU de l'arbre opencode, fichiers de session) ; repli sur la mtime du journal.
+  stamp="${OC_ACT:-$OC_LOG.act}"; [ -f "$stamp" ] || stamp="$OC_LOG"
+  mt=$(stat -c %Y "$stamp" 2>/dev/null) && [[ "$mt" =~ ^[0-9]+$ ]] && idle=$(( ( $(date +%s) - mt ) / 60 ))
   [[ "$idle" =~ ^[0-9]+$ && "$idle" -lt 0 ]] && idle=0
   clean=$(mktemp)
   [ -f "$OC_LOG" ] && perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r//g' "$OC_LOG" > "$clean" 2>/dev/null
   phase=$(grep -aoE 'LifeOS \| Algorithm \| [^|]{0,40}' "$clean" | tail -n1 | grep -oE '[A-Za-z]+' | tail -n1)
   agent=$(sed -nE 's/^• .* ([A-Za-z][A-Za-z-]{1,40}) Agent[[:space:]]*$/\1/p' "$clean" | tail -n1)
-  if grep -qaiE '\b429\b|free usage limit|too many requests' "$clean"; then lim=oui; elif [ -f "$OC_LOG" ]; then lim=non; fi
+  # Vraie erreur d'API seulement : un « 429 » isolé matche des numéros et le texte du prompt.
+  if grep -qaiE '"status_?code"[[:space:]]*:[[:space:]]*429|status.?code.?429|rate limit exceeded|free usage limit reached|too many requests' "$clean"; then
+    lim=oui
+  elif [ -f "$OC_LOG" ]; then lim=non; fi
   rm -f "$clean"
   IFS=/ read -r ok total <<<"$(isc)"
   [ -n "${BASE_SHA:-}" ] && commits=$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$ANTENLY_DIR" rev-list --count "$BASE_SHA..HEAD" 2>/dev/null)

@@ -145,15 +145,20 @@ Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f br
 
 heure de Dakar, minutes écoulées, dernière bannière `LifeOS | Algorithm | <phase>`, dernier agent
 lancé, ISC cochés/total de l'ISA (`- [x]` / `- [ ]`), commits locaux depuis le départ, minutes
-depuis la dernière écriture du journal opencode, et si un 429 / « Free usage limit » est apparu.
+depuis la dernière activité réelle du run (journal, CPU de l'arbre opencode ou fichiers de session),
+et si un vrai 429 / « Free usage limit » est apparu (un « 429 » isolé, numéro ou texte du prompt, ne compte pas).
 La ligne finale donne la raison d'arrêt : `[suivi] fin : terminé`, `fin : bloqué (silence 30 min)`,
 `fin : plafond atteint`, `fin : annulé` ou `fin : erreur opencode`. Chaque valeur passe une liste blanche (phases, agents) ou
 un filtre numérique, sinon elle vaut `?` : aucun texte du modèle, chemin ni code n'est affiché.
 Le même tableau apparaît dans le **Summary** du run une fois le step terminé.
 
 **Garde-fou de silence et plafond.** Un moniteur (`opencode/run-fullrun.sh`) lance opencode dans
-sa propre session et surveille la taille de son journal (fichier du runner, jamais affiché) :
-- si le journal ne grossit plus pendant `idle_minutes` minutes (défaut 30) : arrêt propre, raison
+sa propre session et mesure l'activité réelle du run : croissance de son journal (fichier du runner,
+jamais affiché), variation du CPU cumulé de son arbre de processus (un sous-agent qui travaille
+consomme du CPU sans écrire dans le flux principal) ou modification d'un fichier de session sous
+`~/.local/share/opencode`. Une pause de réflexion pure reste donc du silence, un sous-agent actif
+non :
+- si aucune activité pendant `idle_minutes` minutes (défaut 30) : arrêt propre, raison
   **`bloqué (silence N min)`** ;
 - au plus tard à 335 min après le début du job (plafond 350 - 15 min de marge pour pousser) : arrêt
   propre, raison **`plafond atteint`**.
@@ -210,9 +215,10 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 - Le journal privé est sur une branche `fullrun-logs/…` d'`antenly` (jusqu'à 5 Mo par run) tant
   qu'elle n'est pas supprimée ; le masquage est un filet en plus de gitleaks, pas une garantie : un
   secret de forme inconnue peut y rester. Supprimer la branche après lecture.
-- Le garde-fou de silence mesure l'écriture du journal : un opencode qui écrit en boucle sans
-  avancer n'est pas « silencieux » (seul le plafond l'arrête). Un modèle qui réfléchit plus de
-  `idle_minutes` sans rien écrire est arrêté : monter `idle_minutes` si besoin.
+- Le garde-fou de silence mesure l'activité réelle (journal, CPU de l'arbre opencode, fichiers de
+  session) : un opencode qui écrit en boucle sans avancer, ou un outil qui consomme du CPU sans
+  progresser, n'est pas « silencieux » (seul le plafond l'arrête). Un run dont l'arbre entier dort
+  plus de `idle_minutes` est arrêté : monter `idle_minutes` si besoin.
 - Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
   `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
   push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui
