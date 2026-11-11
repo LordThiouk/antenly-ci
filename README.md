@@ -243,8 +243,7 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   refusée d'office et arrête la session : la CI tranche donc d'avance — lecture autorisée,
   écriture/action sensible refusée. `doom_loop` est explicitement `deny` (son défaut est `ask`,
   donc inutilisable en CI), et `external_directory` reste `allow` sauf `~/.ssh`.
-  Sur `~/.claude/settings.json` : seules les lectures simples (`rg`, `grep`, `cat`, `head`, `tail`,
-  `jq`, `ls`, `stat`, `wc`, `file`, `sha256sum`, `bat`) sont autorisées ; toute autre commande qui
-  mentionne le fichier est `deny`, l'édition reste `deny`, et les compositions shell ou
-  redirections (`;`, `&&`, `|`, `>`, `$(…)`, backticks, `--pre` de `rg`) sont refusées.
+  Sur `~/.claude/settings.json` : les commandes `bash` qui le mentionnent sont autorisées
+  (`*settings.json*` → `allow`, plus de refus par composition), seule l'édition du fichier reste
+  `deny`. Les fichiers `.env` sont lisibles (lecture, édition, bash) : le pool CI en a besoin.
 - Pas de FreeLLM, de VPS, d'ACRCloud, de Playwright ni de MCP GitHub sur le runner.
