@@ -180,7 +180,16 @@ jobs:
           mkdir -p "$HOME/.claude" "$HOME/.config/opencode" "$HOME/.local/share/opencode-lifeos" \
                    "$HOME/.claude/LIFEOS/MEMORY/STATE"
           rsync -a --exclude /.git --exclude /secrets --exclude /opencode "$L/" "$HOME/.claude/"
-          cp "$L/settings.template.json" "$HOME/.claude/settings.json"
+          # Parité avec la box : ni `rtk hook claude` (rtk absent de la box, ContextReduction.hook.sh
+          # couvre déjà git/gh et reste inerte sans rtk) ni hooks http vers localhost:31337
+          # (service local absent ; le plugin les compterait en échec à chaque Skill/Agent).
+          jq '.hooks |= with_entries(.value |= (map(.hooks |= map(select(
+                ((.command // "") != "rtk hook claude")
+                and ((.type // "command") != "http" or ((.url // "") | test("^http://localhost:31337/") | not))
+              ))) | map(select((.hooks | length) > 0))))' \
+            "$L/settings.template.json" > "$HOME/.claude/settings.json"
+          [ "$(jq '[.hooks[][].hooks[] | select(.command == "rtk hook claude" or .type == "http")] | length' "$HOME/.claude/settings.json")" = 0 ] \
+            || { echo "::error::settings.json : filtrage rtk/http incomplet"; exit 1; }
           (cd "$HOME/.claude" && bun install --silent >/dev/null 2>&1) || echo "::warning::bun install ~/.claude incomplet"
           C="$HOME/.config/opencode"
           cp "$CI_DIR/opencode/config/opencode.json" "$C/opencode.json"
