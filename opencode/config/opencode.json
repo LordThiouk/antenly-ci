@@ -23,16 +23,12 @@
     }
   },
   "permission": {
+    "doom_loop": "deny",
     "read": {
-      "*": "allow",
-      "*.env": "deny",
-      "*.env.*": "deny",
-      "*.env.example": "allow"
+      "*": "allow"
     },
     "edit": {
       "*": "allow",
-      "*.env": "deny",
-      "*.env.*": "deny",
       "{env:HOME}/.claude/settings.json": "deny"
     },
     "external_directory": {
@@ -44,8 +40,6 @@
       "git merge*": "deny",
       "ssh *": "deny",
       "scp *": "deny",
-      "*.env*": "deny",
-      "*settings.json*": "ask",
       "*gradlew*": "deny",
       "*gradle *": "deny",
       "*assembleDebug*": "deny",
@@ -63,7 +57,8 @@
       "git push*": "deny",
       "gh *": "deny",
       "*git remote*": "deny",
-      "*http.extraheader*": "deny"
+      "*http.extraheader*": "deny",
+      "*settings.json*": "allow"
     }
   },
   "tools": {
