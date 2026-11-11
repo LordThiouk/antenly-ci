@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       prompt_path:
-        description: "Prompt : antenly:<chemin dans antenly> ou ci:<chemin dans antenly-ci>"
+        description: "Prompt : prompts:<chemin sur la branche fullrun-prompts d'antenly> (recommandé), antenly:<chemin> ou ci:<chemin>"
         required: true
         type: string
       job_name:
@@ -93,10 +93,10 @@ jobs:
           fail() { echo "::error::$1"; exit 1; }
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || fail "branche invalide"
           case "${IN_BRANCH,,}" in
-            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*) fail "branche interdite : seule une branche de fonctionnalité est acceptée" ;;
+            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*|fullrun-prompts|fullrun-prompts/*) fail "branche interdite : seule une branche de fonctionnalité est acceptée" ;;
           esac
           [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "job_name invalide"
-          [[ "$IN_PROMPT" =~ ^(antenly|ci):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide (antenly:<chemin> ou ci:<chemin>)"
+          [[ "$IN_PROMPT" =~ ^(prompts|antenly|ci):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide (prompts:<chemin>, antenly:<chemin> ou ci:<chemin>)"
           [[ "$IN_LIFEOS_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$IN_LIFEOS_REF" != *..* ]] || fail "lifeos_ref invalide"
           if [ -n "$OC_ISA_PATH" ]; then
             [[ "$OC_ISA_PATH" =~ ^MEMORY/WORK/[A-Za-z0-9._-]+/ISA\.md$ && "$OC_ISA_PATH" != *..* ]] \
@@ -249,9 +249,18 @@ jobs:
           # SHA de départ en sortie de step : opencode peut écrire dans $GITHUB_ENV, pas ici.
           echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           src="${IN_PROMPT%%:*}"; rel="${IN_PROMPT#*:}"
-          if [ "$src" = antenly ]; then root="$ANTENLY_DIR"; else root="$CI_DIR"; fi
-          p=$(realpath -e "$root/$rel" 2>/dev/null) || { echo "::error::prompt introuvable"; exit 1; }
-          case "$p" in "$root"/*) ;; *) echo "::error::prompt hors du dépôt"; exit 1 ;; esac
+          if [ "$src" = prompts ]; then
+            # Prompts hors branche de travail : branche fullrun-prompts d'antenly, jamais fusionnée.
+            p="$RUNNER_TEMP/prompt-src.md"
+            git cat-file -e "origin/fullrun-prompts:$rel" 2>/dev/null || { echo "::error::prompt introuvable sur fullrun-prompts"; exit 1; }
+            git show "origin/fullrun-prompts:$rel" > "$p"
+          else
+            if [ "$src" = antenly ]; then root="$ANTENLY_DIR"; else root="$CI_DIR"; fi
+            p=$(realpath -e "$root/$rel" 2>/dev/null) || { echo "::error::prompt introuvable"; exit 1; }
+            case "$p" in "$root"/*) ;; *) echo "::error::prompt hors du dépôt"; exit 1 ;; esac
+          fi
+          # L'IA n'a pas à lire les prompts des autres jobs : on retire la référence locale.
+          git update-ref -d refs/remotes/origin/fullrun-prompts 2>/dev/null || true
           export OC_BRANCH="$IN_BRANCH" OC_JOB="$IN_JOB" OC_REPORT="$OC_WORK/REPORT.md"
           # shellcheck disable=SC2016 # liste de variables pour envsubst, pas une expansion
           envsubst '$ANTENLY_DIR $OC_BRANCH $OC_REPORT $OC_JOB $OC_MODEL_MAIN $OC_MODEL_MAX' \
@@ -646,7 +655,7 @@ jobs:
           # Mêmes règles que la garde d'entrée, revérifiées ici (la valeur vient de l'entrée, pas de $GITHUB_ENV).
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "::error::branche invalide : push refusé"; exit 1; }
           case "${IN_BRANCH,,}" in
-            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*) echo "::error::branche interdite : push refusé"; exit 1 ;;
+            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*|fullrun-prompts|fullrun-prompts/*) echo "::error::branche interdite : push refusé"; exit 1 ;;
           esac
           [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || { echo "::error::job ou run invalide : push refusé"; exit 1; }
           LOGB="fullrun-logs/${IN_JOB}-${RUN_ID}"

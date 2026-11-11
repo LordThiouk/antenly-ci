@@ -125,7 +125,9 @@ directs sur `main` ».
 l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiouk` peut lancer) :
 
 - `branch` : branche d'`antenly` (ex. `fullrun/annotation-tool-f2`), jamais `main`/`master` ;
-- `prompt_path` : `antenly:<chemin>` ou `ci:<chemin>` (ex. `ci:opencode/prompts/F3.md`) ;
+- `prompt_path` : `prompts:<chemin>` (recommandé : fichier sur la branche `fullrun-prompts`
+  d'`antenly`, jamais fusionnée, donc aucun prompt sur la branche de travail ; la référence est
+  retirée du checkout avant opencode), sinon `antenly:<chemin>` ou `ci:<chemin>` ;
 - `job_name` : nom court, donne `.fullrun/<job>_DONE.md` ;
 - `model_main` (défaut `opencode/deepseek-v4.1-flash-free`, aussi Forge), `model_max`
   (défaut `opencode/mimo-v2.6-flash-free`), `model_fallback` (défaut
@@ -287,8 +289,8 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   Un processus laissé en arrière-plan ou un binaire système remplacé pourrait encore lire le jeton
   de push. Seule parade complète : pousser depuis un **autre job** (VM neuve) qui reçoit les commits
   chiffrés par clé publique — à faire dans une PR à part (nouveau secret requis).
-- Le prompt FullRun est lu depuis `antenly` (privé) ou ce dépôt (public) : un prompt mis
-  ici est public.
+- Le prompt FullRun est lu depuis la branche `fullrun-prompts` d'`antenly` (privé, recommandé),
+  depuis `antenly` ou depuis ce dépôt (public) : un prompt mis ici est public.
 - `ANTENLY_PUSH_TOKEN` peut techniquement écrire sur toute branche d'`antenly` ; il n'est
   exposé qu'au step de push, jamais à opencode.
 - Hooks LifeOS : le service local `localhost:31337` et `cc-diff` n'existent pas sur le runner ;
