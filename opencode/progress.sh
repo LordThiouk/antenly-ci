@@ -32,8 +32,8 @@ isa_file() {
   # ISA citée par le prompt (une seule), sinon ISA modifiée par le run (une seule).
   c=$(grep -aoE 'MEMORY/WORK/[A-Za-z0-9._-]+/ISA\.md' "${OC_PROMPT_FILE:-/dev/null}" 2>/dev/null | sort -u)
   if [ "$(printf '%s' "$c" | grep -c .)" != 1 ] && [ -n "${BASE_SHA:-}" ]; then
-    c=$( { GIT_OPTIONAL_LOCKS=0 git -C "$ANTENLY_DIR" diff --name-only "$BASE_SHA" 2>/dev/null
-           GIT_OPTIONAL_LOCKS=0 git -C "$ANTENLY_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
+    c=$( { GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$ANTENLY_DIR" diff --name-only "$BASE_SHA" 2>/dev/null
+           GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$ANTENLY_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
          | grep -E "$re" | sort -u)
   fi
   [ "$(printf '%s' "$c" | grep -c .)" = 1 ] && [[ "$c" =~ $re && "$c" != *..* ]] && printf '%s' "$c"
@@ -57,7 +57,7 @@ line() {
       ok=$(grep -cE '^[[:space:]]*[-*] \[[xX]\]' "$real")
       total=$(( ok + $(grep -cE '^[[:space:]]*[-*] \[ \]' "$real") )) ;;
   esac
-  [ -n "${BASE_SHA:-}" ] && commits=$(GIT_OPTIONAL_LOCKS=0 git -C "$ANTENLY_DIR" rev-list --count "$BASE_SHA..HEAD" 2>/dev/null)
+  [ -n "${BASE_SHA:-}" ] && commits=$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$ANTENLY_DIR" rev-list --count "$BASE_SHA..HEAD" 2>/dev/null)
   phase=$(pick "${phase:-}" "$PHASES"); agent=$(pick "${agent:-}" "$AGENTS")
   ok=$(num "$ok"); total=$(num "$total"); commits=$(num "$commits"); el=$(num "$el")
   [ "$tag" = fin ] && tag="fin · " || tag=""
