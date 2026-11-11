@@ -47,6 +47,8 @@ env:
   OPENCODE_VERSION: "1.19.4"
   BUN_VERSION: "1.4.4"
   GITLEAKS_VERSION: "8.30.1"
+  RIPGREP_VERSION: "14.1.1"
+  RIPGREP_SHA256: "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e"
 
 defaults:
   run:
@@ -128,6 +130,15 @@ jobs:
           [ "$v" = "$OPENCODE_VERSION" ] || { echo "::error::opencode $v au lieu de $OPENCODE_VERSION"; exit 1; }
           echo "opencode $v"
 
+      - name: Installer ripgrep (épinglé, sha256 vérifié)
+        run: |
+          f="$RUNNER_TEMP/rg.tgz"
+          curl -sSfL -o "$f" "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${RIPGREP_SHA256}  $f" | sha256sum -c --quiet
+          tar -xzf "$f" -C "$RUNNER_TEMP" "ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg"
+          sudo install -m 0755 "$RUNNER_TEMP/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          rg --version | head -n1
+
       - name: Reconstituer ~/.claude et ~/.config/opencode
         run: |
           set +x
@@ -136,7 +147,16 @@ jobs:
           mkdir -p "$HOME/.claude" "$HOME/.config/opencode" "$HOME/.local/share/opencode-lifeos" \
                    "$HOME/.claude/LIFEOS/MEMORY/STATE"
           rsync -a --exclude /.git --exclude /secrets --exclude /opencode "$L/" "$HOME/.claude/"
-          cp "$L/settings.template.json" "$HOME/.claude/settings.json"
+          # Parité avec la box : ni `rtk hook claude` (rtk absent de la box, ContextReduction.hook.sh
+          # couvre déjà git/gh et reste inerte sans rtk) ni hooks http vers localhost:31337
+          # (service local absent ; le plugin les compterait en échec à chaque Skill/Agent).
+          jq '.hooks |= with_entries(.value |= (map(.hooks |= map(select(
+                ((.command // "") != "rtk hook claude")
+                and ((.type // "command") != "http" or ((.url // "") | test("^http://localhost:31337/") | not))
+              ))) | map(select((.hooks | length) > 0))))' \
+            "$L/settings.template.json" > "$HOME/.claude/settings.json"
+          [ "$(jq '[.hooks[][].hooks[] | select(.command == "rtk hook claude" or .type == "http")] | length' "$HOME/.claude/settings.json")" = 0 ] \
+            || { echo "::error::settings.json : filtrage rtk/http incomplet"; exit 1; }
           (cd "$HOME/.claude" && bun install --silent >/dev/null 2>&1) || echo "::warning::bun install ~/.claude incomplet"
           C="$HOME/.config/opencode"
           cp "$CI_DIR/opencode/config/opencode.json" "$C/opencode.json"
@@ -245,6 +265,10 @@ jobs:
             echo
             echo "## Rapport de l'agent"
             if [ -s "$OC_WORK/REPORT.md" ]; then cat "$OC_WORK/REPORT.md"; else echo "(aucun rapport écrit : relancer avec le même prompt pour reprendre)"; fi
+            echo
+            "$CI_DIR/opencode/hook-stats.sh" || echo "(bilan des hooks indisponible)"
+            echo
+            python3 "$CI_DIR/opencode/agent-models.py" || echo "(bilan agents/modèles indisponible)"
           } > "$R"
           git add "$R"
           git commit -q -m "chore(ci): rapport du run $IN_JOB" || true
