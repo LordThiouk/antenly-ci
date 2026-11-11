@@ -87,7 +87,8 @@ job (le workflow s'arrête à 350 min, opencode à 310 min pour laisser le temps
 (config de la box assainie : sans provider FreeLLM ni VPS, sans MCP `github`/`rea`/
 `playwright`, chemins en `{env:HOME}`, modèle `{env:OC_MODEL_MAIN}`, `git push`/`gh`
 interdits à l'IA), `opencode/ci-preamble.md` (contexte CI ajouté avant le prompt) et
-`opencode/run-fullrun.sh`. Les agents (Nix, Vera, Serena, Forge, Max…), commandes, plugin
+`opencode/run-fullrun.sh`, `opencode/progress.sh` (suivi filtré) et `opencode/redact-log.sh`
+(préparation du journal privé). Les agents (Nix, Vera, Serena, Forge, Max…), commandes, plugin
 LifeOS et prompt Nix restent **privés** dans `LordThiouk/lifeos`, dossier `opencode/`
 (entrée `lifeos_ref`, défaut `main` : merger `lifeos` PR #3 avant le premier run, ou passer
 `lifeos_ref=ci/opencode-config-2026-11-11` en attendant).
@@ -122,9 +123,34 @@ l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiou
 - `job_name` : nom court, donne `.fullrun/<job>_DONE.md` ;
 - `model_main` (défaut `opencode/deepseek-v4.1-flash-free`, aussi Forge), `model_max`
   (défaut `opencode/mimo-v2.6-flash-free`), `model_fallback` (défaut
-  `opencode/glm-5.3-flash-free`, utilisé seulement si la passe principale échoue sur un 429).
+  `opencode/glm-5.3-flash-free`, utilisé seulement si la passe principale échoue sur un 429) ;
+- `isa_path` (optionnel) : `MEMORY/WORK/<dossier>/ISA.md` dont le suivi compte les ISC ; vide =
+  l'unique ISA citée par le prompt, sinon l'unique ISA modifiée par le run, sinon `?`.
 
 Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
+
+**Suivre un run en direct.** Onglet Actions → le run → job `fullrun` → step
+`opencode run (…)`. Une ligne `[suivi]` s'affiche au départ, puis toutes les 10 min, puis à la fin :
+
+```
+[suivi] 09:12 Dakar · +40 min · phase Marking · agent Silas · ISC 7/50 · commits 2 · 429/limite non
+```
+
+heure de Dakar, minutes écoulées, dernière bannière `LifeOS | Algorithm | <phase>`, dernier agent
+lancé, ISC cochés/total de l'ISA (`- [x]` / `- [ ]`), commits locaux depuis le départ, et si un
+429 / « Free usage limit » est apparu. Chaque valeur passe une liste blanche (phases, agents) ou
+un filtre numérique, sinon elle vaut `?` : aucun texte du modèle, chemin ni code n'est affiché.
+Le même tableau apparaît dans le **Summary** du run une fois le step terminé.
+
+**Journal complet (privé).** À la fin, même si opencode a échoué ou dépassé le temps, le log
+opencode est commité sur la branche d'`antenly` dans `.fullrun/logs/<job>-<run_id>.log` (codes
+ANSI retirés ; jetons `ghp_`/`github_pat_`/`hf_`/`sk-`/AWS/Slack/JWT, en-têtes `Authorization`,
+identifiants d'URL, clé ISA et toute valeur de 64 hex masqués ; au-delà de 5 Mo, le début et la
+fin sont gardés avec une mention de troncature). Il est commité **en dernier, avant** gitleaks et
+la détection de la clé ISA : s'ils signalent quelque chose, seul le commit du journal est retiré,
+le reste est recontrôlé puis poussé (le Summary affiche « journal retiré ») ; si le problème est
+ailleurs, rien n'est poussé, comme avant. Le rapport `.fullrun/<job>_DONE.md` donne le chemin.
+Pour le lire : GitHub → `antenly` → branche → `.fullrun/logs/`.
 
 **Résultat.** Les commits d'opencode et le rapport `.fullrun/<job>_DONE.md` sont poussés sur
 la branche (si une PR est ouverte dessus, `pr-dispatch.yml` lance ensuite la CI habituelle sur le nouveau SHA). Le log du
@@ -137,7 +163,21 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 
 **Risques connus.**
 - Tout ce qui s'affiche dans le log est public : ne jamais ajouter `cat`/`tee` du log
-  opencode ni `actions/upload-artifact` à ce workflow.
+  opencode ni `actions/upload-artifact` à ce workflow. Le suivi n'affiche que des valeurs de
+  liste blanche ; ajouter un champ à `progress.sh` = le filtrer de la même façon.
+- Le journal privé reste dans l'historique d'`antenly` (jusqu'à 5 Mo par run) ; le masquage est
+  un filet en plus de gitleaks, pas une garantie : un secret de forme inconnue peut y rester.
+- Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
+  `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
+  push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui
+  priment sur `$GITHUB_ENV`) et vident `BASH_ENV`/`LD_PRELOAD` ; hooks et fsmonitor du dépôt sont
+  ignorés ; gitleaks et la recherche de la clé ISA (prise du secret, pas de `$HOME`) tournent dans
+  un dépôt nu neuf (sans `diff.external`/textconv du run) ; le push part d'un autre dépôt nu neuf,
+  env vidé (`env -i`), après vérification du SHA contrôlé, sans force.
+- Limite restante : opencode a `sudo` sur le runner et le même utilisateur que les steps suivants.
+  Un processus laissé en arrière-plan ou un binaire système remplacé pourrait encore lire le jeton
+  de push. Seule parade complète : pousser depuis un **autre job** (VM neuve) qui reçoit les commits
+  chiffrés par clé publique — à faire dans une PR à part (nouveau secret requis).
 - Le prompt FullRun est lu depuis `antenly` (privé) ou ce dépôt (public) : un prompt mis
   ici est public.
 - `ANTENLY_PUSH_TOKEN` peut techniquement écrire sur toute branche d'`antenly` ; il n'est
