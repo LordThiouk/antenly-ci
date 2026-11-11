@@ -39,6 +39,10 @@ on:
         description: "ISA suivie (MEMORY/WORK/<dossier>/ISA.md) ; vide = déduite du prompt"
         type: string
         default: ""
+      idle_minutes:
+        description: "Garde-fou : arrêt si le journal opencode n'écrit plus rien pendant N min (10 à 120)"
+        type: string
+        default: "30"
 
 permissions:
   contents: read
@@ -72,17 +76,19 @@ jobs:
       OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
       IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
       OC_ISA_PATH: ${{ inputs.isa_path }}
+      IN_IDLE_MIN: ${{ inputs.idle_minutes }}
       ANTENLY_DIR: ${{ github.workspace }}/antenly
       CI_DIR: ${{ github.workspace }}/ci
       OPENCODE_DISABLE_AUTOUPDATE: "1"
     steps:
       - name: Garde des entrées (branche, modèles gratuits, chemins)
+        id: guard
         run: |
           set +x
           fail() { echo "::error::$1"; exit 1; }
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || fail "branche invalide"
           case "${IN_BRANCH,,}" in
-            main|master|head|refs/*|*..*|*/|*.lock) fail "branche interdite : seule une branche de fonctionnalité est acceptée" ;;
+            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*) fail "branche interdite : seule une branche de fonctionnalité est acceptée" ;;
           esac
           [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "job_name invalide"
           [[ "$IN_PROMPT" =~ ^(antenly|ci):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide (antenly:<chemin> ou ci:<chemin>)"
@@ -91,11 +97,16 @@ jobs:
             [[ "$OC_ISA_PATH" =~ ^MEMORY/WORK/[A-Za-z0-9._-]+/ISA\.md$ && "$OC_ISA_PATH" != *..* ]] \
               || fail "isa_path invalide (MEMORY/WORK/<dossier>/ISA.md)"
           fi
+          if ! [[ "$IN_IDLE_MIN" =~ ^[0-9]{2,3}$ ]] || [ "$((10#$IN_IDLE_MIN))" -lt 10 ] || [ "$((10#$IN_IDLE_MIN))" -gt 120 ]; then
+            fail "idle_minutes invalide (entier de 10 à 120)"
+          fi
           for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX" "$OC_MODEL_FALLBACK"; do
             [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle refusé : seuls les modèles opencode/*-free sont admis"
           done
           echo "OC_WORK=$RUNNER_TEMP/oc" >> "$GITHUB_ENV"
-          echo "Entrées valides : branche $IN_BRANCH, job $IN_JOB"
+          # Début du job (pour le plafond d'opencode et la durée notifiée) : sortie de step, pas $GITHUB_ENV.
+          echo "t0=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "Entrées valides : branche $IN_BRANCH, job $IN_JOB, silence max $((10#$IN_IDLE_MIN)) min"
 
       - name: Checkout antenly-ci
         uses: actions/checkout@v4
@@ -214,29 +225,59 @@ jobs:
       - name: opencode run (sortie jamais affichée, suivi filtré toutes les 10 min)
         id: oc
         continue-on-error: true
-        timeout-minutes: 320
+        # Filet seulement : run-fullrun.sh arrête opencode avant (plafond du job - 15 min).
+        timeout-minutes: 340
         env:
           OC_JOB: ${{ inputs.job_name }}
           OC_BRANCH: ${{ inputs.branch }}
           OC_PROMPT_FILE: ${{ runner.temp }}/oc/prompt.md
           OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
           OC_LOG: ${{ runner.temp }}/oc/opencode.log
-          OC_DEADLINE_MIN: "310"
+          OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
+          # Doit rester égal à timeout-minutes du job (350) ; marge de push : 15 min.
+          OC_JOB_TIMEOUT_MIN: "350"
+          OC_PUSH_MARGIN_MIN: "15"
+          OC_POLL_SEC: "30"
+          OC_KILL_GRACE: "60"
           OC_PROGRESS_INTERVAL: "600"
           BASE_SHA: ${{ steps.prep.outputs.base }}
         run: |
           set +x
           # Suivi : lignes [suivi] à valeurs filtrées (liste blanche / nombres), jamais le log lui-même.
           OC_START=$(date +%s); OC_PARENT_PID=$$; export OC_START OC_PARENT_PID
+          OC_IDLE_MIN=$((10#$OC_IDLE_MIN)); export OC_IDLE_MIN
+          unset OC_IDLE_SEC  # réservé aux tests locaux
+          t0="$OC_JOB_T0"; [[ "$t0" =~ ^[0-9]{9,11}$ && "$t0" -le "$OC_START" ]] || t0="$OC_START"
+          # opencode doit être arrêté (grâce SIGINT et dernier sondage compris) avant plafond - marge.
+          OC_DEADLINE_EPOCH=$(( t0 + (OC_JOB_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
+          export OC_DEADLINE_EPOCH
           "$CI_DIR/opencode/progress.sh" start || true
           "$CI_DIR/opencode/progress.sh" loop & mon=$!
-          rc=0; "$CI_DIR/opencode/run-fullrun.sh" || rc=$?
+          # opencode tourne dans sa propre session : une annulation (SIGINT/SIGTERM au step) est
+          # relayée au moniteur, qui l'arrête proprement avant les steps de rapport et de push.
+          "$CI_DIR/opencode/run-fullrun.sh" & runner=$!
+          trap 'kill -TERM "$runner" 2>/dev/null || true' INT TERM
+          rc=0; wait "$runner" || rc=$?
+          if kill -0 "$runner" 2>/dev/null; then rc=0; wait "$runner" || rc=$?; fi
+          trap - INT TERM
           kill "$mon" 2>/dev/null || true; wait "$mon" 2>/dev/null || true
-          "$CI_DIR/opencode/progress.sh" once fin || true
+          # Raison décidée ici, d'après le code de sortie du moniteur (pas d'un fichier écrit par l'IA).
+          case "$rc" in
+            0) stop=ok; why="terminé" ;;
+            124) stop=plafond; why="plafond atteint" ;;
+            125) stop=silence; why="bloqué (silence ${OC_IDLE_MIN} min)" ;;
+            130) stop=annulation; why="annulé" ;;
+            *) stop=erreur; why="erreur opencode (code $rc)" ;;
+          esac
+          echo "stop=$stop" >> "$GITHUB_OUTPUT"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          "$CI_DIR/opencode/progress.sh" once fin "$stop" || true
+          echo "**Arrêt d'opencode : ${why}**" >> "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -eq 0 ]; then
             echo "opencode : terminé (code 0)"
           else
-            echo "opencode : arrêt non nul (code $rc), détails dans le rapport et le journal poussés sur la branche"
+            echo "::error::opencode : ${why} ; le travail commité et le journal sont poussés sur la branche par les steps suivants"
             exit 1
           fi
 
@@ -245,6 +286,9 @@ jobs:
         if: always() && steps.prep.outputs.base != ''
         env:
           OC_OUTCOME: ${{ steps.oc.outcome }}
+          OC_STOP: ${{ steps.oc.outputs.stop }}
+          OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Valeurs du step > $GITHUB_ENV : opencode ne peut ni changer la branche, ni la base,
           # ni injecter BASH_ENV / LD_PRELOAD dans les steps de contrôle et de push.
@@ -265,6 +309,8 @@ jobs:
           set +x
           # PATH fixe : $GITHUB_PATH (écrit par opencode) ne doit pas remplacer git, grep, curl…
           export PATH=/usr/local/bin:/usr/bin:/bin
+          # Filet : un opencode encore vivant (step interrompu) ne doit plus écrire pendant les contrôles.
+          pkill -KILL -f '(^|[ /])opencode run ' 2>/dev/null || true
           cd "$ANTENLY_DIR"
           # Hooks et fsmonitor du dépôt neutralisés : l'IA a pu les écrire dans .git/config.
           G=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false)
@@ -280,24 +326,38 @@ jobs:
             "${G[@]}" commit -q -m "wip(ci): état non commité à la fin du run $IN_JOB" || true
           fi
           R=".fullrun/${IN_JOB}_DONE.md"
-          LOGREL=".fullrun/logs/${IN_JOB}-${GITHUB_RUN_ID}.log"
+          # Journal : JAMAIS sur la branche de travail ; commit orphelin sur une branche dédiée.
+          LOGB="fullrun-logs/${IN_JOB}-${RUN_ID}"
+          LOGREL=".fullrun/logs/${IN_JOB}-${RUN_ID}.log"
           # Pas d'écriture à travers un lien symbolique posé par l'IA (ex. vers .git/config).
-          for p in .fullrun .fullrun/logs "$R" "$LOGREL"; do
+          for p in .fullrun "$R"; do
             [ ! -L "$p" ] || { echo "::error::lien symbolique inattendu dans .fullrun : push refusé"; exit 1; }
           done
-          mkdir -p .fullrun/logs "$OC_WORK"
+          mkdir -p .fullrun "$OC_WORK"
+          # ISC pour la notification : nombres seulement, script lancé sans la clé ISA (avant son écriture sur disque).
+          isc=$(env -u ISA_STAMP_KEY OC_LOG="$OC_WORK/opencode.log" OC_START=0 OC_PROMPT_FILE="$OC_WORK/prompt.md" \
+                OC_ISA_PATH="${OC_ISA_PATH:-}" BASE_SHA="$BASE_SHA" "$CI_DIR/opencode/progress.sh" isc 2>/dev/null | head -n1)
+          [[ "$isc" =~ ^([0-9]{1,7}|\?)/([0-9]{1,7}|\?)$ ]] || isc="?/?"
           # Clé ISA prise du secret (pas du fichier de $HOME, modifiable par l'IA).
           K="$OC_WORK/isa-check.key"; ( umask 077; printf '%s' "${ISA_STAMP_KEY:-}" > "$K" )
-          trap 'rm -f "$K" "$OC_WORK/run.diff"' EXIT
+          trap 'rm -f "$K" "$OC_WORK/run.diff" "$OC_WORK/log.redacted" "$OC_WORK/log.index"' EXIT
           {
             echo "# Run CI $IN_JOB"
             echo
             echo "- run : $RUN_URL"
             echo "- fin : $(TZ=Africa/Dakar date '+%Y-%m-%d %H:%M') (Dakar)"
             echo "- branche : $IN_BRANCH ; base \`$BASE_SHA\`"
+            case "${OC_STOP:-}" in
+              ok) echo "- arrêt : terminé" ;;
+              silence) echo "- arrêt : bloqué (silence $((10#$OC_IDLE_MIN)) min), opencode arrêté par le garde-fou" ;;
+              plafond) echo "- arrêt : plafond atteint, opencode arrêté avant la limite du job" ;;
+              annulation) echo "- arrêt : run annulé" ;;
+              erreur) echo "- arrêt : erreur opencode" ;;
+              *) echo "- arrêt : inconnu (step opencode interrompu)" ;;
+            esac
             echo "- opencode : $OC_OUTCOME ; $(tr '\n' ' ' 2>/dev/null < "$OC_WORK/opencode.log.status" || echo 'pas de statut')"
             echo "- modèles : main/Forge $OC_MODEL_MAIN, Max $OC_MODEL_MAX, repli $OC_MODEL_FALLBACK"
-            echo "- journal complet : \`$LOGREL\` (commit suivant ; absent s'il a été retiré par le contrôle anti-secrets)"
+            echo "- journal complet : branche \`$LOGB\` (à part, jamais fusionnée ; absente si retirée par le contrôle anti-secrets ; à supprimer après lecture)"
             echo
             echo "## Commits du run"
             git log --format='- %h %s' "$BASE_SHA..HEAD" || true
@@ -307,13 +367,21 @@ jobs:
           } > "$R"
           "${G[@]}" add -- "$R"
           "${G[@]}" commit -q -m "chore(ci): rapport du run $IN_JOB" || true
-          # Journal opencode complet (sans ANSI, jetons masqués, 5 Mo max), commité en DERNIER :
-          # il passe les mêmes contrôles que le reste et peut être retiré seul s'il est signalé.
-          log_state="absent"; log_commit=""
-          if [ -s "$OC_WORK/opencode.log" ] && OC_ISA_KEY_FILE="$K" "$CI_DIR/opencode/redact-log.sh" "$OC_WORK/opencode.log" "$LOGREL"; then
-            "${G[@]}" add -f -- "$LOGREL"
-            if "${G[@]}" commit -q -m "chore(ci): journal opencode du run $IN_JOB ($GITHUB_RUN_ID)"; then
-              log_commit=$(git rev-parse HEAD); log_state="commité"
+          # Journal opencode complet (sans ANSI, jetons masqués, 5 Mo max) : un seul commit orphelin
+          # (sans parent) sur $LOGB, construit hors de l'arbre de travail.
+          log_state="absent"; log_sha=""
+          if [ -s "$OC_WORK/opencode.log" ] && OC_ISA_KEY_FILE="$K" "$CI_DIR/opencode/redact-log.sh" "$OC_WORK/opencode.log" "$OC_WORK/log.redacted"; then
+            rm -f "$OC_WORK/log.index"
+            if blob=$("${G[@]}" hash-object -w --no-filters "$OC_WORK/log.redacted") \
+               && GIT_INDEX_FILE="$OC_WORK/log.index" "${G[@]}" update-index --add --cacheinfo "100644,$blob,$LOGREL" \
+               && tree=$(GIT_INDEX_FILE="$OC_WORK/log.index" "${G[@]}" write-tree) \
+               && log_sha=$(GIT_AUTHOR_NAME=Nix GIT_AUTHOR_EMAIL=nix@antenly.local GIT_COMMITTER_NAME=Nix \
+                    GIT_COMMITTER_EMAIL=nix@antenly.local "${G[@]}" commit-tree "$tree" \
+                    -m "chore(ci): journal opencode du run $IN_JOB ($RUN_ID) — branche à supprimer après lecture") \
+               && "${G[@]}" update-ref "refs/heads/$LOGB" "$log_sha"; then
+              log_state="prêt"
+            else
+              log_sha=""; echo "::warning::commit du journal impossible : journal non poussé"
             fi
           fi
           # Secrets : gitleaks sur les seuls commits du run, sortie jamais affichée.
@@ -331,19 +399,20 @@ jobs:
           # Scan dans un dépôt nu neuf : ni .git/config ni attributs du run (diff.external,
           # textconv…) ne peuvent masquer un contenu à gitleaks ou à la recherche de la clé.
           S="$RUNNER_TEMP/scan.git"
+          # snap <branche> <sha attendu>
           snap() {
             rm -rf "$S" && git init -q --bare "$S" \
-              && git -C "$S" fetch -q --no-tags "file://$ANTENLY_DIR" "+refs/heads/$IN_BRANCH:refs/heads/$IN_BRANCH" >/dev/null 2>&1 \
-              && [ "$(git -C "$S" rev-parse "refs/heads/$IN_BRANCH")" = "$(git rev-parse HEAD)" ]
+              && git -C "$S" fetch -q --no-tags "file://$ANTENLY_DIR" "+refs/heads/$1:refs/heads/$1" >/dev/null 2>&1 \
+              && [ "$(git -C "$S" rev-parse "refs/heads/$1")" = "$2" ]
           }
-          # 0 = propre, 1 = gitleaks, 2 = clé ISA (64 hex, non détectable par gitleaks).
+          # scan <branche> <sha attendu> <plage> : 0 = propre, 1 = gitleaks, 2 = clé ISA, 3 = copie impossible.
           scan() {
-            snap || return 3
+            snap "$1" "$2" || return 3
             "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --gitleaks-ignore-path "$OC_WORK/gl-ignore" \
-              --log-opts="$BASE_SHA..refs/heads/$IN_BRANCH" --redact --no-banner \
+              --log-opts="$3" --redact --no-banner \
               --report-path "$OC_WORK/gitleaks.json" "$S" >/dev/null 2>&1 || return 1
             if [ -s "$K" ]; then
-              git -C "$S" log -p --binary --no-ext-diff --no-textconv --format= "$BASE_SHA..refs/heads/$IN_BRANCH" > "$OC_WORK/run.diff"
+              git -C "$S" log -p --binary --no-ext-diff --no-textconv --format= "$3" > "$OC_WORK/run.diff"
               if grep -qiF -- "$(tr -d '\n' < "$K")" "$OC_WORK/run.diff"; then return 2; fi
             fi
             return 0
@@ -351,32 +420,36 @@ jobs:
           why() {
             case "$1" in 2) echo "la clé ISA apparaît" ;; 3) echo "copie de contrôle impossible" ;; *) echo "gitleaks a trouvé un secret probable" ;; esac
           }
-          src=0; scan || src=$?
-          if [ "$src" -ne 0 ]; then
-            if [ -n "$log_commit" ] && [ "$(git rev-parse HEAD)" = "$log_commit" ]; then
-              # Seul notre commit de journal est retiré ; le reste est recontrôlé avant tout push.
-              "${G[@]}" reset -q --hard HEAD~1
-              log_state="retiré (contrôle anti-secrets)"
-              echo "::warning::$(why "$src") dans les commits du run : journal retiré, recontrôle du reste"
-              src=0; scan || src=$?
-              [ "$src" -eq 0 ] || { echo "::error::$(why "$src") hors journal : push refusé"; exit 1; }
-            else
-              echo "::error::$(why "$src") dans les commits du run : push refusé"; exit 1
+          src=0; scan "$IN_BRANCH" "$(git rev-parse HEAD)" "$BASE_SHA..refs/heads/$IN_BRANCH" || src=$?
+          [ "$src" -eq 0 ] || { echo "::error::$(why "$src") dans les commits du run : push refusé"; exit 1; }
+          if [ -n "$log_sha" ]; then
+            src=0; scan "$LOGB" "$log_sha" "refs/heads/$LOGB" || src=$?
+            if [ "$src" -ne 0 ]; then
+              git update-ref -d "refs/heads/$LOGB" 2>/dev/null || true
+              log_sha=""; log_state="retiré (contrôle anti-secrets)"
+              echo "::warning::$(why "$src") dans le journal : journal non poussé (le travail l'est)"
             fi
           fi
           {
             echo "commits=$(git rev-list --count "$BASE_SHA..HEAD")"
             echo "head=$(git rev-parse HEAD)"
+            echo "log_sha=$log_sha"
+            echo "isc=$isc"
           } >> "$GITHUB_OUTPUT"
-          echo "- Journal opencode privé : ${log_state} (\`$LOGREL\` sur antenly@$IN_BRANCH)" >> "$GITHUB_STEP_SUMMARY"
+          lb=""; [ -n "$log_sha" ] && lb=" → branche \`$LOGB\` (antenly, à supprimer après lecture)"
+          echo "- Journal opencode privé : ${log_state}${lb}" >> "$GITHUB_STEP_SUMMARY"
           echo "Contrôles OK : $(git rev-list --count "$BASE_SHA..HEAD") commit(s) à pousser ; journal ${log_state}"
 
-      - name: Push sur la branche de fonctionnalité (jamais main, jamais force)
+      - name: Push sur la branche de fonctionnalité (jamais main, jamais force) et journal à part
+        id: push
         if: always() && steps.check.outcome == 'success'
         env:
           PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
           HEAD_SHA: ${{ steps.check.outputs.head }}
+          LOG_SHA: ${{ steps.check.outputs.log_sha }}
           IN_BRANCH: ${{ inputs.branch }}
+          IN_JOB: ${{ inputs.job_name }}
+          RUN_ID: ${{ github.run_id }}
           ANTENLY_DIR: ${{ github.workspace }}/antenly
           BASH_ENV: ""
           ENV: ""
@@ -390,37 +463,139 @@ jobs:
           # Mêmes règles que la garde d'entrée, revérifiées ici (la valeur vient de l'entrée, pas de $GITHUB_ENV).
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "::error::branche invalide : push refusé"; exit 1; }
           case "${IN_BRANCH,,}" in
-            main|master|head|refs/*|*..*|*/|*.lock) echo "::error::branche interdite : push refusé"; exit 1 ;;
+            main|master|head|refs/*|*..*|*/|*.lock|fullrun-logs/*) echo "::error::branche interdite : push refusé"; exit 1 ;;
           esac
+          [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ && "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || { echo "::error::job ou run invalide : push refusé"; exit 1; }
+          LOGB="fullrun-logs/${IN_JOB}-${RUN_ID}"
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::SHA contrôlé absent : push refusé"; exit 1; }
           [ -n "${PUSH_TOKEN:-}" ] || { echo "::error::secret ANTENLY_PUSH_TOKEN absent (acte Papa requis)"; exit 1; }
           # Push depuis un dépôt nu neuf : ni .git/config ni ~/.gitconfig (écrits par l'IA) ne s'appliquent.
           B="$RUNNER_TEMP/push.git"; rm -rf "$B"
           env -u PUSH_TOKEN git init -q --bare "$B"
-          env -u PUSH_TOKEN git -C "$B" -c protocol.file.allow=always fetch -q --no-tags \
-            "file://$ANTENLY_DIR" "+refs/heads/$IN_BRANCH:refs/heads/$IN_BRANCH" >/dev/null 2>&1 \
-            || { echo "::error::copie locale des commits contrôlés impossible : push refusé"; exit 1; }
-          [ "$(git -C "$B" rev-parse "refs/heads/$IN_BRANCH")" = "$HEAD_SHA" ] \
-            || { echo "::error::la branche a bougé après les contrôles : push refusé"; exit 1; }
+          # copie <branche> <sha contrôlé>
+          copie() {
+            env -u PUSH_TOKEN git -C "$B" -c protocol.file.allow=always fetch -q --no-tags \
+              "file://$ANTENLY_DIR" "+refs/heads/$1:refs/heads/$1" >/dev/null 2>&1 \
+              && [ "$(git -C "$B" rev-parse "refs/heads/$1")" = "$2" ]
+          }
           auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
           echo "::add-mask::$auth"
-          # En-tête passé par l'environnement de git seul (pas en argument visible dans ps), env vidé
-          # des proxys / GIT_* qu'opencode aurait pu poser via $GITHUB_ENV.
-          if env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-               GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
-               GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
-               GIT_CONFIG_KEY_1=http.https://github.com/.extraheader GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $auth" \
-               /usr/bin/git -C "$B" push --no-verify --porcelain "https://github.com/LordThiouk/antenly.git" \
-               "$HEAD_SHA:refs/heads/$IN_BRANCH" >/dev/null 2>&1; then
-            echo "Push OK : antenly@$IN_BRANCH → ${HEAD_SHA:0:7}"
+          # pousse <sha> <branche> : en-tête passé par l'environnement de git seul (pas en argument
+          # visible dans ps), env vidé des proxys / GIT_* qu'opencode aurait pu poser ; jamais de force.
+          pousse() {
+            env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+              GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
+              GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+              GIT_CONFIG_KEY_1=http.https://github.com/.extraheader GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $auth" \
+              /usr/bin/git -C "$B" push --no-verify --porcelain "https://github.com/LordThiouk/antenly.git" \
+              "$1:refs/heads/$2" >/dev/null 2>&1
+          }
+          work=0
+          if ! copie "$IN_BRANCH" "$HEAD_SHA"; then
+            echo "::error::la branche a bougé après les contrôles, ou copie locale impossible : push refusé"
+          elif pousse "$HEAD_SHA" "$IN_BRANCH"; then
+            work=1; echo "Push OK : antenly@$IN_BRANCH → ${HEAD_SHA:0:7}"
           else
-            echo "::error::push refusé (branche avancée ailleurs, ou jeton sans droit) : rien n'a été forcé"; exit 1
+            echo "::error::push refusé (branche avancée ailleurs, ou jeton sans droit) : rien n'a été forcé"
           fi
+          # Journal : nouvelle branche dédiée (un commit orphelin). Si elle existe déjà, refus (pas de force).
+          logp=""
+          if [[ "$LOG_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            if copie "$LOGB" "$LOG_SHA" && pousse "$LOG_SHA" "$LOGB"; then
+              logp="$LOGB"; echo "Journal privé poussé : antenly@$LOGB"
+              echo "- Journal poussé sur la branche \`$LOGB\` d'antenly (à supprimer après lecture)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::journal non poussé sur $LOGB (le travail n'est pas concerné)"
+            fi
+          fi
+          echo "log_branch=$logp" >> "$GITHUB_OUTPUT"
+          [ "$work" = 1 ] || exit 1
 
       - name: Statut final
         if: always()
         env:
           OC_OUTCOME: ${{ steps.oc.outcome }}
+          OC_STOP: ${{ steps.oc.outputs.stop }}
+          OC_IDLE_MIN: ${{ inputs.idle_minutes }}
         run: |
-          echo "opencode : ${OC_OUTCOME:-non lancé}"
-          [ "$OC_OUTCOME" = success ] || exit 1
+          case "${OC_STOP:-}" in
+            ok) why="terminé" ;;
+            silence) why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
+            plafond) why="plafond atteint" ;;
+            annulation) why="annulé" ;;
+            erreur) why="erreur opencode" ;;
+            *) why="non lancé ou interrompu" ;;
+          esac
+          echo "opencode : ${OC_OUTCOME:-non lancé} ; arrêt : $why"
+          echo "- Statut final opencode : **$why**" >> "$GITHUB_STEP_SUMMARY"
+          [ "$OC_OUTCOME" = success ] || { echo "::error::run en échec : $why"; exit 1; }
+
+      # Notification de fin vers opencode-notify (même format que oc-run sur la box). Toujours,
+      # même après échec ou annulation ; ne fait jamais échouer le job. Contenu neutre : codes,
+      # raison, SHA, URL, ISC, modèle ; jamais de texte du modèle. URL et clé passées à curl par
+      # stdin (-K -), jamais en argument ni à l'écran ; aucun script du dépôt n'est lancé ici.
+      - name: Notification de fin (opencode-notify)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          OC_NOTIFY_URL: ${{ secrets.OC_NOTIFY_URL }}
+          OC_NOTIFY_KEY: ${{ secrets.OC_NOTIFY_KEY }}
+          JOB_STATUS: ${{ job.status }}
+          OC_STOP: ${{ steps.oc.outputs.stop }}
+          OC_RC: ${{ steps.oc.outputs.rc }}
+          OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
+          IN_JOB: ${{ inputs.job_name }}
+          OC_MODEL_MAIN: ${{ inputs.model_main }}
+          PUSH_OUTCOME: ${{ steps.push.outcome }}
+          LOG_BRANCH: ${{ steps.push.outputs.log_branch }}
+          HEAD_SHA: ${{ steps.check.outputs.head }}
+          ISC: ${{ steps.check.outputs.isc }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+        run: |
+          set +x
+          export PATH=/usr/bin:/bin
+          if [ -z "${OC_NOTIFY_URL:-}" ] || [ -z "${OC_NOTIFY_KEY:-}" ]; then
+            echo "::warning::secrets OC_NOTIFY_URL / OC_NOTIFY_KEY absents : notification ignorée"; exit 0
+          fi
+          case "${OC_STOP:-}" in
+            silence) status="bloqué"; why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
+            plafond) status="échec"; why="plafond atteint" ;;
+            annulation) status="annulé"; why="annulé" ;;
+            erreur) status="échec"; why="erreur opencode" ;;
+            ok) status="fini"; why="terminé" ;;
+            *) status="échec"; why="opencode non lancé ou interrompu" ;;
+          esac
+          if [ "$JOB_STATUS" = cancelled ] && [ "$status" != "annulé" ]; then status="annulé"; why="annulé ($why)"; fi
+          [ "$JOB_STATUS" = success ] || [ "$status" != fini ] || { status="échec"; why="terminé, mais contrôles ou push en échec"; }
+          now=$(date +%s); t0="$OC_JOB_T0"
+          [[ "$t0" =~ ^[0-9]{9,11}$ && "$t0" -le "$now" ]] && dur=$(( now - t0 )) || dur=0
+          [[ "$OC_RC" =~ ^[0-9]{1,3}$ ]] || OC_RC="?"
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$PUSH_OUTCOME" = success ]] && sha="${HEAD_SHA:0:7}" || sha="aucun"
+          [[ "$ISC" =~ ^([0-9]{1,7}|\?)/([0-9]{1,7}|\?)$ ]] || ISC="?/?"
+          [[ "$LOG_BRANCH" =~ ^fullrun-logs/[A-Za-z0-9._-]{1,90}$ ]] || LOG_BRANCH="aucun"
+          tail="exit=${OC_RC} · raison=${why} · sha poussé=${sha} · journal=${LOG_BRANCH} · ISC ${ISC} · modèle ${OC_MODEL_MAIN} · run ${RUN_URL}"
+          id=$(printf '%s:%s:%s:%s' "$IN_JOB" "$RUN_ID" "$RUN_ATTEMPT" "$status" | sha256sum | cut -d' ' -f1)
+          body="$RUNNER_TEMP/notify.json"
+          jq -nc --arg job "$IN_JOB" --arg status "$status" --argjson duration "$dur" --arg log_tail "$tail" \
+            --arg event_id "$id" --arg run_id "$RUN_ID" \
+            '{job:$job,status:$status,duration:$duration,pr_url:"",log_tail:$log_tail,event_id:$event_id,run_id:$run_id}' > "$body"
+          ok=0
+          for attempt in 1 2 3; do
+            code=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\nheader = "X-Automation-Key: %s"\n' \
+                     "$OC_NOTIFY_URL" "$OC_NOTIFY_KEY" "$OC_NOTIFY_KEY" \
+                   | curl -sS -K - --max-time 15 -X POST -H "Content-Type: application/json" -H "Idempotency-Key: $id" \
+                       --data-binary "@$body" -o /dev/null -w '%{http_code}' 2>/dev/null) || code="000"
+            if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then ok=1; break; fi
+            echo "notification : essai $attempt, HTTP ${code:0:3}"
+            [ "$attempt" -lt 3 ] && sleep $(( attempt * 10 ))
+          done
+          rm -f "$body"
+          if [ "$ok" = 1 ]; then echo "notification envoyée : $why"; else echo "::warning::notification non livrée après 3 essais (le job garde son statut)"; fi

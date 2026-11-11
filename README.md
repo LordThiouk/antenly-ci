@@ -81,7 +81,8 @@ n'existe pas pour Python 3.14, défaut actuel de `ubuntu-latest`).
 Fait tourner un long job opencode (FullRun LifeOS) pour `antenly` sur un runner GitHub
 standard, à la place de la box (qui se met en pause). Dépôt public : les minutes des
 runners standards sont **gratuites** et ne touchent pas au quota mensuel. Limite : 6 h par
-job (le workflow s'arrête à 350 min, opencode à 310 min pour laisser le temps de pousser).
+job (le workflow s'arrête à 350 min ; opencode est arrêté au plus tard à 335 min, pour laisser
+15 min au rapport, aux contrôles et au push).
 
 **Ce qui est versionné ici (public).** Le workflow, `opencode/config/opencode.json`
 (config de la box assainie : sans provider FreeLLM ni VPS, sans MCP `github`/`rea`/
@@ -101,6 +102,11 @@ LifeOS et prompt Nix restent **privés** dans `LordThiouk/lifeos`, dossier `open
 | `ANTENLY_PUSH_TOKEN` | jeton fine-grained, **seulement** `LordThiouk/antenly` | Contents: read & write (pas Workflows, pas Administration) |
 | `LIFEOS_READ_TOKEN` | jeton fine-grained, **seulement** `LordThiouk/lifeos` | Contents: read |
 | `ISA_STAMP_KEY` | contenu de `~/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key` de la box (64 hex) | — |
+| `OC_NOTIFY_URL` | URL du webhook opencode-notify (la même que `OC_NOTIFY_URL` de `~/.oc-run/config` sur la box) | optionnel |
+| `OC_NOTIFY_KEY` | clé du webhook (`OC_NOTIFY_KEY` de `~/.oc-run/config`) | optionnel |
+
+Sans `OC_NOTIFY_URL`/`OC_NOTIFY_KEY`, le run marche pareil mais n'envoie pas de notification de fin
+(avertissement dans le step). Mêmes noms que ceux attendus par `inventory-probe.yml`.
 
 Aucune clé de modèle : les modèles `opencode/*-free` n'en demandent pas. Le workflow
 refuse tout modèle qui n'est pas `opencode/…-free`.
@@ -125,7 +131,8 @@ l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiou
   (défaut `opencode/mimo-v2.6-flash-free`), `model_fallback` (défaut
   `opencode/glm-5.3-flash-free`, utilisé seulement si la passe principale échoue sur un 429) ;
 - `isa_path` (optionnel) : `MEMORY/WORK/<dossier>/ISA.md` dont le suivi compte les ISC ; vide =
-  l'unique ISA citée par le prompt, sinon l'unique ISA modifiée par le run, sinon `?`.
+  l'unique ISA citée par le prompt, sinon l'unique ISA modifiée par le run, sinon `?` ;
+- `idle_minutes` (défaut `30`, de 10 à 120) : garde-fou de silence, voir plus bas.
 
 Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
 
@@ -133,24 +140,59 @@ Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f br
 `opencode run (…)`. Une ligne `[suivi]` s'affiche au départ, puis toutes les 10 min, puis à la fin :
 
 ```
-[suivi] 09:12 Dakar · +40 min · phase Marking · agent Silas · ISC 7/50 · commits 2 · 429/limite non
+[suivi] 09:12 Dakar · +40 min · phase Marking · agent Silas · ISC 7/50 · commits 2 · silence 3 min · 429/limite non
 ```
 
 heure de Dakar, minutes écoulées, dernière bannière `LifeOS | Algorithm | <phase>`, dernier agent
-lancé, ISC cochés/total de l'ISA (`- [x]` / `- [ ]`), commits locaux depuis le départ, et si un
-429 / « Free usage limit » est apparu. Chaque valeur passe une liste blanche (phases, agents) ou
+lancé, ISC cochés/total de l'ISA (`- [x]` / `- [ ]`), commits locaux depuis le départ, minutes
+depuis la dernière écriture du journal opencode, et si un 429 / « Free usage limit » est apparu.
+La ligne finale donne la raison d'arrêt : `[suivi] fin : terminé`, `fin : bloqué (silence 30 min)`,
+`fin : plafond atteint`, `fin : annulé` ou `fin : erreur opencode`. Chaque valeur passe une liste blanche (phases, agents) ou
 un filtre numérique, sinon elle vaut `?` : aucun texte du modèle, chemin ni code n'est affiché.
 Le même tableau apparaît dans le **Summary** du run une fois le step terminé.
 
-**Journal complet (privé).** À la fin, même si opencode a échoué ou dépassé le temps, le log
-opencode est commité sur la branche d'`antenly` dans `.fullrun/logs/<job>-<run_id>.log` (codes
-ANSI retirés ; jetons `ghp_`/`github_pat_`/`hf_`/`sk-`/AWS/Slack/JWT, en-têtes `Authorization`,
-identifiants d'URL, clé ISA et toute valeur de 64 hex masqués ; au-delà de 5 Mo, le début et la
-fin sont gardés avec une mention de troncature). Il est commité **en dernier, avant** gitleaks et
-la détection de la clé ISA : s'ils signalent quelque chose, seul le commit du journal est retiré,
-le reste est recontrôlé puis poussé (le Summary affiche « journal retiré ») ; si le problème est
-ailleurs, rien n'est poussé, comme avant. Le rapport `.fullrun/<job>_DONE.md` donne le chemin.
-Pour le lire : GitHub → `antenly` → branche → `.fullrun/logs/`.
+**Garde-fou de silence et plafond.** Un moniteur (`opencode/run-fullrun.sh`) lance opencode dans
+sa propre session et surveille la taille de son journal (fichier du runner, jamais affiché) :
+- si le journal ne grossit plus pendant `idle_minutes` minutes (défaut 30) : arrêt propre, raison
+  **`bloqué (silence N min)`** ;
+- au plus tard à 335 min après le début du job (plafond 350 - 15 min de marge pour pousser) : arrêt
+  propre, raison **`plafond atteint`**.
+
+Arrêt propre = SIGINT au groupe de processus d'opencode et à tous ses descendants (même ceux qui ont
+changé de session), puis SIGKILL après 60 s. Le repli 429 n'est jamais tenté après un tel arrêt. La
+raison est décidée par le moniteur (son code de sortie : 125 silence, 124 plafond), jamais lue dans
+un fichier qu'opencode pourrait écrire. Ensuite, comme pour tout échec : rapport, contrôles
+(gitleaks, clé ISA, branche, historique) et push de ce qui est commité, puis le job finit **en
+échec** avec la raison dans le log public, la ligne `[suivi]` finale, le Summary et la notification.
+Une annulation du run est relayée au moniteur, qui arrête opencode avant les steps de rapport et de push.
+
+**Journal complet (privé, branche à part).** À la fin, même si opencode a échoué, a été arrêté ou
+le run annulé, le log opencode est poussé sur une **branche dédiée** d'`antenly`,
+`fullrun-logs/<job>-<run_id>` : un seul commit orphelin (sans parent) contenant
+`.fullrun/logs/<job>-<run_id>.log`. Il ne va **jamais** sur la branche de travail (seul le rapport
+`.fullrun/<job>_DONE.md` y va, avec le nom de la branche de journal). Avant : codes ANSI retirés ;
+jetons `ghp_`/`github_pat_`/`hf_`/`sk-`/AWS/Slack/JWT, en-têtes `Authorization`, identifiants d'URL,
+clé ISA et toute valeur de 64 hex masqués ; au-delà de 5 Mo, début et fin gardés avec une mention de
+troncature. Ce commit passe les mêmes contrôles que le travail (gitleaks avec la config du SHA de
+départ, recherche de la clé ISA, dans un dépôt nu neuf) : s'il est signalé, seul le journal n'est pas
+poussé (le Summary affiche « retiré ») ; le travail, lui, est poussé s'il est propre. La branche est
+créée sans force : si elle existe déjà, le journal n'est pas poussé (avertissement). Le nom de la
+branche est dans le Summary, le rapport et la notification.
+
+Lire : GitHub → `antenly` → branche `fullrun-logs/…`. **À supprimer après lecture** (par Papa) :
+
+```bash
+git push origin --delete fullrun-logs/<job>-<run_id>
+```
+
+**Notification de fin.** Dernier step, toujours exécuté (fin, échec, blocage, annulation) : POST au
+webhook opencode-notify, même format que `oc-run` sur la box (`job`, `status` = `fini` / `échec` /
+`bloqué` / `annulé`, `duration` en secondes réelles depuis le début du job, `pr_url` vide,
+`log_tail`, `event_id`, `run_id`, en-têtes `Authorization: Bearer`, `X-Automation-Key`,
+`Idempotency-Key`). `log_tail` est neutre : code de sortie, raison d'arrêt, SHA poussé, branche de
+journal, ISC cochés/total, modèle et URL du run ; jamais de texte du modèle. URL et clé passent à
+curl par l'entrée standard (jamais en argument ni à l'écran). Trois essais au plus (10 s puis 20 s
+d'attente) ; un échec de notification ne change pas le résultat du job.
 
 **Résultat.** Les commits d'opencode et le rapport `.fullrun/<job>_DONE.md` sont poussés sur
 la branche (si une PR est ouverte dessus, `pr-dispatch.yml` lance ensuite la CI habituelle sur le nouveau SHA). Le log du
@@ -165,8 +207,12 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 - Tout ce qui s'affiche dans le log est public : ne jamais ajouter `cat`/`tee` du log
   opencode ni `actions/upload-artifact` à ce workflow. Le suivi n'affiche que des valeurs de
   liste blanche ; ajouter un champ à `progress.sh` = le filtrer de la même façon.
-- Le journal privé reste dans l'historique d'`antenly` (jusqu'à 5 Mo par run) ; le masquage est
-  un filet en plus de gitleaks, pas une garantie : un secret de forme inconnue peut y rester.
+- Le journal privé est sur une branche `fullrun-logs/…` d'`antenly` (jusqu'à 5 Mo par run) tant
+  qu'elle n'est pas supprimée ; le masquage est un filet en plus de gitleaks, pas une garantie : un
+  secret de forme inconnue peut y rester. Supprimer la branche après lecture.
+- Le garde-fou de silence mesure l'écriture du journal : un opencode qui écrit en boucle sans
+  avancer n'est pas « silencieux » (seul le plafond l'arrête). Un modèle qui réfléchit plus de
+  `idle_minutes` sans rien écrire est arrêté : monter `idle_minutes` si besoin.
 - Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
   `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
   push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui
@@ -174,6 +220,10 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   ignorés ; gitleaks et la recherche de la clé ISA (prise du secret, pas de `$HOME`) tournent dans
   un dépôt nu neuf (sans `diff.external`/textconv du run) ; le push part d'un autre dépôt nu neuf,
   env vidé (`env -i`), après vérification du SHA contrôlé, sans force.
+- Garde-fou de silence : opencode a `sudo` et pourrait tuer le moniteur ou écrire dans le fichier
+  de sorties du step ; la raison écrite par le moniteur, après l'arrêt d'opencode, passe en dernier
+  et chaque valeur est revérifiée (liste blanche) par les steps suivants. Le plafond du job (350 min)
+  reste le filet ultime.
 - Limite restante : opencode a `sudo` sur le runner et le même utilisateur que les steps suivants.
   Un processus laissé en arrière-plan ou un binaire système remplacé pourrait encore lire le jeton
   de push. Seule parade complète : pousser depuis un **autre job** (VM neuve) qui reçoit les commits
