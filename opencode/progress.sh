@@ -3,7 +3,7 @@
 # N'émet que des valeurs filtrées : heure, durée, phase et agent pris dans une liste blanche,
 # compteurs numériques, booléen 429. Jamais de texte du modèle, de chemin ni de code ; tout
 # ce qui ne passe pas le filtre devient « ? ».
-#   progress.sh start | once [fin] | loop
+#   progress.sh start | once [fin [ok|silence|plafond|erreur|annulation]] | loop | isc
 set +x
 set -uo pipefail
 : "${OC_LOG:?}" "${ANTENLY_DIR:?}" "${OC_START:?}"
@@ -39,16 +39,22 @@ isa_file() {
   [ "$(printf '%s' "$c" | grep -c .)" = 1 ] && [[ "$c" =~ $re && "$c" != *..* ]] && printf '%s' "$c"
 }
 
-line() {
-  local tag="${1:-}" now el clean phase agent isa real ok='?' total='?' commits='?' lim='?'
-  now=$(TZ=Africa/Dakar date '+%H:%M')
-  el=$(( ( $(date +%s) - OC_START ) / 60 ))
-  clean=$(mktemp)
-  [ -f "$OC_LOG" ] && perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r//g' "$OC_LOG" > "$clean" 2>/dev/null
-  phase=$(grep -aoE 'LifeOS \| Algorithm \| [^|]{0,40}' "$clean" | tail -n1 | grep -oE '[A-Za-z]+' | tail -n1)
-  agent=$(sed -nE 's/^• .* ([A-Za-z][A-Za-z-]{1,40}) Agent[[:space:]]*$/\1/p' "$clean" | tail -n1)
-  if grep -qaiE '\b429\b|free usage limit|too many requests' "$clean"; then lim=oui; elif [ -f "$OC_LOG" ]; then lim=non; fi
-  rm -f "$clean"
+# Raison d'arrêt (code de liste blanche décidé par le step) -> libellé public.
+reason_label() {
+  local n; n=$(num "${OC_IDLE_MIN:-}")
+  case "${1:-}" in
+    ok) printf 'terminé' ;;
+    silence) printf 'bloqué (silence %s min)' "$n" ;;
+    plafond) printf 'plafond atteint' ;;
+    annulation) printf 'annulé' ;;
+    erreur) printf 'erreur opencode' ;;
+    *) printf '' ;;
+  esac
+}
+
+# ISC cochés/total de l'ISA suivie : « n/m » ou « ?/? ».
+isc() {
+  local isa real ok='?' total='?'
   isa=$(isa_file)
   real=""
   [ -n "$isa" ] && real=$(realpath -e "$ANTENLY_DIR/$isa" 2>/dev/null)
@@ -57,13 +63,31 @@ line() {
       ok=$(grep -cE '^[[:space:]]*[-*] \[[xX]\]' "$real")
       total=$(( ok + $(grep -cE '^[[:space:]]*[-*] \[ \]' "$real") )) ;;
   esac
+  printf '%s/%s' "$(num "$ok")" "$(num "$total")"
+}
+
+line() {
+  local tag="${1:-}" why now el clean phase agent ok total commits='?' lim='?' idle='?' mt
+  why=$(reason_label "${2:-}")
+  now=$(TZ=Africa/Dakar date '+%H:%M')
+  el=$(( ( $(date +%s) - OC_START ) / 60 ))
+  # Minutes depuis la dernière écriture du journal opencode (date de modification du fichier).
+  mt=$(stat -c %Y "$OC_LOG" 2>/dev/null) && [[ "$mt" =~ ^[0-9]+$ ]] && idle=$(( ( $(date +%s) - mt ) / 60 ))
+  [[ "$idle" =~ ^[0-9]+$ && "$idle" -lt 0 ]] && idle=0
+  clean=$(mktemp)
+  [ -f "$OC_LOG" ] && perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r//g' "$OC_LOG" > "$clean" 2>/dev/null
+  phase=$(grep -aoE 'LifeOS \| Algorithm \| [^|]{0,40}' "$clean" | tail -n1 | grep -oE '[A-Za-z]+' | tail -n1)
+  agent=$(sed -nE 's/^• .* ([A-Za-z][A-Za-z-]{1,40}) Agent[[:space:]]*$/\1/p' "$clean" | tail -n1)
+  if grep -qaiE '\b429\b|free usage limit|too many requests' "$clean"; then lim=oui; elif [ -f "$OC_LOG" ]; then lim=non; fi
+  rm -f "$clean"
+  IFS=/ read -r ok total <<<"$(isc)"
   [ -n "${BASE_SHA:-}" ] && commits=$(GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false -C "$ANTENLY_DIR" rev-list --count "$BASE_SHA..HEAD" 2>/dev/null)
   phase=$(pick "${phase:-}" "$PHASES"); agent=$(pick "${agent:-}" "$AGENTS")
-  ok=$(num "$ok"); total=$(num "$total"); commits=$(num "$commits"); el=$(num "$el")
-  [ "$tag" = fin ] && tag="fin · " || tag=""
-  echo "[suivi] ${tag}${now} Dakar · +${el} min · phase ${phase} · agent ${agent} · ISC ${ok}/${total} · commits ${commits} · 429/limite ${lim}"
+  ok=$(num "$ok"); total=$(num "$total"); commits=$(num "$commits"); el=$(num "$el"); idle=$(num "$idle")
+  if [ "$tag" = fin ]; then tag="fin${why:+ : $why} · "; else tag=""; fi
+  echo "[suivi] ${tag}${now} Dakar · +${el} min · phase ${phase} · agent ${agent} · ISC ${ok}/${total} · commits ${commits} · silence ${idle} min · 429/limite ${lim}"
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] && \
-    echo "| ${tag}${now} | ${el} | ${phase} | ${agent} | ${ok}/${total} | ${commits} | ${lim} |" >> "$GITHUB_STEP_SUMMARY"
+    echo "| ${tag}${now} | ${el} | ${idle} | ${phase} | ${agent} | ${ok}/${total} | ${commits} | ${lim} |" >> "$GITHUB_STEP_SUMMARY"
   return 0
 }
 
@@ -71,11 +95,12 @@ case "${1:-}" in
   start)
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
       { echo "### Suivi opencode (toutes les $((INTERVAL / 60)) min, valeurs filtrées)"; echo
-        echo "| heure (Dakar) | min | phase | dernier agent | ISC cochés | commits | 429/limite |"
-        echo "|---|---|---|---|---|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+        echo "| heure (Dakar) | min | silence (min) | phase | dernier agent | ISC cochés | commits | 429/limite |"
+        echo "|---|---|---|---|---|---|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
     fi
     line ;;
-  once) line "${2:-}" ;;
+  once) line "${2:-}" "${3:-}" ;;
+  isc) isc; echo ;;
   loop)
     sp=""
     trap '[ -n "$sp" ] && kill "$sp" 2>/dev/null; exit 0' TERM INT HUP
@@ -85,5 +110,5 @@ case "${1:-}" in
       kill -0 "$parent" 2>/dev/null || break
       line
     done ;;
-  *) echo "usage: progress.sh start|once [fin]|loop" >&2; exit 2 ;;
+  *) echo "usage: progress.sh start|once [fin [raison]]|loop|isc" >&2; exit 2 ;;
 esac
