@@ -1,0 +1,287 @@
+name: opencode FullRun
+run-name: FullRun ${{ inputs.job_name }} → antenly@${{ inputs.branch }}
+
+# Longs jobs opencode (FullRun LifeOS) pour le dépôt privé LordThiouk/antenly.
+# Dépôt PUBLIC : logs visibles par tous. La sortie d'opencode reste dans un fichier du
+# runner, jamais affichée ni publiée en artifact. Déclenchement manuel uniquement.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branche de fonctionnalité d'antenly, déjà poussée (jamais main/master)"
+        required: true
+        type: string
+      prompt_path:
+        description: "Prompt : antenly:<chemin dans antenly> ou ci:<chemin dans antenly-ci>"
+        required: true
+        type: string
+      job_name:
+        description: "Nom du job (lettres, chiffres, - _ .) ; rapport .fullrun/<job>_DONE.md"
+        required: true
+        type: string
+      model_main:
+        description: "Modèle principal et Forge (gratuit opencode uniquement)"
+        type: string
+        default: opencode/deepseek-v4.1-flash-free
+      model_max:
+        description: "Modèle de Max (gratuit opencode uniquement)"
+        type: string
+        default: opencode/mimo-v2.6-flash-free
+      model_fallback:
+        description: "Repli, seulement si le principal échoue sur un 429"
+        type: string
+        default: opencode/glm-5.3-flash-free
+      lifeos_ref:
+        description: "Branche de LordThiouk/lifeos (skills, agents, config opencode privée)"
+        type: string
+        default: ci/opencode-config-2026-11-11
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-fullrun-${{ inputs.branch }}
+  cancel-in-progress: false
+
+env:
+  OPENCODE_VERSION: "1.19.4"
+  BUN_VERSION: "1.4.4"
+  GITLEAKS_VERSION: "8.30.1"
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  fullrun:
+    if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      IN_BRANCH: ${{ inputs.branch }}
+      IN_PROMPT: ${{ inputs.prompt_path }}
+      IN_JOB: ${{ inputs.job_name }}
+      OC_MODEL_MAIN: ${{ inputs.model_main }}
+      OC_MODEL_MAX: ${{ inputs.model_max }}
+      OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
+      IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
+      ANTENLY_DIR: ${{ github.workspace }}/antenly
+      CI_DIR: ${{ github.workspace }}/ci
+      OPENCODE_DISABLE_AUTOUPDATE: "1"
+    steps:
+      - name: Garde des entrées (branche, modèles gratuits, chemins)
+        run: |
+          set +x
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || fail "branche invalide"
+          case "${IN_BRANCH,,}" in
+            main|master|head|refs/*|*..*|*/|*.lock) fail "branche interdite : seule une branche de fonctionnalité est acceptée" ;;
+          esac
+          [[ "$IN_JOB" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "job_name invalide"
+          [[ "$IN_PROMPT" =~ ^(antenly|ci):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide (antenly:<chemin> ou ci:<chemin>)"
+          [[ "$IN_LIFEOS_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$IN_LIFEOS_REF" != *..* ]] || fail "lifeos_ref invalide"
+          for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX" "$OC_MODEL_FALLBACK"; do
+            [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle refusé : seuls les modèles opencode/*-free sont admis"
+          done
+          echo "OC_WORK=$RUNNER_TEMP/oc" >> "$GITHUB_ENV"
+          echo "Entrées valides : branche $IN_BRANCH, job $IN_JOB"
+
+      - name: Checkout antenly-ci
+        uses: actions/checkout@v4
+        with:
+          path: ci
+          persist-credentials: false
+
+      - name: Checkout antenly (lecture seule)
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ inputs.branch }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          path: antenly
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout LifeOS (lecture seule)
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/lifeos
+          ref: ${{ inputs.lifeos_ref }}
+          token: ${{ secrets.LIFEOS_READ_TOKEN }}
+          path: lifeos
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Installer opencode (version de la box)
+        run: |
+          npm install -g --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}" >/dev/null 2>&1
+          v=$(opencode --version 2>/dev/null | tail -n1)
+          [ "$v" = "$OPENCODE_VERSION" ] || { echo "::error::opencode $v au lieu de $OPENCODE_VERSION"; exit 1; }
+          echo "opencode $v"
+
+      - name: Reconstituer ~/.claude et ~/.config/opencode
+        run: |
+          set +x
+          L="$GITHUB_WORKSPACE/lifeos"
+          [ -d "$L/opencode/agent" ] || { echo "::error::lifeos@$IN_LIFEOS_REF sans dossier opencode/"; exit 1; }
+          mkdir -p "$HOME/.claude" "$HOME/.config/opencode" "$HOME/.local/share/opencode-lifeos" \
+                   "$HOME/.claude/LIFEOS/MEMORY/STATE"
+          rsync -a --exclude .git --exclude secrets --exclude opencode "$L/" "$HOME/.claude/"
+          cp "$L/settings.template.json" "$HOME/.claude/settings.json"
+          (cd "$HOME/.claude" && bun install --silent >/dev/null 2>&1) || echo "::warning::bun install ~/.claude incomplet"
+          C="$HOME/.config/opencode"
+          cp "$CI_DIR/opencode/config/opencode.json" "$C/opencode.json"
+          cp -r "$L/opencode/agent" "$L/opencode/command" "$L/opencode/plugins" "$C/"
+          cp "$L/opencode/package.json" "$C/package.json"
+          cp "$L/opencode/nix-lifeos.prompt.md" "$HOME/.local/share/opencode-lifeos/"
+          (cd "$C" && bun install --silent >/dev/null 2>&1) || { echo "::error::bun install ~/.config/opencode KO"; exit 1; }
+          # Modèles : Max sur model_max, tous les autres agents sur model_main.
+          for f in "$C"/agent/*.md; do
+            m="$OC_MODEL_MAIN"; [ "$(basename "$f")" = "Max.md" ] && m="$OC_MODEL_MAX"
+            sed -i -E "0,/^model: .*/s##model: ${m}#" "$f"
+          done
+          # Les agents générés citent /home/box : lien vers le HOME du runner.
+          [ -e /home/box ] || sudo ln -s "$HOME" /home/box
+          echo "Config LifeOS/opencode en place"
+
+      - name: Clé d'empreinte ISA
+        env:
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+        run: |
+          set +x
+          [ -n "${ISA_STAMP_KEY:-}" ] || { echo "::error::secret ISA_STAMP_KEY absent (acte Papa requis)"; exit 1; }
+          echo "::add-mask::$ISA_STAMP_KEY"
+          K="$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key"
+          ( umask 077; printf '%s' "$ISA_STAMP_KEY" > "$K" )
+          [ "$(tr -d '\n' < "$K" | wc -c)" -ge 64 ] || { echo "::error::ISA_STAMP_KEY trop courte (64 hex attendus)"; exit 1; }
+          echo "Clé ISA écrite (0600)"
+
+      - name: Préparer le dépôt antenly et le prompt
+        run: |
+          set +x
+          cd "$ANTENLY_DIR"
+          [ "$(git rev-parse --abbrev-ref HEAD)" = "$IN_BRANCH" ] || git checkout -q -B "$IN_BRANCH" "origin/$IN_BRANCH"
+          git config user.name "Nix"
+          git config user.email "nix@antenly.local"
+          # Aucun remote utilisable par l'IA : le push final ajoute ses propres identifiants.
+          printf '#!/bin/sh\necho "push interdit pendant le run opencode" >&2\nexit 1\n' > .git/hooks/pre-push
+          chmod +x .git/hooks/pre-push
+          mkdir -p "$OC_WORK"
+          echo "BASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          src="${IN_PROMPT%%:*}"; rel="${IN_PROMPT#*:}"
+          if [ "$src" = antenly ]; then root="$ANTENLY_DIR"; else root="$CI_DIR"; fi
+          p=$(realpath -e "$root/$rel" 2>/dev/null) || { echo "::error::prompt introuvable"; exit 1; }
+          case "$p" in "$root"/*) ;; *) echo "::error::prompt hors du dépôt"; exit 1 ;; esac
+          export OC_BRANCH="$IN_BRANCH" OC_JOB="$IN_JOB" OC_REPORT="$OC_WORK/REPORT.md"
+          # shellcheck disable=SC2016 # liste de variables pour envsubst, pas une expansion
+          envsubst '$ANTENLY_DIR $OC_BRANCH $OC_REPORT $OC_JOB $OC_MODEL_MAIN $OC_MODEL_MAX' \
+            < "$CI_DIR/opencode/ci-preamble.md" > "$OC_WORK/prompt.md"
+          cat "$p" >> "$OC_WORK/prompt.md"
+          echo "Prompt prêt ($(wc -l < "$OC_WORK/prompt.md") lignes), base $(git rev-parse --short HEAD)"
+
+      - name: opencode run (sortie jamais affichée)
+        id: oc
+        continue-on-error: true
+        timeout-minutes: 320
+        env:
+          OC_JOB: ${{ inputs.job_name }}
+          OC_BRANCH: ${{ inputs.branch }}
+          OC_PROMPT_FILE: ${{ runner.temp }}/oc/prompt.md
+          OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
+          OC_LOG: ${{ runner.temp }}/oc/opencode.log
+          OC_DEADLINE_MIN: "310"
+        run: |
+          set +x
+          if "$CI_DIR/opencode/run-fullrun.sh"; then
+            echo "opencode : terminé (code 0)"
+          else
+            rc=$?; echo "opencode : arrêt non nul (code $rc), détails dans le rapport poussé sur la branche"
+            exit 1
+          fi
+
+      - name: Rapport et contrôles avant push
+        id: check
+        if: always() && env.BASE_SHA != ''
+        env:
+          OC_OUTCOME: ${{ steps.oc.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +x
+          cd "$ANTENLY_DIR"
+          br=$(git rev-parse --abbrev-ref HEAD)
+          [ "$br" = "$IN_BRANCH" ] || { echo "::error::opencode a changé de branche : push refusé"; exit 1; }
+          git merge-base --is-ancestor "$BASE_SHA" HEAD || { echo "::error::historique réécrit depuis le SHA de départ : push refusé"; exit 1; }
+          if git diff --name-only "$BASE_SHA" HEAD | grep -q '^\.github/workflows/'; then
+            echo "::error::modification de .github/workflows : push refusé"; exit 1
+          fi
+          # Travail non commité : conservé dans un commit explicite pour la reprise.
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -q -m "wip(ci): état non commité à la fin du run $IN_JOB" || true
+          fi
+          mkdir -p .fullrun
+          R=".fullrun/${IN_JOB}_DONE.md"
+          {
+            echo "# Run CI $IN_JOB"
+            echo
+            echo "- run : $RUN_URL"
+            echo "- fin : $(TZ=Africa/Dakar date '+%Y-%m-%d %H:%M') (Dakar)"
+            echo "- branche : $IN_BRANCH ; base \`$BASE_SHA\`"
+            echo "- opencode : $OC_OUTCOME ; $(tr '\n' ' ' 2>/dev/null < "$OC_WORK/opencode.log.status" || echo 'pas de statut')"
+            echo "- modèles : main/Forge $OC_MODEL_MAIN, Max $OC_MODEL_MAX, repli $OC_MODEL_FALLBACK"
+            echo
+            echo "## Commits du run"
+            git log --format='- %h %s' "$BASE_SHA..HEAD" || true
+            echo
+            echo "## Rapport de l'agent"
+            if [ -s "$OC_WORK/REPORT.md" ]; then cat "$OC_WORK/REPORT.md"; else echo "(aucun rapport écrit : relancer avec le même prompt pour reprendre)"; fi
+          } > "$R"
+          git add "$R"
+          git commit -q -m "chore(ci): rapport du run $IN_JOB" || true
+          # Secrets : gitleaks sur les seuls commits du run, sortie jamais affichée.
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP" gitleaks
+          cfg=(); [ -f .gitleaks.toml ] && cfg=(--config .gitleaks.toml)
+          if ! "$RUNNER_TEMP/gitleaks" git "${cfg[@]}" --log-opts="$BASE_SHA..HEAD" --redact --no-banner \
+                 --report-path "$OC_WORK/gitleaks.json" >/dev/null 2>&1; then
+            echo "::error::gitleaks a trouvé un secret probable dans les commits du run : push refusé"; exit 1
+          fi
+          echo "commits=$(git rev-list --count "$BASE_SHA..HEAD")" >> "$GITHUB_OUTPUT"
+          echo "Contrôles OK : $(git rev-list --count "$BASE_SHA..HEAD") commit(s) à pousser"
+
+      - name: Push sur la branche de fonctionnalité (jamais main, jamais force)
+        if: always() && steps.check.outcome == 'success'
+        env:
+          PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
+        run: |
+          set +x
+          case "${IN_BRANCH,,}" in main|master) echo "::error::push vers main/master refusé"; exit 1 ;; esac
+          [ -n "${PUSH_TOKEN:-}" ] || { echo "::error::secret ANTENLY_PUSH_TOKEN absent (acte Papa requis)"; exit 1; }
+          cd "$ANTENLY_DIR"
+          rm -f .git/hooks/pre-push
+          auth=$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+               push --no-verify --porcelain "https://github.com/LordThiouk/antenly.git" \
+               "HEAD:refs/heads/$IN_BRANCH" >/dev/null 2>&1; then
+            echo "Push OK : antenly@$IN_BRANCH → $(git rev-parse --short HEAD)"
+          else
+            echo "::error::push refusé (branche avancée ailleurs, ou jeton sans droit) : rien n'a été forcé"; exit 1
+          fi
+
+      - name: Statut final
+        if: always()
+        env:
+          OC_OUTCOME: ${{ steps.oc.outcome }}
+        run: |
+          echo "opencode : ${OC_OUTCOME:-non lancé}"
+          [ "$OC_OUTCOME" = success ] || exit 1

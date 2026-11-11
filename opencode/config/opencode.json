@@ -1,0 +1,201 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "{env:HOME}/.claude/LIFEOS/LIFEOS_SYSTEM_PROMPT.md",
+    "{env:HOME}/.claude/LIFEOS/DOCUMENTATION/ARCHITECTURE_SUMMARY.md",
+    "{env:HOME}/.claude/LIFEOS/USER/TELOS/PRINCIPAL_TELOS.md",
+    "{env:HOME}/.claude/LIFEOS/USER/PRINCIPAL/PRINCIPAL_IDENTITY.md",
+    "{env:HOME}/.claude/LIFEOS/USER/DIGITAL_ASSISTANT/DA_IDENTITY.md",
+    "{env:HOME}/.claude/LIFEOS/USER/PROJECTS.md",
+    "{env:HOME}/.claude/LIFEOS/USER/CONFIG/OPERATIONAL_RULES.md",
+    "{env:HOME}/.claude/LIFEOS/ALGORITHM/v8.20.2.md"
+  ],
+  "mcp": {
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "enabled": true
+    },
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp",
+      "enabled": true
+    }
+  },
+  "permission": {
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow"
+    },
+    "edit": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "{env:HOME}/.claude/settings.json": "deny"
+    },
+    "external_directory": {
+      "*": "allow",
+      "{env:HOME}/.ssh/*": "deny"
+    },
+    "bash": {
+      "*": "allow",
+      "git merge*": "deny",
+      "ssh *": "deny",
+      "scp *": "deny",
+      "*.env*": "deny",
+      "*settings.json*": "ask",
+      "*gradlew*": "deny",
+      "*gradle *": "deny",
+      "*assembleDebug*": "deny",
+      "*assembleRelease*": "deny",
+      "*bundleRelease*": "deny",
+      "flutter build*": "deny",
+      "*flutter build*": "deny",
+      "flutter run*": "deny",
+      "*flutter run*": "deny",
+      "git push*main*": "deny",
+      "git push*master*": "deny",
+      "git push*--force*": "deny",
+      "git push*-f *": "deny",
+      "git push*--mirror*": "deny",
+      "git push*": "deny",
+      "gh *": "deny",
+      "*git remote*": "deny",
+      "*http.extraheader*": "deny"
+    }
+  },
+  "tools": {
+    "playwright_*": false
+  },
+  "default_agent": "Nix/LifeOS",
+  "model": "{env:OC_MODEL_MAIN}",
+  "agent": {
+    "Nix/LifeOS": {
+      "mode": "primary",
+      "description": "Nix — DA LifeOS de Papa. Agent principal par défaut : suit l Algorithm LifeOS v8.20.2 (OBSERVE→THINK→PLAN→BUILD→EXECUTE→VERIFY→LEARN), ISA/ISC, format de réponse LifeOS.",
+      "prompt": "{file:{env:HOME}/.local/share/opencode-lifeos/nix-lifeos.prompt.md}",
+      "color": "primary"
+    },
+    "Anvil": {
+      "description": "Moonshot-family code producer. Runs Kimi K2.6 (`kimi-k2.6`) via Moonshot's direct API with temperature 1 (reasoning-model default) and 256K context. Specialization — deliberate, context-wide code generation where the whole project matters. Invoked when {{PRINCIPAL_NAME}} names \"Anvil\", or as a Kimi-family alternative to Forge on coding tasks that benefit from long-context reasoning. Writes code; does not just review. Distinct from Forge (OpenAI-family, GPT-5.4), Cato (auditor), Engineer (Marcus Webb, Claude-family).",
+      "mode": "subagent",
+      "color": "#475569",
+      "prompt": "{file:{env:HOME}/.claude/agents/Anvil.md}"
+    },
+    "Architect": {
+      "description": "Elite system design specialist with PhD-level distributed systems knowledge and Fortune 10 architecture experience. Creates constitutional principles, feature specs, and implementation plans using strategic analysis.",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny"
+      },
+      "prompt": "{file:{env:HOME}/.claude/agents/Architect.md}"
+    },
+    "Artist": {
+      "description": "Visual content creator. Called BY Media skill workflows only. Expert at prompt engineering, model selection (Flux 1.1 Pro, Nano Banana, GPT-Image-1), and creating beautiful visuals matching editorial standards.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Artist.md}"
+    },
+    "BrowserAgent": {
+      "description": "DEPRECATED — legacy built-in agent. Do not invoke for new work. Use the Interceptor skill for all browser automation, web scraping, form filling, data extraction, page interaction, and screenshots. Retained only for reference; its internals cannot be modified.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/BrowserAgent.md}"
+    },
+    "ClaudeResearcher": {
+      "description": "Academic researcher using Claude's WebSearch. Called BY Research skill workflows only. Excels at multi-query decomposition, parallel search execution, and synthesizing scholarly sources.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/ClaudeResearcher.md}"
+    },
+    "ClaudeResearcherContext": {
+      "description": "ClaudeResearcherContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/ClaudeResearcherContext.md}"
+    },
+    "CodexResearcher": {
+      "description": "Remy - Eccentric, curiosity-driven technical archaeologist who treats research like treasure hunting. Powered by OpenAI's flagship model via `codex exec` in deep-reasoning mode (reasoning_effort=high) with live web search; the model ID resolves from CROSS_VENDOR in models.ts. Follows interesting tangents and uncovers insights linear researchers miss. TypeScript-focused.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/CodexResearcher.md}"
+    },
+    "CodexResearcherContext": {
+      "description": "CodexResearcherContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/CodexResearcherContext.md}"
+    },
+    "Designer": {
+      "description": "Elite UX/UI design specialist with design school pedigree and exacting standards. Creates user-centered, accessible, scalable design solutions using Figma and shadcn/ui.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Designer.md}"
+    },
+    "Engineer": {
+      "description": "Elite principal engineer with Fortune 10 and premier Bay Area company experience. Uses TDD, strategic planning, and constitutional principles for implementation work.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Engineer.md}"
+    },
+    "ForgeContext": {
+      "description": "ForgeContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/ForgeContext.md}"
+    },
+    "Gemini": {
+      "description": "Google cross-vendor agent running the top Gemini reasoning model via LIFEOS/TOOLS/GeminiSearch.ts --pro — a third vendor's opinion on public material, vendor panels and bake-offs, and grounded takes where Google Search grounding helps. PUBLIC data class only (same Tier-2 egress ceiling as GeminiResearcher). Never Restricted Data, never the reasoning/audit lanes, never a second look. For multi-perspective research sweeps inside Research workflows, GeminiResearcher remains the specialist.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Gemini.md}"
+    },
+    "GeminiResearcher": {
+      "description": "Multi-perspective researcher using Google Gemini with Search grounding, via LIFEOS/TOOLS/GeminiSearch.ts (NOT the gemini CLI, which cannot authenticate non-interactively here). Called BY Research skill workflows only. Breaks complex queries into 3-10 variations, launches parallel investigations for comprehensive coverage.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/GeminiResearcher.md}"
+    },
+    "GeminiResearcherContext": {
+      "description": "GeminiResearcherContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/GeminiResearcherContext.md}"
+    },
+    "GrokResearcher": {
+      "description": "Johannes - Contrarian, fact-based researcher (xAI Grok stance) via WebSearch/WebFetch — no Grok.ts. Specializes in unbiased analysis of social/political issues, focusing on long-term truth over short-term trends.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/GrokResearcher.md}"
+    },
+    "GrokResearcherContext": {
+      "description": "GrokResearcherContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/GrokResearcherContext.md}"
+    },
+    "PerplexityResearcher": {
+      "description": "Ava - Investigative analyst using Perplexity API for web research. Called BY Research skill workflows only. Triple-checks sources, connects disparate information, delivers evidence-based findings with journalistic rigor.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/PerplexityResearcher.md}"
+    },
+    "PerplexityResearcherContext": {
+      "description": "PerplexityResearcherContext",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/PerplexityResearcherContext.md}"
+    },
+    "QATester": {
+      "description": "DEPRECATED — legacy built-in agent. Do not invoke for new work. Use the Interceptor skill for Gate 4 browser-based QA validation, screenshots, console checks, and user-flow testing. Retained only for reference; its internals cannot be modified.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/QATester.md}"
+    },
+    "Silas": {
+      "description": "Silas Locke — offensive security specialist (\"The Quiet Operator\"). Ex-NSA TAO, methodical, patient, adversarial mindset. Spawned in parallel by security assessment skills (one instance per attack surface) to run specialist sub-assessments, generate attack-chain hypotheses, and write findings to the assessment vault. Performs vulnerability assessments, penetration testing, security audits with professional methodology and ethical boundaries.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Silas.md}"
+    },
+    "UIReviewer": {
+      "description": "DEPRECATED — legacy built-in agent. Do not invoke for new work. Use the Interceptor skill for user-story validation, step execution, screenshots, and structured PASS/FAIL reports. Retained only for reference; its internals cannot be modified.",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/UIReviewer.md}"
+    }
+  },
+  "small_model": "{env:OC_MODEL_MAIN}",
+  "provider": {
+    "opencode": {
+      "options": {
+        "timeout": 300000
+      }
+    }
+  },
+  "autoupdate": false,
+  "share": "disabled"
+}
