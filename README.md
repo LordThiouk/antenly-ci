@@ -232,7 +232,19 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   ici est public.
 - `ANTENLY_PUSH_TOKEN` peut techniquement écrire sur toute branche d'`antenly` ; il n'est
   exposé qu'au step de push, jamais à opencode.
-- Hooks LifeOS : le service local `localhost:31337`, `rtk` et `cc-diff` n'existent pas sur
-  le runner ; le plugin replie les hooks http sur leur équivalent local, les autres
-  devraient échouer sans bloquer (à vérifier au premier run) (journalisés dans `~/.local/state/opencode-lifeos`).
+- Hooks LifeOS : le service local `localhost:31337` et `cc-diff` n'existent pas sur le runner ;
+  le plugin replie les hooks http sur leur équivalent local (journalisés dans
+  `~/.local/state/opencode-lifeos`). `rtk` est maintenant installé : release officielle `rtk-ai/rtk`
+  **v1.2.0**, binaire `x86_64-unknown-linux-musl`, **sha256 vérifié** dans le workflow (comme
+  ripgrep). Le hook `ContextReduction` peut donc réécrire `git`/`gh` en `rtk git …` / `rtk gh …`
+  sans plus finir en `rtk: command not found` (exit 127) à chaque commande.
+- Permissions CI : `opencode/config/opencode.json` ne contient **aucune** valeur `"ask"`
+  (contrôle automatisé au commit). En mode non interactif (`opencode run`), une règle `ask` est
+  refusée d'office et arrête la session : la CI tranche donc d'avance — lecture autorisée,
+  écriture/action sensible refusée. `doom_loop` est explicitement `deny` (son défaut est `ask`,
+  donc inutilisable en CI), et `external_directory` reste `allow` sauf `~/.ssh`.
+  Sur `~/.claude/settings.json` : seules les lectures simples (`rg`, `grep`, `cat`, `head`, `tail`,
+  `jq`, `ls`, `stat`, `wc`, `file`, `sha256sum`, `bat`) sont autorisées ; toute autre commande qui
+  mentionne le fichier est `deny`, l'édition reste `deny`, et les compositions shell ou
+  redirections (`;`, `&&`, `|`, `>`, `$(…)`, backticks, `--pre` de `rg`) sont refusées.
 - Pas de FreeLLM, de VPS, d'ACRCloud, de Playwright ni de MCP GitHub sur le runner.
