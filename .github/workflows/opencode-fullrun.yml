@@ -267,6 +267,8 @@ jobs:
             if [ -s "$OC_WORK/REPORT.md" ]; then cat "$OC_WORK/REPORT.md"; else echo "(aucun rapport écrit : relancer avec le même prompt pour reprendre)"; fi
             echo
             "$CI_DIR/opencode/hook-stats.sh" || echo "(bilan des hooks indisponible)"
+            echo
+            python3 "$CI_DIR/opencode/agent-models.py" || echo "(bilan agents/modèles indisponible)"
           } > "$R"
           git add "$R"
           git commit -q -m "chore(ci): rapport du run $IN_JOB" || true
