@@ -83,6 +83,26 @@ size() { stat -c %s "$OC_LOG" 2>/dev/null || echo 0; }
 # et stockage des sessions opencode (sous-agents compris).
 OC_ACT="${OC_ACT:-$OC_LOG.act}"
 OC_STORE_DIR="${OC_STORE_DIR:-$HOME/.local/share/opencode}"
+# Journaux internes (opencode + hooks LifeOS) : collectés après chaque passe, AJOUTÉS à
+# OC_INTERNAL_LOG (défaut $OC_LOG.internal), jamais affichés. Le workflow les masque et les
+# chiffre avec le même pipeline que le journal principal. OC_INTERNAL_LOG_DIR surchargeable
+# pour les tests ; dossier absent = rien à collecter.
+OC_INTERNAL_LOG="${OC_INTERNAL_LOG:-$OC_LOG.internal}"
+OC_INTERNAL_LOG_DIR="${OC_INTERNAL_LOG_DIR:-$HOME/.local/share/opencode/log}"
+OC_INTERNAL_STAMP="${OC_INTERNAL_STAMP:-$OC_LOG.internal.stamp}"
+mkdir -p "$(dirname "$OC_INTERNAL_LOG")" 2>/dev/null || true
+: >>"$OC_INTERNAL_LOG"
+: >"$OC_INTERNAL_STAMP"
+collect_internal_logs() {
+  local f
+  [ -d "$OC_INTERNAL_LOG_DIR" ] || return 0
+  for f in "$OC_INTERNAL_LOG_DIR"/*.log; do
+    [ -f "$f" ] || continue
+    [ "$f" -nt "$OC_INTERNAL_STAMP" ] || continue
+    { printf '\n=== %s ===\n' "$(basename "$f")"; cat "$f"; } >>"$OC_INTERNAL_LOG" 2>/dev/null || true
+  done
+  touch "$OC_INTERNAL_STAMP" 2>/dev/null || true
+}
 
 # Écrit une sortie ajoutée au journal depuis l'octet $1 dans le fichier $2.
 delta_from() {
@@ -284,6 +304,7 @@ run_pass() {
     fi
     rm -f "$delta"
   fi
+  collect_internal_logs
   return 0
 }
 

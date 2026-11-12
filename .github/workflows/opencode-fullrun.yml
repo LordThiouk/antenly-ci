@@ -486,6 +486,7 @@ jobs:
           IN_JOB: ${{ inputs.job_name }}
           BASE_SHA: ${{ steps.prep.outputs.base }}
           OC_WORK: ${{ runner.temp }}/oc
+          OC_INTERNAL_LOG: ${{ runner.temp }}/oc/opencode.log.internal
           ANTENLY_DIR: ${{ github.workspace }}/antenly
           CI_DIR: ${{ github.workspace }}/ci
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
@@ -711,6 +712,31 @@ jobs:
               if [ "$src" -eq 2 ]; then archive_log journal-cle; else archive_log journal-gitleaks; fi
             fi
           fi
+          # Journaux internes (opencode + hooks LifeOS) : même masquage (redact-log.sh) et même
+          # chiffrement (leaklog.sh, age) que le journal principal. Jamais affichés dans le log
+          # public du job ; artefact chiffré séparé, publié par le step suivant.
+          meta="$OC_WORK/opencode-meta.log"
+          rm -f "$meta" "$OC_WORK/meta.redacted"
+          for f in "$OC_INTERNAL_LOG" \
+                   "$HOME/.local/state/opencode-lifeos/hooks.log" \
+                   "$HOME/.local/state/opencode-lifeos/hook-failures.log"; do
+            [ -s "$f" ] || continue
+            printf '\n=== %s ===\n' "$(basename "$f")" >> "$meta"
+            cat "$f" >> "$meta"
+          done
+          if [ -s "$meta" ]; then
+            if OC_ISA_KEY_FILE="$K" "$T/redact-log.sh" "$meta" "$OC_WORK/meta.redacted" \
+               && mf=$("$T/leaklog.sh" "$OC_WORK/meta.redacted" - "internals" "$RUN_ID" "$ART" \
+                        "internes" "$RUN_URL" "$IN_BRANCH" "$BASE_SHA"); then
+              echo "meta_artifact=$(basename "$mf")" >> "$GITHUB_OUTPUT"
+              echo "- Journaux internes (hooks/opencode) : artefact chiffré \`$(basename "$mf")\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::chiffrement des journaux internes impossible : artefact non publié"
+            fi
+          else
+            echo "- Journaux internes : aucun fichier collecté" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          rm -f "$meta" "$OC_WORK/meta.redacted"
           {
             echo "commits=$(git rev-list --count "$BASE_SHA..HEAD")"
             echo "head=$(git rev-parse HEAD)"
@@ -730,6 +756,16 @@ jobs:
         with:
           name: ${{ steps.check.outputs.artifact }}
           path: ${{ runner.temp }}/fullrun-artifact/${{ steps.check.outputs.artifact }}
+          retention-days: 7
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Publier les journaux internes chiffrés (artefact 7 jours)
+        if: always() && steps.check.outputs.meta_artifact != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.check.outputs.meta_artifact }}
+          path: ${{ runner.temp }}/fullrun-artifact/${{ steps.check.outputs.meta_artifact }}
           retention-days: 7
           if-no-files-found: error
           overwrite: true

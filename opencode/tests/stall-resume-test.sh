@@ -49,15 +49,15 @@ case "\$mode" in
 esac
 S
   chmod +x "$T/oc"
-  rm -f "$T/n" "$T/log" "$T/log.status" "$T/log.act" "$T/calls"
-  mkdir -p "$T/a" "$T/store" "$T/agents"; echo p >"$T/p"; echo "$1" >"$T/mode"
+  rm -f "$T/n" "$T/log" "$T/log.status" "$T/log.act" "$T/calls" "$T/log.internal" "$T/log.internal.stamp"
+  mkdir -p "$T/a" "$T/store" "$T/agents" "$T/internals"; echo p >"$T/p"; echo "$1" >"$T/mode"
 }
 
 run() { # $1 = reprises max, $2 = sonde --continue en secondes
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
-  OC_AGENT_DIR="$T/agents" bash "$R"
+  OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 calls() { cat "$T/calls" 2>/dev/null || true; }
 
@@ -66,7 +66,7 @@ run_chain() { # $1 = chaîne, $2 = reprises (vide = défaut), $3 = sonde
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
   OC_MODEL_CHAIN="$1" OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 \
   OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC="${3:-0}" OC_STORE_DIR="$T/store" \
-  OC_BIN="$T/oc" OC_STALL_RESUMES="${2:-}" OC_AGENT_DIR="$T/agents" bash "$R"
+  OC_BIN="$T/oc" OC_STALL_RESUMES="${2:-}" OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
 
@@ -76,7 +76,7 @@ run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
-  OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" bash "$R"
+  OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
 # 1. silence puis reprise réussie (la sonde --continue parle) — cas déjà couvert.
