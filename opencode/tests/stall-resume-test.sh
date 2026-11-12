@@ -32,6 +32,8 @@ case "\$mode" in
     echo fini; exit 0 ;;
   empty-always)
     banner; exit 0 ;;
+  big-ok)
+    banner; head -c 1500000 /dev/zero | tr '\\0' 'x' | fold -w 200; echo; echo fini; exit 0 ;;
   *)
     echo "mode inconnu" >&2; exit 2 ;;
 esac
@@ -106,6 +108,19 @@ if [ "$rc" -eq 126 ] && [ "$(cat "$T/n")" -eq 3 ] \
   echo "ok 6 réponses vides épuisées -> rc 126"
 else
   echo "FAIL 6 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 7. sortie > 1 Mo, rc 0 : un vrai succès (pas un faux « vide » dû au SIGPIPE de grep -q sous
+#    pipefail), aucune reprise, aucune erreur.
+mk big-ok; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/n")" -eq 1 ] \
+   && [ "$(stat -c %s "$T/log")" -gt 1000000 ] \
+   && ! grep -q '^\[agent-error\]' "$T/log" \
+   && ! grep -q '^error=' "$T/log.status" \
+   && ! grep -q 'stall_resume' "$T/log.status"; then
+  echo "ok 7 sortie > 1 Mo rc 0 -> succès sans reprise"
+else
+  echo "FAIL 7 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
 fi
 
 exit $fail

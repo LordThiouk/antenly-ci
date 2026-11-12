@@ -70,7 +70,9 @@ useful_from() {
   # ANSI CSI/OSC, retours chariot, blancs et bannière retirés : reste-t-il un caractère ?
   sed -e 's/\x1b\][^\x07]*\x07//g' -e 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' -e 's/\r//g' "$tmp" 2>/dev/null \
     | grep -vE '^[[:space:]]*>?[[:space:]]*Nix/LifeOS([[:space:]]|·|$)' \
-    | grep -q '[^[:space:]]'
+    | grep '[^[:space:]]' >/dev/null
+  # Pas de `grep -q` : sous pipefail, il sort au premier caractère, sed reçoit SIGPIPE et le
+  # pipeline rend 141 dès que la sortie dépasse ~64 Ko (F5 43232258066 : succès jugé « vide »).
   rc=$?
   rm -f "$tmp"
   return "$rc"
