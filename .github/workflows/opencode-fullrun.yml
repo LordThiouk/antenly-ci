@@ -514,8 +514,10 @@ jobs:
           OC_WORK: ${{ runner.temp }}/oc
           OC_INTERNAL_LOG: ${{ runner.temp }}/oc/opencode.log.internal
           OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
-          OC_STORE_DIR: ${{ env.HOME }}/.local/share/opencode
-          OC_HOOKS_LOG: ${{ env.HOME }}/.local/state/opencode-lifeos/hooks.log
+          # Pas de OC_STORE_DIR / OC_HOOKS_LOG ici : le contexte `env` de GitHub Actions ne
+          # contient pas HOME (variable héritée du runner), donc `${{ env.HOME }}` rend une
+          # chaîne vide et le validateur cherchait `/.local/share/opencode` (raison a:none,
+          # run F4). done_check.sh retombe sur $HOME, posé par le shell du step.
           ANTENLY_DIR: ${{ github.workspace }}/antenly
           CI_DIR: ${{ github.workspace }}/ci
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
