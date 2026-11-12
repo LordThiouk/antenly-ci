@@ -12,6 +12,8 @@ T_DIR="$T"
 n=\$(cat "\$T_DIR/n" 2>/dev/null || echo 0); n=\$((n+1)); echo \$n >"\$T_DIR/n"
 printf 'call %s: %s\n' "\$n" "\$*" >>"\$T_DIR/calls"
 printf 'env %s: OC_MODEL_MAIN=%s\n' "\$n" "\${OC_MODEL_MAIN:-}" >>"\$T_DIR/calls"
+printf 'envfullrun %s: %s\n' "\$n" "\${LIFEOS_FULLRUN:-}" >>"\$T_DIR/calls"
+printf 'envprofile %s: %s\n' "\$n" "\${LIFEOS_HOOK_PROFILE:-}" >>"\$T_DIR/calls"
 mode=\$(cat "\$T_DIR/mode")
 cont=0; for a in "\$@"; do [ "\$a" = "--continue" ] && cont=1; done
 banner() { printf '> Nix/LifeOS · deepseek-v4.1-flash-free\n'; }
@@ -209,6 +211,21 @@ if [ "$rc" -eq 90 ] && [ ! -f "$T/calls" ]; then
   echo "ok 12 chaîne réduite au principal -> 90"
 else
   echo "FAIL 12 rc=$rc"; calls; fail=1
+fi
+
+# 13. signal « vrai FullRun » : le wrapper transmet LIFEOS_FULLRUN=1 (et le profil fullrun) au
+#     processus opencode ; un lancement hors wrapper ne l'a pas. Le test tourne dans un shell
+#     nettoyé de ces variables pour prouver que c'est bien le wrapper qui les pose.
+mk big-ok
+( env -u LIFEOS_FULLRUN -u LIFEOS_HOOK_PROFILE "$T/oc" run hors-wrapper ) >/dev/null 2>&1
+run 1 0; rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -q '^envfullrun 1: $' "$T/calls" \
+   && grep -q '^envfullrun 2: 1$' "$T/calls" \
+   && grep -q '^envprofile 2: fullrun$' "$T/calls"; then
+  echo "ok 13 LIFEOS_FULLRUN=1 transmis par le wrapper, absent hors wrapper"
+else
+  echo "FAIL 13 rc=$rc"; calls; fail=1
 fi
 
 exit $fail

@@ -20,8 +20,16 @@
 # Codes : 0 ok, 124 plafond, 125 silence, 126 réponses vides épuisées, 90 environnement, sinon
 # code d'opencode (124/125 d'opencode lui-même deviennent 1 pour ne pas être confondus avec une
 # décision du moniteur).
+#
+# Signal « vrai FullRun » : le wrapper exporte LIFEOS_FULLRUN=1 dans son propre environnement
+# avant de lancer opencode. Ce signal n'est pas falsifiable par l'agent : il vit dans l'env du
+# processus opencode démarré ici, pas dans un fichier ni dans un `export` d'outil bash (le plugin
+# est déjà chargé). Un job qui n'appelle pas ce wrapper ne l'a donc pas. On ne pose jamais
+# FULLRUN_OFF. LIFEOS_HOOK_PROFILE=fullrun est posé par défaut s'il est absent.
 set +x
 set -uo pipefail
+export LIFEOS_FULLRUN=1
+export LIFEOS_HOOK_PROFILE="${LIFEOS_HOOK_PROFILE:-fullrun}"
 : "${ANTENLY_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" \
   "${OC_DEADLINE_EPOCH:?}" "${OC_IDLE_MIN:?}"
 OC_BIN="${OC_BIN:-opencode}"
