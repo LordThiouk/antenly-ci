@@ -243,6 +243,28 @@ jobs:
           cp -r "$L/opencode/agent" "$L/opencode/command" "$L/opencode/plugins" "$C/"
           cp "$L/opencode/package.json" "$C/package.json"
           cp "$L/opencode/nix-lifeos.prompt.md" "$HOME/.local/share/opencode-lifeos/"
+          # Le socle LifeOS n'est plus une `instructions` globale (chargée par CHAQUE sous-agent) :
+          # il est concaténé au prompt de Nix, dans le même ordre que l'ancienne liste. Un fichier
+          # manquant n'empêche pas le run mais le signale. Taille avant : 91 222 caractères par
+          # agent ; après : 0 pour les sous-agents, ~91 500 pour Nix seul.
+          P="$HOME/.local/share/opencode-lifeos/nix-lifeos.prompt.md"
+          for rel in \
+            LIFEOS/LIFEOS_SYSTEM_PROMPT.md \
+            LIFEOS/DOCUMENTATION/ARCHITECTURE_SUMMARY.md \
+            LIFEOS/USER/TELOS/PRINCIPAL_TELOS.md \
+            LIFEOS/USER/PRINCIPAL/PRINCIPAL_IDENTITY.md \
+            LIFEOS/USER/DIGITAL_ASSISTANT/DA_IDENTITY.md \
+            LIFEOS/USER/PROJECTS.md \
+            LIFEOS/USER/CONFIG/OPERATIONAL_RULES.md \
+            LIFEOS/ALGORITHM/v8.20.2.md; do
+            if [ -f "$HOME/.claude/$rel" ]; then
+              printf '\n\n# %s\n\n' "${rel##*/}" >>"$P"
+              cat "$HOME/.claude/$rel" >>"$P"
+            else
+              echo "::warning::socle LifeOS manquant : $rel"
+            fi
+          done
+          [ -s "$P" ] || { echo "::error::prompt Nix vide"; exit 1; }
           (cd "$C" && bun install --silent >/dev/null 2>&1) || { echo "::error::bun install ~/.config/opencode KO"; exit 1; }
           # Modèles : Max sur model_max, tous les autres agents sur model_main.
           for f in "$C"/agent/*.md; do

@@ -1,15 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "instructions": [
-    "{env:HOME}/.claude/LIFEOS/LIFEOS_SYSTEM_PROMPT.md",
-    "{env:HOME}/.claude/LIFEOS/DOCUMENTATION/ARCHITECTURE_SUMMARY.md",
-    "{env:HOME}/.claude/LIFEOS/USER/TELOS/PRINCIPAL_TELOS.md",
-    "{env:HOME}/.claude/LIFEOS/USER/PRINCIPAL/PRINCIPAL_IDENTITY.md",
-    "{env:HOME}/.claude/LIFEOS/USER/DIGITAL_ASSISTANT/DA_IDENTITY.md",
-    "{env:HOME}/.claude/LIFEOS/USER/PROJECTS.md",
-    "{env:HOME}/.claude/LIFEOS/USER/CONFIG/OPERATIONAL_RULES.md",
-    "{env:HOME}/.claude/LIFEOS/ALGORITHM/v8.20.2.md"
-  ],
   "mcp": {
     "context7": {
       "type": "remote",
