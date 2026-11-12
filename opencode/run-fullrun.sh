@@ -10,16 +10,33 @@
 #  - un `--continue` n'est plus cru sur parole : on sonde la session OC_CONTINUE_PROBE_SEC
 #    secondes (3 min par défaut). Si aucun token utile n'en sort, la piste est abandonnée et une
 #    session NEUVE (sans --continue) reprend avec un message qui rappelle l'état ISA / FullRun ;
-#  - toute non-réponse (silence, réponse vide, erreur fournisseur, 429) bascule la reprise sur
-#    OC_MODEL_FALLBACK ;
+#  - le secours est une CHAÎNE (OC_MODEL_CHAIN, séparée par des virgules ; compat OC_MODEL_FALLBACK
+#    seul). À la reprise n° i, m = chaîne[(i-1) % longueur], passé en `--model` ET en OC_MODEL_MAIN,
+#    puis réécrit dans $OC_AGENT_DIR/*.md pour que les sous-agents changent aussi ; chaque élément
+#    doit être `opencode/...-free` et différer du principal (sinon code 90) ;
+#  - sous-agent muet : le seuil effectif est min(OC_IDLE_MIN*60, OC_SUBAGENT_IDLE_SEC=480 s) ; la
+#    coupure écrit `type=timeout` + `subagent_timeout=1` (verdict MANQUANT, jamais un pass) ;
+#  - fin anticipée : done_check.sh (copie figée /opt/fullrun-tools) vérifie Max PASS réel,
+#    hooks.log, vérificateurs OC_DONE_VERIFY, arbre propre et REPORT.md ; si ok et session inactive
+#    depuis OC_DONE_IDLE_SEC (180 s) : `arret=max_pass`, exit 0, aucune reprise ;
 #  - chaque échec écrit une ligne `[agent-error] type=timeout|empty|provider|429` (comptée par le
 #    workflow) ; jamais de secret ni de texte brut du modèle dans ces lignes.
 # Arrêt propre = SIGINT au groupe de processus d'opencode et à tous ses descendants, puis SIGKILL
 # après OC_KILL_GRACE secondes. La raison est décidée ici (code de sortie), jamais lue dans un
 # fichier qu'opencode pourrait écrire.
-# Codes : 0 ok, 124 plafond, 125 silence, 126 réponses vides épuisées, 90 environnement, sinon
-# code d'opencode (124/125 d'opencode lui-même deviennent 1 pour ne pas être confondus avec une
-# décision du moniteur).
+# Codes : 0 ok (dont `arret=max_pass`), 124 plafond, 125 silence ou sous-agent muet, 126 réponses
+# vides épuisées, 90 environnement, 130 annulation ; sinon code d'opencode (124/125 d'opencode
+# lui-même deviennent 1 pour ne pas être confondus avec une décision du moniteur).
+#
+# Variables obligatoires : ANTENLY_DIR, OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
+# OC_IDLE_MIN. Optionnelles : OC_BIN, OC_POLL_SEC, OC_KILL_GRACE, OC_IDLE_SEC (tests),
+# OC_SUBAGENT_IDLE_SEC, OC_STALL_RESUMES, OC_CONTINUE_PROBE_SEC, OC_MODEL_CHAIN,
+# OC_MODEL_FALLBACK (compat), OC_STORE_DIR, OC_AGENT_DIR, OC_INTERNAL_LOG,
+# OC_INTERNAL_LOG_DIR, OC_HOOKS_LOG, OC_DONE_VERIFY, OC_ISA/OC_ISA_PATH, OC_REPORT,
+# OC_DONE_CHECK_SEC, OC_DONE_IDLE_SEC, OC_DONE_CHECK_BIN, OC_IDLE_CPU.
+# Statut ($OC_LOG.status) : main_rc, stall_resume, fallback=<modèle>, stall_rc, new_session,
+# new_rc, error=<type>, subagent_timeout, done_check=ok,
+# arret=max_pass|plafond|silence|vide|annulation.
 #
 # Signal « vrai FullRun » : le wrapper exporte LIFEOS_FULLRUN=1 dans son propre environnement
 # avant de lancer opencode. Ce signal n'est pas falsifiable par l'agent : il vit dans l'env du
