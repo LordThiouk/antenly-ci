@@ -25,6 +25,9 @@ ok() { printf 'done_check=ok\n'; exit 0; }
 
 command -v python3 >/dev/null 2>&1 || ko a:python3
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || ko d:depot
+# Un magasin absent n'est pas « aucune tâche Max » : c'est un chemin faux (a:none a déjà menti
+# une fois, run F4, quand OC_STORE_DIR valait /.local/share/opencode). Panne nommée, pas silence.
+[ -d "$STORE" ] || ko a:stockage
 
 # Dernier commit de code : hors MEMORY et hors artefacts FullRun (même règle que le diagnostic).
 last_commit=$(git -C "$REPO" log -1 --format=%ct -- . ':!MEMORY' ':!.fullrun' 2>/dev/null) || last_commit=0
@@ -48,22 +51,27 @@ def parse(d):
 
 def parts():
     out = []
+    read = 0  # sources réellement lues : distingue « pas de Max » de « magasin illisible »
     for db in glob.glob(os.path.join(store, '*.db')):
         try:
             con = sqlite3.connect('file:%s?mode=ro' % db, uri=True)
             rows = con.execute('select session_id, data from part').fetchall()
         except Exception:
             continue
+        read += 1
         for _sid, data in rows:
             o = parse(data)
             if o and o.get('tool') == 'task':
                 out.append(('db', db, o))
     for base in (os.path.join(store, 'storage', 'part'), os.path.join(store, 'part')):
+        if not os.path.isdir(base):
+            continue
+        read += 1
         for f in glob.glob(os.path.join(base, '*', '*.json')):
             o = parse(open(f, encoding='utf-8', errors='replace').read())
             if o and o.get('tool') == 'task':
                 out.append(('fs', store, o))
-    return out
+    return out, read
 
 
 def child_messages(kind, src, child):
@@ -86,8 +94,13 @@ def child_messages(kind, src, child):
     return msgs
 
 
+task_parts, sources = parts()
+if not sources:
+    print('KO:stockage')
+    sys.exit(0)
+
 cands = []
-for kind, src, o in parts():
+for kind, src, o in task_parts:
     st = o.get('state') or {}
     inp = st.get('input') or {}
     if inp.get('subagent_type') != max_agent or st.get('status') != 'completed':

@@ -104,6 +104,22 @@ printf -- '---\nphase: complete\n---\n' >"$ISA"
 out=$(call "$T/s6"); [ "$out" = "done_check=ko raison=d:isa-complete" ] && ok 9 "ISA close refusée" || ko "9 [$out]"
 printf -- '---\nphase: climbing\n---\n' >"$ISA"
 
+# 9b. magasin absent -> a:stockage : un chemin faux n'est pas « aucune tâche Max » (run F4).
+out=$(call "$T/absent")
+[ "$out" = "done_check=ko raison=a:stockage" ] && ok 9b "magasin absent refusé" || ko "9b [$out]"
+
+# 9c. magasin lisible, aucune tâche Max -> a:none (seul cas où « none » est vrai).
+mkstore "$T/s9c" "opencode/v4-flash-free" 42 'PASS' "$ENDP" Forge
+out=$(call "$T/s9c")
+[ "$out" = "done_check=ko raison=a:none" ] && ok 9c "aucune tâche Max refusée" || ko "9c [$out]"
+
+# 9d. régression F4 : plus de chemin bâti sur le contexte env (HOME n'y est pas -> chaîne vide).
+if grep -qE 'OC_(STORE_DIR|HOOKS_LOG): *\$\{\{ *env\.HOME *\}\}' "$ROOT/.github/workflows/opencode-fullrun.yml"; then
+  ko "9d workflow construit un chemin sur env.HOME"
+else
+  ok 9d "workflow sans env.HOME"
+fi
+
 # 10. boucle : PASS vérifié + session inactive -> run-fullrun sort 0 avec arret=max_pass.
 mkdir -p "$T/run"
 cat >"$T/fake-oc" <<'EOF'
