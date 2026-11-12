@@ -181,6 +181,11 @@
       "description": "DEPRECATED — legacy built-in agent. Do not invoke for new work. Use the Interceptor skill for user-story validation, step execution, screenshots, and structured PASS/FAIL reports. Retained only for reference; its internals cannot be modified.",
       "mode": "subagent",
       "prompt": "{file:{env:HOME}/.claude/agents/UIReviewer.md}"
+    },
+    "Grok": {
+      "description": "Grok (Jax) — xAI cross-vendor agent, PUBLIC-data lane only (non-sensitive tasks).",
+      "mode": "subagent",
+      "prompt": "{file:{env:HOME}/.claude/agents/Grok.md}"
     }
   },
   "small_model": "{env:OC_MODEL_MAIN}",
