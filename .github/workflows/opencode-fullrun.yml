@@ -43,6 +43,10 @@ on:
         description: "ISA suivie (MEMORY/WORK/<dossier>/ISA.md) ; vide = déduite du prompt"
         type: string
         default: ""
+      base_branch:
+        description: "Branche cible de la PR en brouillon (vide = branche par défaut du dépôt antenly)"
+        type: string
+        default: ""
       idle_minutes:
         description: "Agent figé : si le journal opencode n'écrit plus rien pendant N min (10 à 120), coupe et reprend la session (3 reprises max)"
         type: string
@@ -314,7 +318,7 @@ jobs:
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
-            "$CI_DIR/opencode/wippush.sh" "$T/"
+            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
           rm -rf "$RUNNER_TEMP/gl" "$f"
           # Config gitleaks d'antenly au SHA de départ (même règle que le contrôle avant push).
@@ -487,6 +491,9 @@ jobs:
           BASE_SHA: ${{ steps.prep.outputs.base }}
           OC_WORK: ${{ runner.temp }}/oc
           OC_INTERNAL_LOG: ${{ runner.temp }}/oc/opencode.log.internal
+          OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
+          OC_STORE_DIR: ${{ env.HOME }}/.local/share/opencode
+          OC_HOOKS_LOG: ${{ env.HOME }}/.local/state/opencode-lifeos/hooks.log
           ANTENLY_DIR: ${{ github.workspace }}/antenly
           CI_DIR: ${{ github.workspace }}/ci
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
@@ -505,7 +512,7 @@ jobs:
           cd "$ANTENLY_DIR"
           # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.
@@ -737,6 +744,37 @@ jobs:
             echo "- Journaux internes : aucun fichier collecté" >> "$GITHUB_STEP_SUMMARY"
           fi
           rm -f "$meta" "$OC_WORK/meta.redacted"
+          # Rejoue le validateur de fin depuis la copie figée : le moniteur le fait en boucle, on le
+          # refait ici, hors de portée d'opencode. Un échec ne bloque ni le rapport ni le push, il
+          # rend le statut final en échec (la vraie barrière du run).
+          vf="$OC_WORK/done-verify.sh"
+          {
+            echo 'set -u'
+            echo 'isa="${OC_ISA_PATH:-}"'
+            echo '[ -n "$isa" ] || exit 0'
+            echo '[ -f "$isa" ] || exit 1'
+            echo 'if [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate "$isa"; fi'
+            echo 'if [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "$isa"; fi'
+            echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
+          } >"$vf"
+          dc_out=$(OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+                   OC_MAX_SUBAGENT=Max "$T/done_check.sh" 2>/dev/null | head -n1) || true
+          rm -f "$vf"
+          case "$dc_out" in
+            "done_check=ok")
+              echo "done=ok" >>"$GITHUB_OUTPUT"
+              echo "- Validateur de fin : ok" >>"$GITHUB_STEP_SUMMARY" ;;
+            done_check=ko\ raison=*)
+              dr="${dc_out#done_check=ko raison=}"
+              echo "done=ko" >>"$GITHUB_OUTPUT"
+              echo "done_reason=$dr" >>"$GITHUB_OUTPUT"
+              echo "- Validateur de fin : **échec** ($dr)" >>"$GITHUB_STEP_SUMMARY"
+              echo "::warning::validateur de fin : $dr" ;;
+            *)
+              echo "done=ko" >>"$GITHUB_OUTPUT"
+              echo "done_reason=script" >>"$GITHUB_OUTPUT"
+              echo "::warning::validateur de fin : sortie inattendue" ;;
+          esac
           {
             echo "commits=$(git rev-list --count "$BASE_SHA..HEAD")"
             echo "head=$(git rev-parse HEAD)"
@@ -845,6 +883,43 @@ jobs:
           echo "log_branch=$logp" >> "$GITHUB_OUTPUT"
           [ "$work" = 1 ] || exit 1
 
+      # PR en brouillon, jamais fusionnée : seulement quand le run s'est arrêté « terminé » et que
+      # le validateur de fin (Max PASS) est vert. Aucune autre opération gh que la création.
+      - name: PR en brouillon (jamais fusionnée)
+        id: pr
+        if: always() && steps.push.outcome == 'success' && steps.oc.outputs.stop == 'ok' && steps.check.outputs.done == 'ok'
+        continue-on-error: true
+        env:
+          PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_BASE: ${{ inputs.base_branch }}
+          IN_JOB: ${{ inputs.job_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +x
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          command -v gh >/dev/null 2>&1 || { echo "::warning::gh absent : pas de PR"; exit 0; }
+          [ -n "${PUSH_TOKEN:-}" ] || { echo "::warning::ANTENLY_PUSH_TOKEN absent : pas de PR"; exit 0; }
+          base="$IN_BASE"
+          if [ -z "$base" ]; then
+            base=$(GH_TOKEN="$PUSH_TOKEN" gh api repos/LordThiouk/antenly --jq .default_branch 2>/dev/null) || base=""
+          fi
+          [[ "$base" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] \
+            || { echo "::warning::branche cible introuvable : pas de PR"; exit 0; }
+          existing=$(GH_TOKEN="$PUSH_TOKEN" gh pr list --repo LordThiouk/antenly --head "$IN_BRANCH" \
+                       --state open --json number --jq 'length' 2>/dev/null) || existing=0
+          if [ "$existing" != 0 ]; then
+            echo "- PR déjà ouverte pour \`$IN_BRANCH\` : rien à créer" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          url=$(GH_TOKEN="$PUSH_TOKEN" gh pr create --repo LordThiouk/antenly --draft \
+                  --base "$base" --head "$IN_BRANCH" \
+                  --title "FullRun ${IN_JOB} (${IN_BRANCH})" \
+                  --body "Run FullRun automatique. Journal et contrôles : ${RUN_URL}. PR en brouillon : revue humaine obligatoire, jamais de fusion automatique." 2>/dev/null) || url=""
+          [ -n "$url" ] || { echo "::warning::création de la PR impossible"; exit 0; }
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "- PR en brouillon : $url" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Statut final
         if: always()
         env:
@@ -852,6 +927,8 @@ jobs:
           OC_STOP: ${{ steps.oc.outputs.stop }}
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
           OC_WORK: ${{ runner.temp }}/oc
+          DONE: ${{ steps.check.outputs.done }}
+          DONE_REASON: ${{ steps.check.outputs.done_reason }}
         run: |
           set +x
           case "${OC_STOP:-}" in
@@ -873,6 +950,12 @@ jobs:
           echo "opencode : ${OC_OUTCOME:-non lancé} ; arrêt : $why ; erreurs agent : $errs"
           echo "- Statut final opencode : **$why**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Erreurs agent : $errs" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Validateur de fin (Max PASS) : ${DONE:-non exécuté}${DONE_REASON:+ ($DONE_REASON)}" >> "$GITHUB_STEP_SUMMARY"
+          # Barrière : un run annoncé terminé sans PASS de Max vérifié n'est pas un succès.
+          if [ "${OC_STOP:-}" = ok ] && [ "${DONE:-}" != ok ]; then
+            echo "::error::run en échec : Max PASS non vérifié (${DONE_REASON:-done_check})"
+            exit 1
+          fi
           [ "$OC_OUTCOME" = success ] || { echo "::error::run en échec : $why"; exit 1; }
 
       # Notification de fin vers opencode-notify (même format que oc-run sur la box). Toujours,
@@ -897,6 +980,9 @@ jobs:
           LOG_BRANCH: ${{ steps.push.outputs.log_branch }}
           LIVE_BRANCH: ${{ steps.live.outputs.branch }}
           CHECK_REASON: ${{ steps.check.outputs.reason }}
+          DONE: ${{ steps.check.outputs.done }}
+          DONE_REASON: ${{ steps.check.outputs.done_reason }}
+          PR_URL: ${{ steps.pr.outputs.url }}
           LOG_ARTIFACT: ${{ steps.check.outputs.artifact }}
           HEAD_SHA: ${{ steps.check.outputs.head }}
           ISC: ${{ steps.check.outputs.isc }}
@@ -929,6 +1015,10 @@ jobs:
             if [ -n "${LOG_ARTIFACT:-}" ]; then why="bloqué par gitleaks, journal chiffré en artefact"
             else why="bloqué par gitleaks, journal chiffré impossible"; fi
           fi
+          if [ "${DONE:-}" != ok ] && [ "$status" = fini ]; then
+            status="échec"
+            why="terminé, mais Max PASS non vérifié${DONE_REASON:+ ($DONE_REASON)}"
+          fi
           [ "$JOB_STATUS" = success ] || [ "$status" != fini ] || { status="échec"; why="terminé, mais contrôles ou push en échec"; }
           now=$(date +%s); t0="$OC_JOB_T0"
           [[ "$t0" =~ ^[0-9]{9,11}$ && "$t0" -le "$now" ]] && dur=$(( now - t0 )) || dur=0
@@ -956,8 +1046,8 @@ jobs:
           id=$(printf '%s:%s:%s:%s' "$IN_JOB" "$RUN_ID" "$RUN_ATTEMPT" "$status" | sha256sum | cut -d' ' -f1)
           body="$RUNNER_TEMP/notify.json"
           jq -nc --arg job "$IN_JOB" --arg status "$status" --argjson duration "$dur" --arg log_tail "$tail" \
-            --arg event_id "$id" --arg run_id "$RUN_ID" --argjson errors "$errs_json" \
-            '{job:$job,status:$status,duration:$duration,pr_url:"",log_tail:$log_tail,event_id:$event_id,run_id:$run_id,errors:$errors}' > "$body"
+            --arg event_id "$id" --arg run_id "$RUN_ID" --argjson errors "$errs_json" --arg pr_url "${PR_URL:-}" \
+            '{job:$job,status:$status,duration:$duration,pr_url:$pr_url,log_tail:$log_tail,event_id:$event_id,run_id:$run_id,errors:$errors}' > "$body"
           ok=0
           for attempt in 1 2 3; do
             code=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\nheader = "X-Automation-Key: %s"\n' \

@@ -215,12 +215,47 @@ rewrite_agent_models() {
   done
 }
 
+# OC_DONE_CHECK_SEC : période des contrôles de fin (défaut 60 s). OC_DONE_IDLE_SEC : inactivité
+# exigée avant de conclure « Max PASS vérifié » (défaut 180 s). OC_DONE_CHECK_BIN : chemin du
+# validateur (défaut : done_check.sh à côté de ce script).
+DONE_CHECK_SEC="${OC_DONE_CHECK_SEC:-60}"
+[[ "$DONE_CHECK_SEC" =~ ^[0-9]{1,4}$ && "$DONE_CHECK_SEC" -ge 1 ]] || DONE_CHECK_SEC=60
+DONE_IDLE_SEC="${OC_DONE_IDLE_SEC:-180}"
+[[ "$DONE_IDLE_SEC" =~ ^[0-9]{1,4}$ ]] || DONE_IDLE_SEC=180
+DONE_CHECK_BIN="${OC_DONE_CHECK_BIN:-}"
+if [ -z "$DONE_CHECK_BIN" ]; then
+  # Copie figée (root, avant opencode) prioritaire pour le moniteur ; repli local en test.
+  if [ -f /opt/fullrun-tools/done_check.sh ]; then DONE_CHECK_BIN=/opt/fullrun-tools/done_check.sh
+  else DONE_CHECK_BIN="$(cd "$(dirname "$0")" && pwd)/done_check.sh"; fi
+fi
+DONE_OK=0
+
+# Déclenche la fin anticipée quand le validateur indépendant confirme le PASS de Max. Jamais un
+# pass déduit d'un verdict manquant : c'est done_check.sh qui décide, pas la sortie du modèle.
+done_check() {
+  [ -f "$DONE_CHECK_BIN" ] || return 1
+  OC_STORE_DIR="$OC_STORE_DIR" \
+  OC_HOOKS_LOG="${OC_HOOKS_LOG:-$HOME/.local/state/opencode-lifeos/hooks.log}" \
+  OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$ANTENLY_DIR" \
+  OC_ISA="${OC_ISA:-${OC_ISA_PATH:-}}" OC_DONE_VERIFY="${OC_DONE_VERIFY:-}" \
+  OC_MAX_SUBAGENT="${OC_MAX_SUBAGENT:-Max}" \
+    bash "$DONE_CHECK_BIN" 2>/dev/null | grep -qx 'done_check=ok'
+}
+maybe_finish() {
+  if [ "${DONE_OK:-0}" -eq 1 ] || done_check; then
+    DONE_OK=1
+    echo "done_check=ok" >>"$OC_LOG.status"
+    echo "arret=max_pass" >>"$OC_LOG.status"
+    exit 0
+  fi
+}
+
 # Lance "$@" (sortie ajoutée à $OC_LOG) dans sa propre session, surveille silence et plafond.
 # Pose WATCH_RC (code d'opencode, ou 124 plafond / 125 silence) et WATCH_REASON.
 # Si WATCH_PROBE_SEC > 0, la passe est aussi coupée au bout de ce délai tant qu'aucun token utile
 # n'est apparu (reason=probe) : c'est la sonde qui décide si `--continue` vaut la peine.
 run_watched() {
-  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU probe_end=0
+  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU probe_end=0 last_done=0
   WATCH_RC=0; WATCH_REASON=""
   if [[ "${WATCH_PROBE_SEC:-0}" =~ ^[0-9]{1,4}$ ]] && [ "$WATCH_PROBE_SEC" -ge 1 ]; then
     probe_end=$(( $(date +%s) + WATCH_PROBE_SEC ))
@@ -238,6 +273,16 @@ run_watched() {
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
     if active "$pid"; then last_act="$now"; fi
+    # Validateur indépendant, périodique : Max a-t-il rendu un PASS vérifiable (a/b/c/d) ?
+    if [ $(( now - last_done )) -ge "$DONE_CHECK_SEC" ]; then
+      last_done=$now
+      if [ "${DONE_OK:-0}" -eq 0 ] && done_check; then DONE_OK=1; fi
+    fi
+    # PASS vérifié et session inactive : la passe s'arrête là, sans attendre le seuil de silence.
+    if [ "${DONE_OK:-0}" -eq 1 ] && [ $(( now - last_act )) -ge "$DONE_IDLE_SEC" ]; then
+      reason=max_pass
+      break
+    fi
     if [ "$probe_end" -gt 0 ]; then
       # Des tokens sont sortis : la continuation est vivante, on repasse au garde-fou normal.
       if useful_from "${ATTEMPT_START:-0}"; then
@@ -262,7 +307,9 @@ run_watched() {
     WATCH_REASON="$reason"
     stop_tree "$pid" "$pgid"
     wait "$pid" 2>/dev/null
-    if [ "$reason" = plafond ]; then WATCH_RC=124; else WATCH_RC=125; fi
+    if [ "$reason" = max_pass ]; then WATCH_RC=0
+    elif [ "$reason" = plafond ]; then WATCH_RC=124
+    else WATCH_RC=125; fi
     return 0
   fi
   wait "$pid"; WATCH_RC=$?
@@ -290,8 +337,9 @@ run_pass() {
       printf 'subagent_timeout=1\n' >>"$OC_LOG.status"
       ;;
     probe) ;; # coupure volontaire : l'absence de token est le constat (type empty ci-dessous)
+    max_pass) ;; # fin anticipée : pass confirmé par done_check.sh, pas par le modèle
   esac
-  if [ "$A_USEFUL" -eq 0 ]; then
+  if [ "$A_USEFUL" -eq 0 ] && [ "$A_REASON" != max_pass ]; then
     log_error empty
   fi
   # 429 / limite d'usage : uniquement dans la sortie de CETTE passe (pas un 429 périmé).
@@ -330,6 +378,7 @@ ATTEMPT_START=0
 run_pass 0 "$OC_BIN" run --model "$OC_MODEL_MAIN" --title "${OC_JOB:-fullrun}" "$PROMPT"
 rc=$A_RC; useful=$A_USEFUL
 echo "main_rc=$rc" >>"$OC_LOG.status"
+maybe_finish
 
 need_resume=0
 case "$rc" in
@@ -367,6 +416,7 @@ while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remai
     rc=$A_RC; useful=$A_USEFUL
     echo "new_rc=$rc" >>"$OC_LOG.status"
   fi
+  maybe_finish
   need_resume=0
   case "$rc" in
     124|130) ;;
