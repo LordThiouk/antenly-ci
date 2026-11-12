@@ -1,28 +1,111 @@
 #!/usr/bin/env bash
-# Agent figé : silence -> reprise --continue (bornée), jamais un arrêt définitif tant qu'il reste du temps.
+# Reprise après stall : sonde --continue courte, sinon session neuve ; repli modèle ; erreurs typées.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-mk() { # $1 = comportement : "hang-then-ok" ou "hang-always"
+
+# Faux opencode piloté par $T/mode. Écrit ses arguments dans $T/calls (jamais dans le journal).
+mk() { # $1 = comportement
   cat >"$T/oc" <<S
 #!/usr/bin/env bash
-n=\$(cat "$T/n" 2>/dev/null || echo 0); n=\$((n+1)); echo \$n >"$T/n"
-echo "call \$n: \$*"
-if [ "$1" = hang-then-ok ] && [ \$n -ge 2 ]; then echo fini; exit 0; fi
-# boucle qui brûle du CPU sans rien écrire (cas F5/FR-14)
-end=\$((SECONDS+30)); while [ \$SECONDS -lt \$end ]; do :; done
+T_DIR="$T"
+n=\$(cat "\$T_DIR/n" 2>/dev/null || echo 0); n=\$((n+1)); echo \$n >"\$T_DIR/n"
+printf 'call %s: %s\n' "\$n" "\$*" >>"\$T_DIR/calls"
+mode=\$(cat "\$T_DIR/mode")
+cont=0; for a in "\$@"; do [ "\$a" = "--continue" ] && cont=1; done
+banner() { printf '> Nix/LifeOS · deepseek-v4.1-flash-free\n'; }
+hang() { end=\$((SECONDS+30)); while [ \$SECONDS -lt \$end ]; do :; done; }
+case "\$mode" in
+  hang-then-ok)
+    [ \$n -ge 2 ] && { echo fini; exit 0; }; hang ;;
+  hang-always)
+    hang ;;
+  continue-empty)
+    [ \$n -eq 1 ] && hang
+    if [ \$cont = 1 ]; then banner; exit 0; fi
+    echo fini; exit 0 ;;
+  provider)
+    [ \$n -eq 1 ] && { echo "erreur fournisseur"; exit 1; }
+    echo fini; exit 0 ;;
+  ratelimit)
+    [ \$n -eq 1 ] && { echo "429 Too Many Requests"; exit 1; }
+    echo fini; exit 0 ;;
+  empty-always)
+    banner; exit 0 ;;
+  *)
+    echo "mode inconnu" >&2; exit 2 ;;
+esac
 S
-  chmod +x "$T/oc"; rm -f "$T/n" "$T/log"*; mkdir -p "$T/a" "$T/store"; echo p >"$T/p"
+  chmod +x "$T/oc"
+  rm -f "$T/n" "$T/log" "$T/log.status" "$T/log.act" "$T/calls"
+  mkdir -p "$T/a" "$T/store"; echo p >"$T/p"; echo "$1" >"$T/mode"
 }
-run() {
+
+run() { # $1 = reprises max, $2 = sonde --continue en secondes
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=f \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
-  OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="${1:-3}" bash "$R"
+  OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" bash "$R"
 }
-mk hang-then-ok; run; rc=$?
-[ "$rc" -eq 0 ] && grep -q '^\[stall\] .*reprise 1/3' "$T/log" && grep -q 'call 2: run --continue' "$T/log" \
-  && grep -q 'agent-error' "$T/log" && echo "ok 1 silence puis reprise réussie" || { echo "FAIL 1 rc=$rc"; fail=1; }
-mk hang-always; run 2; rc=$?
-[ "$rc" -eq 125 ] && [ "$(cat "$T/n")" -eq 3 ] && grep -q 'arret=silence' "$T/log.status" \
-  && echo "ok 2 reprises bornées puis arrêt silence" || { echo "FAIL 2 rc=$rc n=$(cat "$T/n")"; fail=1; }
+calls() { cat "$T/calls" 2>/dev/null || true; }
+
+# 1. silence puis reprise réussie (la sonde --continue parle) — cas déjà couvert.
+mk hang-then-ok; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^\[stall\] .*reprise 1/3' "$T/log" \
+   && grep -q '^call 2: run --continue --model f' "$T/calls" \
+   && grep -q '^\[agent-error\] type=timeout' "$T/log"; then
+  echo "ok 1 silence puis reprise réussie"
+else
+  echo "FAIL 1 rc=$rc"; calls; tail -n 8 "$T/log"; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 2. reprises bornées puis arrêt silence — cas déjà couvert (chaque reprise = sonde + session neuve).
+mk hang-always; run 2 2; rc=$?
+if [ "$rc" -eq 125 ] && [ "$(cat "$T/n")" -eq 5 ] && grep -q '^arret=silence' "$T/log.status"; then
+  echo "ok 2 reprises bornées puis arrêt silence"
+else
+  echo "FAIL 2 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 3. --continue muet (bannière seule) : la piste est abandonnée, l'appel suivant est une session
+#    NEUVE (sans --continue) avec le message de reprise.
+mk continue-empty; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -q '^call 2: run --continue --model f' "$T/calls" \
+   && grep -q '^call 3: run --model f' "$T/calls" \
+   && ! grep -q '^call 3: .*--continue' "$T/calls" \
+   && grep -q '^\[agent-error\] type=empty' "$T/log" \
+   && grep -q 'nouvelle session' "$T/log"; then
+  echo "ok 3 --continue muet -> nouvelle session"
+else
+  echo "FAIL 3 rc=$rc"; calls; tail -n 8 "$T/log"; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 4. erreur fournisseur : repli sur le modèle fallback et type=provider.
+mk provider; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^call 2: run --continue --model f' "$T/calls" \
+   && grep -q '^\[agent-error\] type=provider' "$T/log"; then
+  echo "ok 4 erreur fournisseur -> fallback"
+else
+  echo "FAIL 4 rc=$rc"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 5. 429 : repli sur le modèle fallback et type=429.
+mk ratelimit; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] && grep -q '^call 2: run --continue --model f' "$T/calls" \
+   && grep -q '^\[agent-error\] type=429' "$T/log"; then
+  echo "ok 5 429 -> fallback"
+else
+  echo "FAIL 5 rc=$rc"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 6. réponses vides épuisées : jamais un succès (rc 126), reprises bornées.
+mk empty-always; run 1 2; rc=$?
+if [ "$rc" -eq 126 ] && [ "$(cat "$T/n")" -eq 3 ] \
+   && grep -q '^arret=vide' "$T/log.status" \
+   && grep -q '^\[agent-error\] type=empty' "$T/log"; then
+  echo "ok 6 réponses vides épuisées -> rc 126"
+else
+  echo "FAIL 6 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
 exit $fail

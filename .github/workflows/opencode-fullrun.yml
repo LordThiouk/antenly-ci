@@ -28,7 +28,7 @@ on:
         type: string
         default: opencode/mimo-v2.6-flash-free
       model_fallback:
-        description: "Repli, seulement si le principal échoue sur un 429"
+        description: "Repli pour les reprises quand le principal ne répond pas (429, silence, réponse vide, erreur fournisseur)"
         type: string
         default: opencode/glm-5.3-flash-free
       lifeos_ref:
@@ -436,6 +436,7 @@ jobs:
             0) stop=ok; why="terminé" ;;
             124) stop=plafond; why="plafond atteint" ;;
             125) stop=silence; why="bloqué (silence ${OC_IDLE_MIN} min)" ;;
+            126) stop=vide; why="réponse vide (aucun token après reprises)" ;;
             130) stop=annulation; why="annulé" ;;
             *) stop=erreur; why="erreur opencode (code $rc)" ;;
           esac
@@ -589,6 +590,7 @@ jobs:
               ok) echo "- arrêt : terminé" ;;
               silence) echo "- arrêt : bloqué (silence $((10#$OC_IDLE_MIN)) min), opencode arrêté par le garde-fou" ;;
               plafond) echo "- arrêt : plafond atteint, opencode arrêté avant la limite du job" ;;
+              vide) echo "- arrêt : réponse vide (aucun token après reprises)" ;;
               annulation) echo "- arrêt : run annulé" ;;
               erreur) echo "- arrêt : erreur opencode" ;;
               *) echo "- arrêt : inconnu (step opencode interrompu)" ;;
@@ -793,17 +795,28 @@ jobs:
           OC_OUTCOME: ${{ steps.oc.outcome }}
           OC_STOP: ${{ steps.oc.outputs.stop }}
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_WORK: ${{ runner.temp }}/oc
         run: |
+          set +x
           case "${OC_STOP:-}" in
             ok) why="terminé" ;;
             silence) why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
             plafond) why="plafond atteint" ;;
+            vide) why="réponse vide (aucun token après reprises)" ;;
             annulation) why="annulé" ;;
             erreur) why="erreur opencode" ;;
             *) why="non lancé ou interrompu" ;;
           esac
-          echo "opencode : ${OC_OUTCOME:-non lancé} ; arrêt : $why"
+          # Erreurs agent : lignes `error=<type>` écrites par le moniteur. Comptage strict :
+          # seuls les quatre types connus, jamais le texte du modèle ni un secret.
+          errs=$(awk -F= '
+            /^error=(timeout|empty|provider|429)$/ { c[$2]++ }
+            END { printf "timeout=%d, empty=%d, provider=%d, 429=%d", c["timeout"], c["empty"], c["provider"], c["429"] }
+          ' "$OC_WORK/opencode.log.status" 2>/dev/null || true)
+          [ -n "$errs" ] || errs="timeout=0, empty=0, provider=0, 429=0"
+          echo "opencode : ${OC_OUTCOME:-non lancé} ; arrêt : $why ; erreurs agent : $errs"
           echo "- Statut final opencode : **$why**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Erreurs agent : $errs" >> "$GITHUB_STEP_SUMMARY"
           [ "$OC_OUTCOME" = success ] || { echo "::error::run en échec : $why"; exit 1; }
 
       # Notification de fin vers opencode-notify (même format que oc-run sur la box). Toujours,
@@ -831,6 +844,7 @@ jobs:
           LOG_ARTIFACT: ${{ steps.check.outputs.artifact }}
           HEAD_SHA: ${{ steps.check.outputs.head }}
           ISC: ${{ steps.check.outputs.isc }}
+          OC_WORK: ${{ runner.temp }}/oc
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -847,6 +861,7 @@ jobs:
           case "${OC_STOP:-}" in
             silence) status="bloqué"; why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
             plafond) status="échec"; why="plafond atteint" ;;
+            vide) status="échec"; why="réponse vide (aucun token après reprises)" ;;
             annulation) status="annulé"; why="annulé" ;;
             erreur) status="échec"; why="erreur opencode" ;;
             ok) status="fini"; why="terminé" ;;
@@ -870,12 +885,23 @@ jobs:
             else LOG_BRANCH="aucun"; fi
           fi
           [[ "$LOG_ARTIFACT" =~ ^fullrun-log-[A-Za-z0-9._-]{1,80}\.age$ ]] || LOG_ARTIFACT="aucun"
-          tail="exit=${OC_RC} · raison=${why} · sha poussé=${sha} · journal=${LOG_BRANCH} · artefact=${LOG_ARTIFACT} · ISC ${ISC} · modèle ${OC_MODEL_MAIN} · run ${RUN_URL}"
+          # Erreurs agent : lignes `error=<type>` du moniteur, strictement typées (aucun secret,
+          # aucun texte du modèle). Le champ `errors` accompagne les champs existants.
+          errs_json=$(awk -F= '
+            /^error=(timeout|empty|provider|429)$/ { c[$2]++ }
+            END { printf "{\"timeout\":%d,\"empty\":%d,\"provider\":%d,\"429\":%d}", c["timeout"], c["empty"], c["provider"], c["429"] }
+          ' "$OC_WORK/opencode.log.status" 2>/dev/null || true)
+          if ! printf '%s' "$errs_json" | jq -e 'has("timeout") and has("empty") and has("provider") and has("429")' >/dev/null 2>&1; then
+            errs_json='{"timeout":0,"empty":0,"provider":0,"429":0}'
+          fi
+          errs_total=$(printf '%s' "$errs_json" | jq '[.[]] | add' 2>/dev/null || echo 0)
+          [[ "$errs_total" =~ ^[0-9]+$ ]] || errs_total=0
+          tail="exit=${OC_RC} · raison=${why} · sha poussé=${sha} · journal=${LOG_BRANCH} · artefact=${LOG_ARTIFACT} · ISC ${ISC} · modèle ${OC_MODEL_MAIN} · erreurs=${errs_total} · run ${RUN_URL}"
           id=$(printf '%s:%s:%s:%s' "$IN_JOB" "$RUN_ID" "$RUN_ATTEMPT" "$status" | sha256sum | cut -d' ' -f1)
           body="$RUNNER_TEMP/notify.json"
           jq -nc --arg job "$IN_JOB" --arg status "$status" --argjson duration "$dur" --arg log_tail "$tail" \
-            --arg event_id "$id" --arg run_id "$RUN_ID" \
-            '{job:$job,status:$status,duration:$duration,pr_url:"",log_tail:$log_tail,event_id:$event_id,run_id:$run_id}' > "$body"
+            --arg event_id "$id" --arg run_id "$RUN_ID" --argjson errors "$errs_json" \
+            '{job:$job,status:$status,duration:$duration,pr_url:"",log_tail:$log_tail,event_id:$event_id,run_id:$run_id,errors:$errors}' > "$body"
           ok=0
           for attempt in 1 2 3; do
             code=$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\nheader = "X-Automation-Key: %s"\n' \
