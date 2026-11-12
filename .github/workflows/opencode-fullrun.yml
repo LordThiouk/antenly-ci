@@ -40,9 +40,9 @@ on:
         type: string
         default: ""
       idle_minutes:
-        description: "Garde-fou : arrêt si le journal opencode n'écrit plus rien pendant N min (10 à 120)"
+        description: "Agent figé : si le journal opencode n'écrit plus rien pendant N min (10 à 120), coupe et reprend la session (3 reprises max)"
         type: string
-        default: "30"
+        default: "20"
       wip_push_minutes:
         description: "Push des commits wip de la branche toutes les N min pendant le run (5 à 120)"
         type: string

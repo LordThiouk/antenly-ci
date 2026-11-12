@@ -61,7 +61,10 @@ cpu_tree() {
 active() {
   local pid="$1" cur cur_cpu
   cur=$(size); cur_cpu=$(cpu_tree "$pid")
-  if [ "$cur" != "${LAST_SIZE:-}" ] || [ "$cur_cpu" != "${LAST_CPU:-}" ] \
+  # Le CPU ne compte que si OC_IDLE_CPU=1 : un opencode figé (sous-agent qui ne revient pas)
+  # garde un petit CPU de boucle d'événements, ce qui masquait le blocage (F5/FR-14, 2026-11-12).
+  if [ "$cur" != "${LAST_SIZE:-}" ] \
+     || { [ "${OC_IDLE_CPU:-0}" = 1 ] && [ "$cur_cpu" != "${LAST_CPU:-}" ]; } \
      || [ -n "$(find "$OC_STORE_DIR" -newer "$OC_ACT" -print -quit 2>/dev/null)" ]; then
     LAST_SIZE="$cur"; LAST_CPU="$cur_cpu"
     touch "$OC_ACT" 2>/dev/null
@@ -166,5 +169,17 @@ if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 125 ] && [ "$(remaining)"
   rc=$WATCH_RC
   echo "fallback_rc=$rc" >>"$OC_LOG.status"
 fi
+# Agent figé : silence -> on coupe et on reprend la même session (au plus OC_STALL_RESUMES fois),
+# en disant à l'agent principal que le dernier agent lancé n'a pas répondu. Jamais compté comme verdict.
+STALLS=0
+while [ "$rc" -eq 125 ] && [ "$STALLS" -lt "${OC_STALL_RESUMES:-3}" ] && [ "$(remaining)" -gt 900 ]; do
+  STALLS=$((STALLS + 1))
+  printf '\n[stall] silence %s min, reprise %s/%s\n' "$(( IDLE_SEC / 60 ))" "$STALLS" "${OC_STALL_RESUMES:-3}" >>"$OC_LOG"
+  echo "stall_resume=$STALLS" >>"$OC_LOG.status"
+  run_watched "$OC_BIN" run --continue --model "$OC_MODEL_MAIN" \
+    "[agent-error] type=timeout : le dernier agent lancé n'a rien rendu pendant $(( IDLE_SEC / 60 )) min, il a été coupé. Son verdict est MANQUANT (jamais un pass). Relance cette même tâche une fois ; si elle se bloque encore, note le verdict manquant dans le rapport et continue le FullRun dans l'ordre des étapes, sans sauter de porte."
+  rc=$WATCH_RC
+  echo "stall_rc=$rc" >>"$OC_LOG.status"
+done
 case "$rc" in 124) echo "arret=plafond" >>"$OC_LOG.status" ;; 125) echo "arret=silence" >>"$OC_LOG.status" ;; esac
 exit "$rc"
