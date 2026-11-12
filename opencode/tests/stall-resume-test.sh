@@ -34,6 +34,8 @@ case "\$mode" in
     banner; exit 0 ;;
   big-ok)
     banner; head -c 1500000 /dev/zero | tr '\\0' 'x' | fold -w 200; echo; echo fini; exit 0 ;;
+  hang-subagent)
+    printf 'dispatch subagent Max (task)\\n'; hang ;;
   *)
     echo "mode inconnu" >&2; exit 2 ;;
 esac
@@ -49,6 +51,15 @@ run() { # $1 = reprises max, $2 = sonde --continue en secondes
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" bash "$R"
 }
 calls() { cat "$T/calls" 2>/dev/null || true; }
+
+# Variante : OC_SUBAGENT_IDLE_SEC court, OC_IDLE_SEC long, pour prouver que le seuil sous-agent
+# est bien le plus court des deux et qu'il est étiqueté (subagent_timeout=1).
+run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
+  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=f \
+  OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
+  OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
+  OC_SUBAGENT_IDLE_SEC="$3" bash "$R"
+}
 
 # 1. silence puis reprise réussie (la sonde --continue parle) — cas déjà couvert.
 mk hang-then-ok; run 3 2; rc=$?
@@ -121,6 +132,19 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$T/n")" -eq 1 ] \
   echo "ok 7 sortie > 1 Mo rc 0 -> succès sans reprise"
 else
   echo "FAIL 7 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 8. sous-agent muet : seuil OC_SUBAGENT_IDLE_SEC (2 s) plus court que OC_IDLE_SEC (30 s) →
+#    coupure rapide, type=timeout, subagent_timeout=1, puis reprise normale.
+mk hang-subagent; run_sub 1 0 2; rc=$?
+if [ "$rc" -eq 125 ] \
+   && grep -q '^\[agent-error\] type=timeout' "$T/log" \
+   && grep -q '^error=timeout' "$T/log.status" \
+   && grep -q '^subagent_timeout=1' "$T/log.status" \
+   && [ "$(cat "$T/n")" -eq 2 ]; then
+  echo "ok 8 sous-agent muet -> seuil 8 min et subagent_timeout=1"
+else
+  echo "FAIL 8 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
 fi
 
 exit $fail

@@ -39,6 +39,14 @@ PROBE_SEC="${OC_CONTINUE_PROBE_SEC:-180}"
 # OC_IDLE_SEC : uniquement pour les tests locaux (délai court) ; en CI, OC_IDLE_MIN fait foi.
 IDLE_SEC=$(( OC_IDLE_MIN * 60 ))
 [[ "${OC_IDLE_SEC:-}" =~ ^[0-9]{1,5}$ ]] && IDLE_SEC="$OC_IDLE_SEC"
+# OC_SUBAGENT_IDLE_SEC : seuil propre quand un sous-agent (`task`) est en cours (défaut 480 s).
+# Le flux d'opencode ne donne aucun marqueur de dispatch fiable (mesuré dans les journaux du
+# 2026-11-12) : on applique donc TOUJOURS le plus court des deux seuils (documenté dans PLAN A,
+# étape 1). Le motif de la dernière ligne utile ne sert plus qu'à étiqueter la cause.
+SUBAGENT_IDLE_SEC="${OC_SUBAGENT_IDLE_SEC:-480}"
+[[ "$SUBAGENT_IDLE_SEC" =~ ^[0-9]{1,5}$ && "$SUBAGENT_IDLE_SEC" -ge 1 ]] || SUBAGENT_IDLE_SEC=480
+EFFECTIVE_IDLE="$IDLE_SEC"
+[ "$SUBAGENT_IDLE_SEC" -lt "$EFFECTIVE_IDLE" ] && EFFECTIVE_IDLE="$SUBAGENT_IDLE_SEC"
 cd "$ANTENLY_DIR" || exit 90
 # opencode ne reçoit pas les fichiers de commandes du runner : il ne peut ni poser de variables
 # ou de PATH pour les steps suivants, ni écrire dans le Summary public, ni de sorties de step.
@@ -185,7 +193,15 @@ run_watched() {
       fi
     fi
     if [ "$now" -ge "$OC_DEADLINE_EPOCH" ]; then reason=plafond; break; fi
-    if [ $(( now - last_act )) -ge "$IDLE_SEC" ]; then reason=silence; break; fi
+    if [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then
+      # Étiquette seulement : le seuil appliqué est déjà le plus court des deux.
+      if tail -n 20 "$OC_LOG" 2>/dev/null | grep -Eqi '(^|[^[:alnum:]_])(task|subagent|@agent)([^[:alnum:]_]|$)'; then
+        reason=subagent
+      else
+        reason=silence
+      fi
+      break
+    fi
     sleep "$POLL" & wait $! 2>/dev/null
   done
   if [ -n "$reason" ]; then
@@ -214,6 +230,11 @@ run_pass() {
   if useful_from "$ATTEMPT_START"; then A_USEFUL=1; else A_USEFUL=0; fi
   case "$A_REASON" in
     silence) log_error timeout ;;
+    subagent)
+      log_error timeout
+      # Un sous-agent n'a plus rien écrit : la passe est coupée au seuil court (8 min par défaut).
+      printf 'subagent_timeout=1\n' >>"$OC_LOG.status"
+      ;;
     probe) ;; # coupure volontaire : l'absence de token est le constat (type empty ci-dessous)
   esac
   if [ "$A_USEFUL" -eq 0 ]; then
