@@ -22,7 +22,7 @@
 # décision du moniteur).
 set +x
 set -uo pipefail
-: "${ANTENLY_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" "${OC_MODEL_FALLBACK:?}" \
+: "${ANTENLY_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" \
   "${OC_DEADLINE_EPOCH:?}" "${OC_IDLE_MIN:?}"
 OC_BIN="${OC_BIN:-opencode}"
 POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
@@ -30,12 +30,33 @@ POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
 [[ "$OC_IDLE_MIN" =~ ^[0-9]{1,3}$ ]] || { echo "OC_IDLE_MIN invalide" >&2; exit 90; }
 [[ "$POLL" =~ ^[0-9]{1,3}$ && "$POLL" -ge 1 ]] || POLL=30
 [[ "$GRACE" =~ ^[0-9]{1,3}$ ]] || GRACE=60
-# OC_STALL_RESUMES : nombre de reprises après un arrêt (défaut 3). OC_CONTINUE_PROBE_SEC : durée
-# de la sonde `--continue` (défaut 180 ; 0 = ouvre directement une session neuve).
-MAX_RESUMES="${OC_STALL_RESUMES:-3}"
-[[ "$MAX_RESUMES" =~ ^[0-9]{1,2}$ ]] || MAX_RESUMES=3
+# OC_STALL_RESUMES : nombre de reprises après un arrêt (défaut min(chaîne, 6)).
+# OC_CONTINUE_PROBE_SEC : durée de la sonde `--continue` (défaut 180 ; 0 = session neuve directe).
 PROBE_SEC="${OC_CONTINUE_PROBE_SEC:-180}"
 [[ "$PROBE_SEC" =~ ^[0-9]{1,4}$ ]] || PROBE_SEC=180
+# OC_MODEL_CHAIN : liste ordonnée de modèles de secours (« opencode/...-free », séparés par des
+# virgules). Compat : OC_MODEL_FALLBACK seul forme une chaîne d'un élément. Chaque élément doit
+# être gratuit et différent du principal ; une chaîne vide après filtrage est une erreur
+# d'environnement (90). À la reprise n° i (1-based), m = chaîne[(i-1) % longueur].
+MODEL_CHAIN_RAW="${OC_MODEL_CHAIN:-${OC_MODEL_FALLBACK:-}}"
+CHAIN=()
+if [ -n "$MODEL_CHAIN_RAW" ]; then
+  IFS=',' read -r -a _chain_raw <<<"$MODEL_CHAIN_RAW"
+  for _m in "${_chain_raw[@]}"; do
+    _m="${_m#"${_m%%[![:space:]]*}"}"; _m="${_m%"${_m##*[![:space:]]}"}"
+    [ -n "$_m" ] || continue
+    [ "$_m" = "$OC_MODEL_MAIN" ] && continue          # le secours diffère toujours du principal
+    [[ "$_m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || { echo "modèle de secours refusé : $_m" >&2; exit 90; }
+    CHAIN+=("$_m")
+  done
+  unset _chain_raw _m
+fi
+[ "${#CHAIN[@]}" -ge 1 ] || { echo "OC_MODEL_CHAIN vide (ou réduite au principal) : aucun secours" >&2; exit 90; }
+if [[ "${OC_STALL_RESUMES:-}" =~ ^[0-9]{1,2}$ ]]; then
+  MAX_RESUMES="${OC_STALL_RESUMES}"
+else
+  MAX_RESUMES="${#CHAIN[@]}"; [ "$MAX_RESUMES" -gt 6 ] && MAX_RESUMES=6
+fi
 # OC_IDLE_SEC : uniquement pour les tests locaux (délai court) ; en CI, OC_IDLE_MIN fait foi.
 IDLE_SEC=$(( OC_IDLE_MIN * 60 ))
 [[ "${OC_IDLE_SEC:-}" =~ ^[0-9]{1,5}$ ]] && IDLE_SEC="$OC_IDLE_SEC"
@@ -159,6 +180,19 @@ stop_tree() {
   kids="$kids $(tree "$pid" | tr '\n' ' ')"
   # shellcheck disable=SC2086
   sig KILL "$pid" "$pgid" $kids
+}
+
+# Réécrit la ligne `model:` de chaque agent opencode (Max.md compris) vers $1. Les agents lisent
+# leur modèle au démarrage : sans cette réécriture, une reprise changerait Nix mais pas ses
+# sous-agents. OC_AGENT_DIR surchargeable pour les tests ; dossier absent = rien à faire.
+OC_AGENT_DIR="${OC_AGENT_DIR:-$HOME/.config/opencode/agent}"
+rewrite_agent_models() {
+  local m="$1" f
+  [ -d "$OC_AGENT_DIR" ] || return 0
+  for f in "$OC_AGENT_DIR"/*.md; do
+    [ -f "$f" ] || continue
+    sed -i -E "0,/^model: .*/s##model: ${m}#" "$f" 2>/dev/null || true
+  done
 }
 
 # Lance "$@" (sortie ajoutée à $OC_LOG) dans sa propre session, surveille silence et plafond.
@@ -287,13 +321,15 @@ esac
 STALLS=0
 while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remaining)" -gt 900 ]; do
   STALLS=$((STALLS + 1))
-  printf '\n[stall] silence %s min, reprise %s/%s\n' "$(( IDLE_SEC / 60 ))" "$STALLS" "$MAX_RESUMES" >>"$OC_LOG"
+  m="${CHAIN[$(( (STALLS - 1) % ${#CHAIN[@]} ))]}"
+  printf '\n[stall] silence %s min, reprise %s/%s\n' "$(( EFFECTIVE_IDLE / 60 ))" "$STALLS" "$MAX_RESUMES" >>"$OC_LOG"
   echo "stall_resume=$STALLS" >>"$OC_LOG.status"
-  echo "fallback=1" >>"$OC_LOG.status"
-  probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé n'a rien rendu pendant $(( IDLE_SEC / 60 )) min et a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
+  echo "fallback=$m" >>"$OC_LOG.status"
+  rewrite_agent_models "$m"
+  probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé n'a rien rendu pendant $(( EFFECTIVE_IDLE / 60 )) min et a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
   new_msg="Reprise FullRun après blocage — ceci est une NOUVELLE session, ne t'appuie pas sur la session précédente. Relis le contexte CI, ${OC_REPORT:-le rapport} s'il existe, l'état ISA / FullRun et l'étape courante, puis reprends le FullRun dans l'ordre, sans sauter de porte : un verdict manquant n'est jamais un pass."
   if [ "$PROBE_SEC" -ge 1 ]; then
-    run_pass "$PROBE_SEC" "$OC_BIN" run --continue --model "$OC_MODEL_FALLBACK" "$probe_msg"
+    OC_MODEL_MAIN="$m" run_pass "$PROBE_SEC" "$OC_BIN" run --continue --model "$m" "$probe_msg"
     rc=$A_RC; useful=$A_USEFUL
     echo "stall_rc=$rc" >>"$OC_LOG.status"
   else
@@ -305,7 +341,7 @@ while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remai
   if [ "$useful" -eq 0 ]; then
     printf '[stall] --continue sans token utile, nouvelle session\n' >>"$OC_LOG"
     echo "new_session=$STALLS" >>"$OC_LOG.status"
-    run_pass 0 "$OC_BIN" run --model "$OC_MODEL_FALLBACK" \
+    OC_MODEL_MAIN="$m" run_pass 0 "$OC_BIN" run --model "$m" \
       --title "${OC_JOB:-fullrun}-reprise-$STALLS" "$new_msg"
     rc=$A_RC; useful=$A_USEFUL
     echo "new_rc=$rc" >>"$OC_LOG.status"

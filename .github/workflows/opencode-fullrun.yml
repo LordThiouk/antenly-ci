@@ -28,9 +28,13 @@ on:
         type: string
         default: opencode/mimo-v2.6-flash-free
       model_fallback:
-        description: "Repli pour les reprises quand le principal ne répond pas (429, silence, réponse vide, erreur fournisseur)"
+        description: "Repli (compat) quand model_chain est vide : un seul modèle de secours"
         type: string
         default: opencode/glm-5.3-flash-free
+      model_chain:
+        description: "Chaîne de secours ordonnée (gratuits opencode/*-free, séparés par des virgules ; le principal est retiré)"
+        type: string
+        default: opencode/glm-5.3-flash-free,opencode/minimax-m3.1-flash-free,opencode/mimo-v2.6-flash-free,opencode/longcat-2.5-free,opencode/iceman-free,opencode/flint-40b-free,opencode/nemotron-3.5-lightning-free,opencode/beam-free,opencode/inkling-2-small-free
       lifeos_ref:
         description: "Branche de LordThiouk/lifeos (skills, agents, config opencode privée)"
         type: string
@@ -83,6 +87,7 @@ jobs:
       OC_MODEL_MAIN: ${{ inputs.model_main }}
       OC_MODEL_MAX: ${{ inputs.model_max }}
       OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
+      OC_MODEL_CHAIN: ${{ inputs.model_chain }}
       IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
       OC_ISA_PATH: ${{ inputs.isa_path }}
       IN_IDLE_MIN: ${{ inputs.idle_minutes }}
@@ -116,6 +121,21 @@ jobs:
           for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX" "$OC_MODEL_FALLBACK"; do
             [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle refusé : seuls les modèles opencode/*-free sont admis"
           done
+          # Chaîne de secours : model_chain, sinon model_fallback (compat). Chaque élément doit
+          # être gratuit et différent du principal ; la chaîne ne peut pas être vide.
+          chain="${OC_MODEL_CHAIN:-}"
+          [ -n "$chain" ] || chain="$OC_MODEL_FALLBACK"
+          n=0
+          IFS=',' read -r -a cms <<<"$chain"
+          for m in "${cms[@]}"; do
+            m="${m//[[:space:]]/}"
+            [ -n "$m" ] || continue
+            [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle de secours refusé : $m"
+            [ "$m" != "$OC_MODEL_MAIN" ] || fail "le secours doit différer du principal ($m)"
+            n=$((n + 1))
+          done
+          [ "$n" -ge 1 ] || fail "chaîne de secours vide"
+          echo "OC_MODEL_CHAIN=$chain" >> "$GITHUB_ENV"
           echo "OC_WORK=$RUNNER_TEMP/oc" >> "$GITHUB_ENV"
           # Début du job (pour le plafond d'opencode et la durée notifiée) : sortie de step, pas $GITHUB_ENV.
           echo "t0=$(date +%s)" >> "$GITHUB_OUTPUT"
@@ -596,7 +616,7 @@ jobs:
               *) echo "- arrêt : inconnu (step opencode interrompu)" ;;
             esac
             echo "- opencode : $OC_OUTCOME ; $(tr '\n' ' ' 2>/dev/null < "$OC_WORK/opencode.log.status" || echo 'pas de statut')"
-            echo "- modèles : main/Forge $OC_MODEL_MAIN, Max $OC_MODEL_MAX, repli $OC_MODEL_FALLBACK"
+            echo "- modèles : main/Forge $OC_MODEL_MAIN, Max $OC_MODEL_MAX, chaîne de secours ${OC_MODEL_CHAIN}"
             echo "- journal complet : branche \`$LOGB\` (à part, jamais fusionnée ; absente si retirée par le contrôle anti-secrets ; à supprimer après lecture)"
             echo
             echo "## Commits du run"
