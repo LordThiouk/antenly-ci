@@ -61,6 +61,10 @@ jobs:
         working-directory: tools/inventory
         run: uv run pytest -q
 
+      - name: Lint (ruff)
+        working-directory: tools/inventory
+        run: uv run ruff check .
+
       - name: Discover public sources -> data/inventory
         working-directory: tools/inventory
         run: uv run python discover.py --out ../../data/inventory
