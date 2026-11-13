@@ -66,6 +66,51 @@ jobs:
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest -q
+      # ISC-27 (ISA 2026-11-02-fr-14-multi-tenant-roles) : l'audit de sécurité
+      # interne lit docs/security-audit-*.md et croise la section Blockers de
+      # l'ISA. Sans cette ligne, un document d'audit ou une ISA modifiés pour
+      # contourner le contrôle ne seraient jamais rejoués par l'intégration
+      # (limite déclarée par l'ISA elle-même, 2026-11-13).
+      - name: Audit de sécurité interne (ISC-27)
+        run: uv run python -m antenly_api.security.internal_audit
+  # ISC-22, ISC-23, ISC-24 (ISA 2026-11-02-fr-14-multi-tenant-roles) : preuve
+  # de RLS sur la vraie pile de dev — Postgres, ClickHouse, SeaweedFS — jamais
+  # sur un substitut en mémoire. `python` ci-dessus couvre déjà tests/security
+  # (ISC-1 à ISC-21) sans la pile : les tests tests/integration y sont ignorés
+  # faute d'ANTENLY_DEV_STACK=1. Ce job est l'inverse : sous ANTENLY_DEV_STACK=1,
+  # une connexion impossible est un échec et non un skip (conftest.py), donc le
+  # job échoue franchement si la pile ne répond pas plutôt que de sortir vert
+  # sans preuve.
+  security-stack:
+    needs: pending
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ needs.pending.outputs.sha }}
+          token: ${{ secrets.ANTENLY_TOKEN }}
+          persist-credentials: false
+      # docker-compose.yml (PR #30, inchangé) + docker-compose.override.yml
+      # (couture fr-14) sont lus ensemble par `docker compose` par défaut : pas
+      # de -f à ajouter. Volumes neufs à chaque run, donc l'init Postgres monte
+      # scripts/roles.sh avant toute migration (docs/dev-stack-fr14.md).
+      - name: Pile de dev (Postgres 16.4, ClickHouse 24.8, SeaweedFS 3.80)
+        run: docker compose up -d --wait --wait-timeout 180
+      - name: Migrations (001_init.sql puis 002_rls.sql ; rôles déjà créés par l'init du volume neuf)
+        run: ./scripts/migrate.sh
+      - uses: astral-sh/setup-uv@v5
+      - name: Sondes d'intégration RLS (ISC-22, ISC-23, ISC-24) — 0 skip sous ANTENLY_DEV_STACK=1
+        working-directory: api
+        env:
+          ANTENLY_DEV_STACK: "1"
+        run: |
+          uv sync
+          uv run pytest tests/integration -q
+      - name: Arrêt de la pile
+        if: always()
+        run: docker compose down -v
   # ISC-5 (ISA 2026-11-02-capture-corpus-24h) : vrai inaSpeechSegmenter + TensorFlow CPU,
   # test_segmente_la_fixture_synthetique doit tourner, un skip est un échec.
   preannot-ina:
@@ -173,7 +218,7 @@ jobs:
           # les fichiers de test et fixtures.
           GITLEAKS_CONFIG: .gitleaks.toml
   report-status:
-    needs: [pending, rust, python, preannot-ina, licenses, secrets]
+    needs: [pending, rust, python, security-stack, preannot-ina, licenses, secrets]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -200,5 +245,5 @@ jobs:
           STATE=$([ "$OK" = "true" ] && echo success || echo failure)
           gh api -X POST "repos/LordThiouk/antenly/statuses/$SHA" \
             -f state="$STATE" -f context="antenly-ci" -f target_url="$RUN_URL" \
-            -f description="CI publique (rust, python, preannot-ina, licences, secrets)" >/dev/null
+            -f description="CI publique (rust, python, security-stack, preannot-ina, licences, secrets)" >/dev/null
           echo "antenly $SHA : $STATE"
