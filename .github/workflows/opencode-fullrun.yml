@@ -47,6 +47,10 @@ on:
         description: "Branche cible de la PR en brouillon (vide = branche par défaut du dépôt antenly)"
         type: string
         default: ""
+      hf_corpus:
+        description: "Optionnel : chemin, sur la branche antenly testée, d'un fichier listant des chemins du dataset privé LordThiouk/antenly-corpus (un par ligne). Vide = rien."
+        type: string
+        default: ""
       idle_minutes:
         description: "Agent figé : si le journal opencode n'écrit plus rien pendant N min (10 à 120), coupe et reprend la session (3 reprises max)"
         type: string
@@ -96,6 +100,7 @@ jobs:
       OC_ISA_PATH: ${{ inputs.isa_path }}
       IN_IDLE_MIN: ${{ inputs.idle_minutes }}
       IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
+      IN_HF_CORPUS: ${{ inputs.hf_corpus }}
       ANTENLY_DIR: ${{ github.workspace }}/antenly
       CI_DIR: ${{ github.workspace }}/ci
       OPENCODE_DISABLE_AUTOUPDATE: "1"
@@ -115,6 +120,14 @@ jobs:
           if [ -n "$OC_ISA_PATH" ]; then
             [[ "$OC_ISA_PATH" =~ ^MEMORY/WORK/[A-Za-z0-9._-]+/ISA\.md$ && "$OC_ISA_PATH" != *..* ]] \
               || fail "isa_path invalide (MEMORY/WORK/<dossier>/ISA.md)"
+          fi
+          # hf_corpus (facultatif) : chemin relatif sur la branche antenly testée. L'existence est
+          # vérifiée après le checkout, dans l'étape de téléchargement (le dépôt n'est pas encore là).
+          if [ -n "$IN_HF_CORPUS" ]; then
+            [[ "$IN_HF_CORPUS" != /* && "$IN_HF_CORPUS" != *..* ]] \
+              || fail "hf_corpus invalide (chemin relatif, sans ..)"
+            [[ "$IN_HF_CORPUS" =~ ^[A-Za-z0-9._/-]+$ ]] \
+              || fail "hf_corpus invalide (caractères admis : lettres, chiffres, . _ / -)"
           fi
           if ! [[ "$IN_IDLE_MIN" =~ ^[0-9]{2,3}$ ]] || [ "$((10#$IN_IDLE_MIN))" -lt 10 ] || [ "$((10#$IN_IDLE_MIN))" -gt 120 ]; then
             fail "idle_minutes invalide (entier de 10 à 120)"
@@ -321,6 +334,113 @@ jobs:
             < "$CI_DIR/opencode/ci-preamble.md" > "$OC_WORK/prompt.md"
           cat "$p" >> "$OC_WORK/prompt.md"
           echo "Prompt prêt ($(wc -l < "$OC_WORK/prompt.md") lignes), base $(git rev-parse --short HEAD)"
+
+      # Corpus HF privé facultatif (hf_corpus) : téléchargé AVANT opencode, dans $RUNNER_TEMP.
+      # Le jeton HF ne vit que dans l'environnement de cette étape : jamais dans $GITHUB_ENV,
+      # jamais dans un fichier, jamais dans l'environnement d'opencode. Les logs sont publics :
+      # seuls le nombre de fichiers et la taille totale sont affichés, jamais un nom de fichier.
+      - name: Corpus HF privé (hf_corpus, téléchargé hors d'opencode)
+        if: inputs.hf_corpus != ''
+        timeout-minutes: 60
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_CORPUS: ${{ inputs.hf_corpus }}
+          HF_REPO: LordThiouk/antenly-corpus
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          ANTENLY_ROOT: ${{ github.workspace }}/antenly
+        run: |
+          set +x
+          fail() { echo "::error::$1"; exit 1; }
+          [ -n "${HF_TOKEN:-}" ] || fail "hf_corpus demandé mais secret HF_TOKEN absent (acte Papa requis)"
+          root=$(realpath -e "$ANTENLY_ROOT") || fail "racine antenly introuvable"
+          list=$(realpath -e "$ANTENLY_ROOT/$HF_CORPUS" 2>/dev/null) \
+            || fail "hf_corpus : fichier introuvable sur la branche $IN_BRANCH"
+          case "$list" in "$root"/*) ;; *) fail "hf_corpus : chemin hors du dépôt antenly" ;; esac
+          [ -f "$list" ] || fail "hf_corpus : ce n'est pas un fichier"
+          DEST="$RUNNER_TEMP/antenly-corpus"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          # Liste assainie : une entrée par ligne, doublons retirés, plafond 400 fichiers.
+          LIST_OUT="$RUNNER_TEMP/antenly-corpus.list"
+          LIST_FILE="$list" LIST_OUT="$LIST_OUT" python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          MAX_FILES = 400
+          src = Path(os.environ["LIST_FILE"])
+          out = Path(os.environ["LIST_OUT"])
+          paths, seen, bad = [], set(), []
+          for n, raw in enumerate(src.read_text(encoding="utf-8", errors="strict").splitlines(), 1):
+              line = raw.strip()
+              if not line:
+                  continue
+              if line.startswith("/"):
+                  bad.append(f"ligne {n} : chemin absolu interdit")
+                  continue
+              if ".." in line.split("/"):
+                  bad.append(f"ligne {n} : '..' interdit")
+                  continue
+              if "\\" in line or any(ord(c) < 32 for c in line):
+                  bad.append(f"ligne {n} : caractère interdit")
+                  continue
+              if line not in seen:
+                  seen.add(line)
+                  paths.append(line)
+          if bad:
+              for m in bad[:20]:
+                  print(f"::error::hf_corpus invalide : {m}")
+              print(f"::error::hf_corpus invalide : {len(bad)} ligne(s) refusée(s)")
+              sys.exit(1)
+          if not paths:
+              print("::error::hf_corpus : liste vide (aucun fichier à télécharger)")
+              sys.exit(1)
+          if len(paths) > MAX_FILES:
+              print(f"::error::hf_corpus : {len(paths)} fichiers, plafond {MAX_FILES}")
+              sys.exit(1)
+          out.write_text("\n".join(paths) + "\n", encoding="utf-8")
+          os.chmod(out, 0o600)
+          print(f"hf_corpus : {len(paths)} fichier(s) validé(s)")
+          PY
+          uv venv "$RUNNER_TEMP/hfvenv" >/dev/null
+          uv pip install --quiet --python "$RUNNER_TEMP/hfvenv/bin/python" huggingface_hub >/dev/null
+          # Téléchargement : sortie intégralement masquée (aucun nom de fichier dans les logs
+          # publics). Seul le code de sortie remonte ; le détail reste dans un fichier éphémère.
+          rc=0
+          LIST_FILE="$LIST_OUT" DEST="$DEST" HF_REPO="$HF_REPO" HF_TOKEN="$HF_TOKEN" \
+            "$RUNNER_TEMP/hfvenv/bin/python" - >"$RUNNER_TEMP/hf-fetch.log" 2>&1 <<'PY' || rc=$?
+          import os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          dest = Path(os.environ["DEST"])
+          names = [l for l in Path(os.environ["LIST_FILE"]).read_text(encoding="utf-8").splitlines() if l]
+          for name in names:
+              hf_hub_download(
+                  repo_id=os.environ["HF_REPO"],
+                  repo_type="dataset",
+                  filename=name,
+                  local_dir=str(dest),
+                  token=os.environ["HF_TOKEN"],
+              )
+          total = sum(
+              p.stat().st_size
+              for p in dest.rglob("*")
+              if p.is_file() and p.relative_to(dest).parts[0] != ".cache"
+          )
+          Path(os.environ["DEST"] + ".summary").write_text(f"{len(names)} {total}\n", encoding="utf-8")
+          PY
+          if [ "$rc" -ne 0 ]; then
+            shred -u "$RUNNER_TEMP/hf-fetch.log" "$LIST_OUT" 2>/dev/null || rm -f "$RUNNER_TEMP/hf-fetch.log" "$LIST_OUT"
+            fail "téléchargement du corpus HF échoué (code $rc ; détail masqué, logs publics)"
+          fi
+          shred -u "$RUNNER_TEMP/hf-fetch.log" "$LIST_OUT" 2>/dev/null || rm -f "$RUNNER_TEMP/hf-fetch.log" "$LIST_OUT"
+          read -r nfiles nbytes < "$DEST.summary" || fail "résumé du corpus illisible"
+          rm -f "$DEST.summary"
+          case "$nfiles" in ''|*[!0-9]*) fail "résumé du corpus illisible" ;; esac
+          case "$nbytes" in ''|*[!0-9]*) fail "résumé du corpus illisible" ;; esac
+          echo "ANTENLY_CORPUS_DIR=$DEST" >> "$GITHUB_ENV"
+          echo "Corpus HF prêt : ${nfiles} fichier(s), ${nbytes} octets"
 
       # Avant opencode : gitleaks (épinglé, sha256 vérifié), les scripts de masquage, de chiffrement
       # et du journal en direct, et le destinataire age sont copiés en root dans /opt/fullrun-tools.
