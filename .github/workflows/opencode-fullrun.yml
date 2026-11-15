@@ -460,8 +460,13 @@ jobs:
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
-            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$T/"
+            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/bench-capped" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
+          # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
+          # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
+          # pouvoir être remplacé par l'agent.
+          sudo install -o root -g root -m 0755 "$T/bench-capped" /usr/local/bin/bench-capped
+          command -v bench-capped >/dev/null || { echo "::error::bench-capped absent du PATH"; exit 1; }
           rm -rf "$RUNNER_TEMP/gl" "$f"
           # Config gitleaks d'antenly au SHA de départ (même règle que le contrôle avant push).
           cd "$ANTENLY_DIR"
@@ -559,8 +564,9 @@ jobs:
           echo "- Push des wip : branche \`$IN_BRANCH\` toutes les ${IN_WIP_PUSH_MIN} min (gitleaks + clé ISA avant chaque envoi)" >> "$GITHUB_STEP_SUMMARY"
           echo "Push périodique des wip démarré (toutes les ${IN_WIP_PUSH_MIN} min)"
 
-      # Priorité mémoire (best-effort, jamais fatal) : si le runner sature, opencode meurt le
-      # premier ; Runner.Worker et les superviseurs des démons restent pour écrire le rapport.
+      # Priorité mémoire (best-effort, jamais fatal) : Runner.Worker et les superviseurs des
+      # démons reçoivent oom_score_adj=-500, opencode garde la valeur par défaut (0). En cas
+      # de pression mémoire, le noyau cible opencode en premier (score OOM le plus élevé).
       - name: Protection mémoire (OOM, best-effort)
         continue-on-error: true
         run: |
@@ -614,11 +620,11 @@ jobs:
           scope=()
           uid=$(id -u); gid=$(id -g)
           # shellcheck disable=SC2016 # $OC_LOG est évalué par le shell interne de la sonde
-          probe=$(timeout 20 sudo -n -E systemd-run --scope --quiet -p MemoryMax=5G \
+          probe=$(timeout 20 sudo -n -E systemd-run --scope --quiet -p MemoryMax=10G \
             -- /usr/bin/setpriv --reuid="$uid" --regid="$gid" --init-groups -- \
             /bin/sh -c 'echo "$(id -u):${OC_LOG:+set}"' 2>/dev/null || true)
           if [ "$probe" = "$uid:set" ]; then
-            scope=(sudo -n -E systemd-run --scope --quiet -p MemoryMax=5G --
+            scope=(sudo -n -E systemd-run --scope --quiet -p MemoryMax=10G --
                    /usr/bin/setpriv --reuid="$uid" --regid="$gid" --init-groups --)
           else
             echo "::warning::systemd-run --scope indisponible ou environnement non conservé : pas de plafond mémoire pour opencode"
@@ -626,7 +632,12 @@ jobs:
           # opencode tourne dans sa propre session : une annulation (SIGINT/SIGTERM au step) est
           # relayée au moniteur, qui l'arrête proprement avant les steps de rapport et de push.
           "${scope[@]}" "$CI_DIR/opencode/run-fullrun.sh" & runner=$!
-          trap 'kill -TERM "$runner" 2>/dev/null || true' INT TERM
+          # Quand scope contient systemd-run, $runner est sudo/setpriv et non run-fullrun.sh.
+          # On signale donc aussi ses descendants directs pour atteindre le script.
+          trap '
+            kill -TERM "$runner" 2>/dev/null
+            pkill -TERM -P "$runner" 2>/dev/null || true
+          ' INT TERM
           rc=0; wait "$runner" || rc=$?
           if kill -0 "$runner" 2>/dev/null; then rc=0; wait "$runner" || rc=$?; fi
           trap - INT TERM
@@ -688,9 +699,9 @@ jobs:
           # Filet : un opencode encore vivant (step interrompu) ne doit plus écrire pendant les contrôles.
           pkill -KILL -f '(^|[ /])opencode run ' 2>/dev/null || true
           cd "$ANTENLY_DIR"
-          # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age.
+          # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age, bench-capped.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.

@@ -192,6 +192,66 @@ active() {
   return 1
 }
 
+# --- Enveloppe mémoire ---------------------------------------------------------------
+# Borne l'ensemble du processus opencode et de ses descendants à MEMCAP_BYTES (10 Go par défaut).
+# Trois paliers, testés dans l'ordre : systemd-run --scope (préféré, cgroup v2 natif, MemorySwapMax=0),
+# cgroup v2 direct (créé sous /sys/fs/cgroup), prlimit --as (dernier recours, par processus uniquement).
+# Les démons wip/livelog tournent HORS de cette enveloppe (lancés par le workflow en root).
+MEMCAP_BYTES="${MEMCAP_BYTES:-10737418240}"  # 10 Go
+MEMCAP_CMD=()
+MEMCAP_TYPE=""
+MEMCAP_CGROUP=""
+
+_memcap_cleanup() {
+  if [ "$MEMCAP_TYPE" = "cgroup2" ] && [ -n "$MEMCAP_CGROUP" ] && [ -d "$MEMCAP_CGROUP" ]; then
+    # Déplacer les processus restants vers le parent avant suppression.
+    local parent; parent=$(dirname "$MEMCAP_CGROUP")
+    while read -r p 2>/dev/null; do
+      echo "$p" | sudo -n tee "$parent/cgroup.procs" >/dev/null 2>&1 || true
+    done < "$MEMCAP_CGROUP/cgroup.procs" 2>/dev/null
+    sudo -n rmdir "$MEMCAP_CGROUP" 2>/dev/null || true
+  fi
+}
+
+_memcap_move_pid() {
+  # Déplace $1 dans le cgroup2 de l'enveloppe (appelé juste après le fork).
+  [ "$MEMCAP_TYPE" = "cgroup2" ] && [ -n "$MEMCAP_CGROUP" ] && \
+    echo "$1" | sudo -n tee "$MEMCAP_CGROUP/cgroup.procs" >/dev/null 2>&1 || true
+}
+
+# Sonde : tier 1 — systemd-run --scope
+if [ -z "$MEMCAP_TYPE" ]; then
+  _probe=$(timeout 10 systemd-run --scope --quiet \
+    -p "MemoryMax=$MEMCAP_BYTES" -p MemorySwapMax=0 \
+    -- /bin/sh -c 'echo memcap_ok' 2>/dev/null || true)
+  if [ "$_probe" = "memcap_ok" ]; then
+    MEMCAP_CMD=(systemd-run --scope --quiet -p "MemoryMax=$MEMCAP_BYTES" -p MemorySwapMax=0 --)
+    MEMCAP_TYPE="systemd"
+  fi
+fi
+# Sonde : tier 2 — cgroup v2 direct
+if [ -z "$MEMCAP_TYPE" ] && [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+  _cg="/sys/fs/cgroup/fullrun-oc-$$"
+  if sudo -n mkdir -p "$_cg" 2>/dev/null && \
+     echo "$MEMCAP_BYTES" | sudo -n tee "$_cg/memory.max" >/dev/null 2>&1 && \
+     echo 0 | sudo -n tee "$_cg/memory.swap.max" >/dev/null 2>&1; then
+    MEMCAP_CGROUP="$_cg"
+    MEMCAP_TYPE="cgroup2"
+  else
+    sudo -n rmdir "$_cg" 2>/dev/null || true
+  fi
+fi
+# Sonde : tier 3 — prlimit --as (dernier recours, pas de swap control)
+if [ -z "$MEMCAP_TYPE" ] && command -v prlimit >/dev/null 2>&1; then
+  _probe=$(prlimit "--as=$MEMCAP_BYTES" -- /bin/sh -c 'echo memcap_ok' 2>/dev/null || true)
+  if [ "$_probe" = "memcap_ok" ]; then
+    MEMCAP_CMD=(prlimit "--as=$MEMCAP_BYTES" --)
+    MEMCAP_TYPE="prlimit"
+  fi
+fi
+[ -n "$MEMCAP_TYPE" ] && echo "[memcap] enveloppe $MEMCAP_TYPE $(( MEMCAP_BYTES / 1073741824 )) Go" >&2 \
+  || echo "[memcap] aucune enveloppe disponible (systemd-run / cgroup2 / prlimit)" >&2
+
 # Descendants (récursifs) d'un PID, y compris ceux qui ont changé de groupe ou de session.
 tree() {
   local p c
@@ -286,8 +346,10 @@ run_watched() {
     probe_end=$(( $(date +%s) + WATCH_PROBE_SEC ))
   fi
   # --wait : si setsid devait forker, $! reste le parent qui attend opencode (jamais de faux « fini »).
-  setsid --wait "$@" >>"$OC_LOG" 2>&1 </dev/null &
+  # MEMCAP_CMD (vide si aucune enveloppe) interpose systemd-run/prlimit entre setsid et la commande.
+  setsid --wait "${MEMCAP_CMD[@]}" "$@" >>"$OC_LOG" 2>&1 </dev/null &
   pid=$!; CUR_PID=$pid; CUR_PGID=""
+  _memcap_move_pid "$pid"
   # setsid exécute la commande en place (pas leader de groupe en arrière-plan) : pgid = pid.
   sleep 0.2
   pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -390,6 +452,7 @@ on_cancel() {
   # Le runner envoie SIGKILL ~10 s après l'annulation : grâce courte.
   GRACE=5
   [ -n "$CUR_PID" ] && stop_tree "$CUR_PID" "$CUR_PGID"
+  _memcap_cleanup
   echo "arret=annulation" >>"$OC_LOG.status"
   exit 130
 }
@@ -458,4 +521,5 @@ case "$rc" in
   126) echo "arret=vide" >>"$OC_LOG.status" ;;
   130) echo "arret=annulation" >>"$OC_LOG.status" ;;
 esac
+_memcap_cleanup
 exit "$rc"
