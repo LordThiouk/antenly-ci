@@ -462,6 +462,11 @@ jobs:
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
             "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/bench-capped" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
+          # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
+          # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
+          # pouvoir être remplacé par l'agent.
+          sudo install -o root -g root -m 0755 "$T/bench-capped" /usr/local/bin/bench-capped
+          command -v bench-capped >/dev/null || { echo "::error::bench-capped absent du PATH"; exit 1; }
           rm -rf "$RUNNER_TEMP/gl" "$f"
           # Config gitleaks d'antenly au SHA de départ (même règle que le contrôle avant push).
           cd "$ANTENLY_DIR"
@@ -694,9 +699,9 @@ jobs:
           # Filet : un opencode encore vivant (step interrompu) ne doit plus écrire pendant les contrôles.
           pkill -KILL -f '(^|[ /])opencode run ' 2>/dev/null || true
           cd "$ANTENLY_DIR"
-          # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age.
+          # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age, bench-capped.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test du plafond mémoire : bench-capped tue un processus qui dépasse le cap, le parent survit,
-# et la ligne [oom] est écrite dans le journal. Aucun réseau réel.
+# et la ligne [oom] est écrite dans le journal avec un pic numérique. Aucun réseau réel.
 #   opencode/tests/memcap-test.sh
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,6 +27,17 @@ except (MemoryError, OSError):
 PYEOF
 }
 
+has_oom_peak() {
+  local f
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    if grep -qE '\[oom\].*peak=[1-9][0-9]*' "$f" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # --- 1. Commande sous le cap : bench-capped laisse passer normalement ---
 export BENCH_CAPPED_LIMIT=$((200 * 1024 * 1024))  # 200 Mo
 export OC_LOG="$tmp/test.log"
@@ -37,22 +48,15 @@ rc=0
 [ "$rc" -eq 0 ] || ko "commande légère devrait réussir (rc=$rc) : $(cat "$tmp/ok.out")"
 ok "commande sous le cap : succès"
 
-# --- 2. Commande qui dépasse le cap : tuée, parent survit, [oom] écrit ---
+# --- 2. Commande qui dépasse le cap : tuée, parent survit, [oom] + pic ---
 make_eater
 rc=0
 "$bench" python3 -I "$tmp/eater.py" > "$tmp/oom.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || ko "eater devrait être tué (rc=0 inattendu)"
-# La ligne [oom] doit apparaître dans OC_LOG ou dans stderr (selon le mécanisme).
-if grep -q '\[oom\]' "$OC_LOG" 2>/dev/null || grep -q '\[oom\]' "$tmp/oom.out" 2>/dev/null; then
-  ok "eater tué, ligne [oom] présente (rc=$rc)"
+if has_oom_peak "$OC_LOG" "$tmp/oom.out"; then
+  ok "eater tué, ligne [oom] et pic numérique (rc=$rc)"
 else
-  # Avec prlimit, le signal est SIGSEGV (139) ou MemoryError (42). Le [oom] est attendu pour
-  # 137 et 139 ; si le mécanisme est prlimit et Python attrape MemoryError → rc=42, pas d'[oom].
-  if [ "$rc" -eq 42 ]; then
-    ok "eater tué par MemoryError (prlimit, rc=42) — pas de ligne [oom] attendue"
-  else
-    ko "eater tué (rc=$rc) mais pas de ligne [oom] : stderr=$(cat "$tmp/oom.out") log=$(cat "$OC_LOG" 2>/dev/null)"
-  fi
+  ko "eater tué (rc=$rc) mais [oom]/pic absent : stderr=$(cat "$tmp/oom.out") log=$(cat "$OC_LOG" 2>/dev/null)"
 fi
 
 # --- 3. Le parent (ce script) est toujours vivant ---
@@ -65,4 +69,27 @@ rc=0
 [ "$rc" -eq 2 ] || ko "bench-capped sans argument devrait rendre 2 (rc=$rc)"
 ok "bench-capped sans argument : exit 2 (usage)"
 
-echo "PASS memcap : cap mémoire, OOM, parent survit, [oom] journal"
+# --- 5. command -v bench-capped le trouve une fois installé dans le PATH (comme en CI) ---
+mkdir -p "$tmp/bin"
+cp "$bench" "$tmp/bin/bench-capped"
+chmod 0755 "$tmp/bin/bench-capped"
+found=$(PATH="$tmp/bin:/usr/bin:/bin" command -v bench-capped || true)
+[ "$found" = "$tmp/bin/bench-capped" ] || ko "command -v bench-capped devrait trouver $tmp/bin/bench-capped (trouvé=${found:-rien})"
+ok "command -v bench-capped trouve l'outil dans le PATH"
+
+# --- 6. prlimit (rc=42) : ligne [oom] et pic numérique ---
+if command -v prlimit >/dev/null 2>&1; then
+  : > "$OC_LOG"
+  rc=0
+  BENCH_CAPPED_METHOD=prlimit "$bench" python3 -I "$tmp/eater.py" > "$tmp/pr.out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || ko "eater prlimit devrait échouer (rc=0)"
+  if has_oom_peak "$OC_LOG" "$tmp/pr.out"; then
+    ok "prlimit : [oom] et pic numérique (rc=$rc)"
+  else
+    ko "prlimit rc=$rc sans [oom]/pic : stderr=$(cat "$tmp/pr.out") log=$(cat "$OC_LOG" 2>/dev/null)"
+  fi
+else
+  ok "prlimit absent : test [oom]/pic prlimit ignoré"
+fi
+
+echo "PASS memcap : cap mémoire, OOM, parent survit, [oom] journal, PATH, pic"

@@ -7,9 +7,12 @@
 #
 # Variable d'environnement : BENCH_CAPPED_LIMIT (octets, défaut 8589934592 = 8 Go).
 # L'option --limit surcharge la variable.
+# BENCH_CAPPED_METHOD (systemd|cgroup2|prlimit) force le mécanisme, sinon sondé dans cet ordre.
 #
-# En cas d'OOM : écriture de « [oom] <commande> <peak> » dans $OC_LOG (si défini) et
-# dans stderr ; code de sortie non nul (137 typique, 1 si le pic n'est pas lisible).
+# En cas d'OOM (137 SIGKILL, 139 SIGSEGV, 42 MemoryError sous prlimit) : écriture de
+# « [oom] <commande> peak=<octets> » dans $OC_LOG (si défini) et stderr. Le code de
+# sortie de la commande est conservé. Le pic vient de memory.peak du cgroup, sinon de
+# VmHWM (/proc/<pid>/status), sinon de ru_maxrss via /usr/bin/time.
 set -uo pipefail
 
 limit="${BENCH_CAPPED_LIMIT:-8589934592}"
@@ -28,72 +31,151 @@ cmd_name="$1"
 rc=0
 peak=""
 method=""
+force="${BENCH_CAPPED_METHOD:-}"
+case "$force" in
+  ""|systemd|cgroup2|prlimit) ;;
+  *) echo "bench-capped: méthode inconnue $force" >&2; exit 2 ;;
+esac
 
-# --- Tier 1 : systemd-run --scope (cgroup v2 natif) ---
-if [ -z "$method" ]; then
+_tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$_tmp"' EXIT
+
+# Interne : lance la commande, écrit le pic (octets) dans $1, rend le code de la commande.
+# $2 = 1 si le cgroup courant est dédié (systemd-run / cgroup2), 0 sinon (prlimit :
+# memory.peak du cgroup ambiant n'est pas celui de la commande).
+cat > "$_tmp/inner" << 'INNER'
+#!/usr/bin/env bash
+set -uo pipefail
+out="$1"
+trust_cg="$2"
+shift 2
+timef="$out.time"
+if [ -x /usr/bin/time ]; then
+  /usr/bin/time -f '%M' -o "$timef" -- "$@" &
+else
+  "$@" &
+fi
+child=$!
+cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)
+vmhwm=""
+while :; do
+  v=$(awk '/VmHWM:/ {print $2}' "/proc/$child/status" 2>/dev/null || true)
+  [ -n "$v" ] && vmhwm=$v
+  st=$(awk '/^State:/ {print $2}' "/proc/$child/status" 2>/dev/null || true)
+  if [ -z "$st" ] || [ "$st" = "Z" ]; then
+    break
+  fi
+  sleep 0.05
+done
+wait "$child"
+rc=$?
+peak=""
+if [ "$trust_cg" = 1 ] && [ -n "$cg" ] && [ -r "/sys/fs/cgroup${cg}/memory.peak" ]; then
+  peak=$(tr -dc '0-9' < "/sys/fs/cgroup${cg}/memory.peak")
+fi
+if [ -z "$peak" ] || [ "$peak" = 0 ]; then
+  if [ -s "$timef" ]; then
+    rss=$(tr -dc '0-9' < "$timef")
+    if [[ "$rss" =~ ^[0-9]+$ ]]; then
+      peak=$((rss * 1024))
+    fi
+  fi
+fi
+if [ -z "$peak" ] || [ "$peak" = 0 ]; then
+  if [[ "$vmhwm" =~ ^[0-9]+$ ]]; then
+    peak=$((vmhwm * 1024))
+  fi
+fi
+printf '%s' "${peak:-}" > "$out"
+exit "$rc"
+INNER
+chmod +x "$_tmp/inner"
+
+try_systemd() {
   _p=$(timeout 5 systemd-run --scope --quiet -p "MemoryMax=$limit" -p MemorySwapMax=0 \
     -- /bin/sh -c 'echo ok' 2>/dev/null || true)
-  [ "$_p" = "ok" ] && method="systemd"
-fi
+  [ "$_p" = "ok" ]
+}
 
-# --- Tier 2 : cgroup v2 direct ---
-if [ -z "$method" ] && [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+try_cgroup2() {
+  [ -f /sys/fs/cgroup/cgroup.controllers ] || return 1
   _cg="/sys/fs/cgroup/bench-capped-$$"
   if sudo -n mkdir -p "$_cg" 2>/dev/null && \
      echo "$limit" | sudo -n tee "$_cg/memory.max" >/dev/null 2>&1 && \
      echo 0 | sudo -n tee "$_cg/memory.swap.max" >/dev/null 2>&1; then
-    method="cgroup2"
+    return 0
+  fi
+  sudo -n rmdir "$_cg" 2>/dev/null || true
+  return 1
+}
+
+try_prlimit() {
+  command -v prlimit >/dev/null 2>&1
+}
+
+# --- Choix du mécanisme ---
+if [ "$force" = "systemd" ]; then
+  if try_systemd; then method="systemd"; else echo "bench-capped: systemd-run indisponible" >&2; exit 2; fi
+elif [ "$force" = "cgroup2" ]; then
+  if try_cgroup2; then method="cgroup2"; else echo "bench-capped: cgroup v2 indisponible" >&2; exit 2; fi
+elif [ "$force" = "prlimit" ]; then
+  if try_prlimit; then method="prlimit"; else echo "bench-capped: prlimit indisponible" >&2; exit 2; fi
+else
+  if try_systemd; then method="systemd"
+  elif try_cgroup2; then method="cgroup2"
+  elif try_prlimit; then method="prlimit"
   else
-    sudo -n rmdir "$_cg" 2>/dev/null || true
+    echo "bench-capped: aucun mécanisme de cap disponible" >&2
+    exit 2
   fi
 fi
-
-# --- Tier 3 : prlimit --as ---
-if [ -z "$method" ] && command -v prlimit >/dev/null 2>&1; then
-  method="prlimit"
-fi
-
-[ -n "$method" ] || { echo "bench-capped: aucun mécanisme de cap disponible" >&2; exit 2; }
 
 # --- Exécution ---
 case "$method" in
   systemd)
-    systemd-run --scope --quiet -p "MemoryMax=$limit" -p MemorySwapMax=0 -- "$@"
+    systemd-run --scope --quiet -p "MemoryMax=$limit" -p MemorySwapMax=0 -- \
+      "$_tmp/inner" "$_tmp/peak" 1 "$@"
     rc=$?
     ;;
   cgroup2)
-    "$@" &
+    "$_tmp/inner" "$_tmp/peak" 1 "$@" &
     child=$!
     echo "$child" | sudo -n tee "$_cg/cgroup.procs" >/dev/null 2>&1 || true
     wait "$child" 2>/dev/null
     rc=$?
-    peak=$(cat "$_cg/memory.peak" 2>/dev/null || echo "?")
-    # Nettoyage
+    cgpeak=$(tr -dc '0-9' < "$_cg/memory.peak" 2>/dev/null || true)
     while read -r p 2>/dev/null; do
       echo "$p" | sudo -n tee "$(dirname "$_cg")/cgroup.procs" >/dev/null 2>&1 || true
     done < "$_cg/cgroup.procs" 2>/dev/null
     sudo -n rmdir "$_cg" 2>/dev/null || true
+    if [[ "$cgpeak" =~ ^[1-9][0-9]*$ ]]; then
+      printf '%s' "$cgpeak" > "$_tmp/peak"
+    fi
     ;;
   prlimit)
-    prlimit "--as=$limit" -- "$@"
+    prlimit "--as=$limit" -- "$_tmp/inner" "$_tmp/peak" 0 "$@"
     rc=$?
     ;;
 esac
 
+if [ -s "$_tmp/peak" ]; then
+  peak=$(tr -dc '0-9' < "$_tmp/peak")
+fi
+
 # --- Détection OOM ---
-# Codes typiques : 137 (SIGKILL via cgroup OOM killer), 9 (SIGKILL direct).
+# 137 = SIGKILL (OOM cgroup), 139 = SIGSEGV (prlimit --as), 42 = MemoryError sous prlimit.
 if [ "$rc" -ne 0 ]; then
-  # Heuristique : un SIGKILL (137 = 128+9) est très probablement un OOM cgroup.
-  # Pour prlimit, c'est un SIGSEGV (139 = 128+11) ou SIGABRT.
   is_oom=0
   case "$rc" in
-    137|139) is_oom=1 ;;
+    137|139|42) is_oom=1 ;;
   esac
 
   if [ "$is_oom" -eq 1 ]; then
     oom_line="[oom] $cmd_name peak=${peak:-?}"
     echo "$oom_line" >&2
-    [ -n "${OC_LOG:-}" ] && echo "$oom_line" >> "$OC_LOG" 2>/dev/null || true
+    if [ -n "${OC_LOG:-}" ]; then
+      echo "$oom_line" >> "$OC_LOG" 2>/dev/null || true
+    fi
   fi
 fi
 
