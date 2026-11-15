@@ -232,6 +232,26 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/age-keygen
           age --version
 
+      # ffmpeg/ffprobe : le banc fingerprint décode des .opus. Même schéma que ci.yml
+      # (binaire statique épinglé, secours apt). Échec franc si l'un des deux manque.
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: steps.ffmpeg.outcome != 'success'
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Vérifier ffmpeg et ffprobe
+        run: |
+          command -v ffmpeg >/dev/null || { echo "::error::ffmpeg absent du PATH"; exit 1; }
+          command -v ffprobe >/dev/null || { echo "::error::ffprobe absent du PATH"; exit 1; }
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
       - name: Reconstituer ~/.claude et ~/.config/opencode
         run: |
           set +x
@@ -254,6 +274,9 @@ jobs:
           C="$HOME/.config/opencode"
           cp "$CI_DIR/opencode/config/opencode.json" "$C/opencode.json"
           cp -r "$L/opencode/agent" "$L/opencode/command" "$L/opencode/plugins" "$C/"
+          # Profil FullRun : le plugin lit ~/.config/opencode/plugins/../hook-profiles/fullrun.json
+          # (copie depuis le checkout LifeOS). Un profil qui coupe un garde-fou arrête le job.
+          "$CI_DIR/opencode/install-hook-profile.sh" "$L" "$C"
           cp "$L/opencode/package.json" "$C/package.json"
           cp "$L/opencode/nix-lifeos.prompt.md" "$HOME/.local/share/opencode-lifeos/"
           # Le socle LifeOS n'est plus une `instructions` globale (chargée par CHAQUE sous-agent) :

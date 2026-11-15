@@ -249,8 +249,25 @@ if [ -z "$MEMCAP_TYPE" ] && command -v prlimit >/dev/null 2>&1; then
     MEMCAP_TYPE="prlimit"
   fi
 fi
-[ -n "$MEMCAP_TYPE" ] && echo "[memcap] enveloppe $MEMCAP_TYPE $(( MEMCAP_BYTES / 1073741824 )) Go" >&2 \
-  || echo "[memcap] aucune enveloppe disponible (systemd-run / cgroup2 / prlimit)" >&2
+# Ligne visible dans le livelog (journal $OC_LOG) et sur stderr (log de job).
+_memcap_limit=""
+if [ $(( MEMCAP_BYTES % 1073741824 )) -eq 0 ]; then
+  _memcap_limit="$(( MEMCAP_BYTES / 1073741824 ))G"
+else
+  _memcap_limit="${MEMCAP_BYTES}"
+fi
+_memcap_mech=""
+case "$MEMCAP_TYPE" in
+  systemd) _memcap_mech=systemd-run ;;
+  cgroup2) _memcap_mech=cgroupv2 ;;
+  prlimit) _memcap_mech=prlimit ;;
+esac
+if [ -n "$_memcap_mech" ]; then
+  printf '[memcap] mécanisme=%s limite=%s\n' "$_memcap_mech" "$_memcap_limit" | tee -a "$OC_LOG" >&2
+else
+  echo "[memcap] aucune enveloppe disponible (systemd-run / cgroupv2 / prlimit)" | tee -a "$OC_LOG" >&2
+fi
+unset _memcap_limit _memcap_mech
 
 # Descendants (récursifs) d'un PID, y compris ceux qui ont changé de groupe ou de session.
 tree() {
