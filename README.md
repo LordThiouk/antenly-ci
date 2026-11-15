@@ -134,6 +134,12 @@ l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiou
   `opencode/glm-5.3-flash-free`, utilisé seulement si la passe principale échoue sur un 429) ;
 - `isa_path` (optionnel) : `MEMORY/WORK/<dossier>/ISA.md` dont le suivi compte les ISC ; vide =
   l'unique ISA citée par le prompt, sinon l'unique ISA modifiée par le run, sinon `?` ;
+- `hf_corpus` (optionnel, vide par défaut) : chemin, sur la branche `branch` testée, d'un fichier
+  texte listant des chemins du dataset privé `LordThiouk/antenly-corpus` (un par ligne, 400 max,
+  pas d'absolu ni de `..`). S'il est fourni, une étape **avant** opencode télécharge ces fichiers
+  dans `$RUNNER_TEMP/antenly-corpus` (arborescence conservée) et exporte
+  `ANTENLY_CORPUS_DIR` ; le jeton `HF_TOKEN` ne vit que dans cette étape et n'atteint jamais
+  opencode. Les logs publics n'affichent que le nombre de fichiers et la taille totale ;
 - `idle_minutes` (défaut `30`, de 10 à 120) : garde-fou de silence, voir plus bas.
 
 Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
