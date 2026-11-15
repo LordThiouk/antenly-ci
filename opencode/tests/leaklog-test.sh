@@ -36,6 +36,23 @@ red="$tmp/log.redacted"
 OC_ISA_KEY_FILE=/dev/null OC_LOG_MAX=1048576 "$here/redact-log.sh" "$raw" "$red" || ko "redact-log.sh en échec"
 grep -qF -- "$tok" "$red" && ko "journal masqué contient encore le jeton"
 ok "journal masqué (jeton retiré)"
+
+# --- 2b. journal > MAX : tronqué AVANT perl, milieu omis, canaris début/fin gardés ----------
+big="$tmp/big.log"; bred="$tmp/big.redacted"
+head_c="CANARY-DEBUT-$(rand_alnum 12)"; mid_c="MILIEU-A-SUPPRIMER-$(rand_alnum 12)"; tail_c="CANARY-FIN-$(rand_alnum 12)"
+{ printf '%s\n' "$head_c"; head -c 5000 /dev/zero | tr '\0' 'a'; printf '\n%s\n' "$mid_c";
+  head -c 5000 /dev/zero | tr '\0' 'b'; printf '\n%s\n' "$tail_c"; } > "$big"
+MAX=2000
+OC_ISA_KEY_FILE=/dev/null OC_LOG_MAX=$MAX "$here/redact-log.sh" "$big" "$bred" || ko "redact-log.sh (gros journal) en échec"
+[ "$(wc -c < "$bred")" -le "$MAX" ] || ko "journal masqué > MAX ($(wc -c < "$bred") > $MAX)"
+grep -qF -- "$mid_c" "$bred" && ko "milieu non omis malgré la troncature"
+grep -qF -- "$head_c" "$bred" || ko "canari de début perdu"
+grep -qF -- "$tail_c" "$bred" || ko "canari de fin perdu"
+grep -q 'journal tronqué' "$bred" || ko "bandeau de troncature absent"
+h=$(grep -n 'head -c' "$here/redact-log.sh" | head -n1 | cut -d: -f1)
+p=$(grep -n 'perl -0777' "$here/redact-log.sh" | grep -v ':#' | head -n1 | cut -d: -f1)
+[ -n "$h" ] && [ -n "$p" ] && [ "$h" -lt "$p" ] || ko "troncature non placée avant perl ($h/$p)"
+ok "journal > MAX : tronqué avant perl, milieu omis, canaris début/fin gardés"
 out="$tmp/artifact"
 f=$("$here/leaklog.sh" "$red" "$report" testjob 123456789 "$out" gitleaks \
      "https://example.invalid/run/1" "fullrun/test" "0123456789abcdef0123456789abcdef01234567") || ko "leaklog.sh en échec"

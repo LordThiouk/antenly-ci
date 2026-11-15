@@ -67,6 +67,26 @@ grep -qaF -- "$key" "$out" "$WIP_STATE/status" && ko "clé ISA dans la sortie"
 git -C "$work" reset -q --hard "$h1"
 ok "clé ISA : non poussée, jamais affichée"
 
+# --- 4b. contrôle de clé ISA bloqué : passage non poussé, réessai au suivant ----------------
+realgit=$(command -v git)
+shim2="$tmp/shim2"; mkdir -p "$shim2"
+cat > "$shim2/git" <<SHIM
+#!/usr/bin/env bash
+if [[ " \$* " == *" log "* && " \$* " == *" -p "* ]]; then sleep 5; exit 0; fi
+exec "$realgit" "\$@"
+SHIM
+chmod +x "$shim2/git"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/gl-ok"; chmod +x "$tmp/gl-ok"
+printf 'empreinte %s\n' "$key" > "$work/isa2.txt"
+git -C "$work" add isa2.txt; git -C "$work" commit -qm "wip: empreinte 2"
+r_before=$(remote_head)
+printf '%s\n' "$fake_token" | PATH="$shim2:$PATH" WIP_TOKEN_STDIN=1 WIP_ISA_KEY_FILE="$tmp/isa.key" \
+  WIP_GITLEAKS="$tmp/gl-ok" WIP_CTL_TIMEOUT=1 WIP_STATE="$tmp/state-ctl" "$here/wippush.sh" once > "$out" 2>&1
+grep -q 'contrôle de clé ISA incomplet' "$out" || ko "timeout du contrôle de clé ISA non signalé : $(cat "$out")"
+[ "$(remote_head)" = "$r_before" ] || ko "push effectué malgré un contrôle de clé ISA incomplet"
+ok "contrôle de clé ISA borné : timeout -> aucun push"
+git -C "$work" reset -q --hard "$h1"
+
 # --- 5. non fast-forward : push refusé, jamais de force --------------------------------------
 other="$tmp/other"; git clone -q "$remote" "$other"
 git -C "$other" checkout -q -B feat/test origin/feat/test

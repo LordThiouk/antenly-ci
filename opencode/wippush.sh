@@ -20,7 +20,16 @@ REMOTE="${WIP_REMOTE:-https://github.com/LordThiouk/antenly.git}"
 GL="${WIP_GITLEAKS:-gitleaks}"
 MIN="${IN_WIP_PUSH_MIN:-30}"
 TRIES="${WIP_TRIES:-2}"; TMO="${WIP_TIMEOUT:-60}"
+# Passage borné (défaut 120 s) et contrôles (gitleaks, diff de clé ISA) bornés à 180 s : un
+# blocage du passage ou d'un contrôle ne fige jamais le superviseur.
+PASS_TMO="${WIP_PASS_TIMEOUT:-120}"
+CTL_TMO="${WIP_CTL_TIMEOUT:-180}"
+RETRY="${WIP_RETRY_SEC:-15}"
 [[ "$MIN" =~ ^[0-9]{1,3}$ && "$MIN" -ge 1 && "$MIN" -le 720 ]] || MIN=30
+[[ "$PASS_TMO" =~ ^[0-9]{1,4}$ && "$PASS_TMO" -ge 1 ]] || PASS_TMO=120
+[[ "$CTL_TMO" =~ ^[0-9]{1,4}$ && "$CTL_TMO" -ge 1 ]] || CTL_TMO=180
+[[ "$RETRY" =~ ^[0-9]{1,3}$ && "$RETRY" -ge 1 && "$RETRY" -le 300 ]] || RETRY=15
+self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 INTERVAL=$(( MIN * 60 ))
 # Tests locaux seulement (comme LIVE_INTERVAL de livelog.sh) : intervalle en secondes.
 if [[ "${WIP_INTERVAL_SEC:-}" =~ ^[0-9]{1,4}$ ]] && [ "${WIP_INTERVAL_SEC}" -ge 1 ]; then
@@ -149,19 +158,26 @@ once() {
   # Secrets : gitleaks figé, config et ignores pris au SHA de départ.
   cfg=(); [ -n "${WIP_GL_CONFIG:-}" ] && [ -s "$WIP_GL_CONFIG" ] && cfg=(--config "$WIP_GL_CONFIG")
   ign=(); [ -n "${WIP_GL_IGNORE:-}" ] && [ -d "$WIP_GL_IGNORE" ] && ign=(--gitleaks-ignore-path "$WIP_GL_IGNORE")
-  timeout -k 5 180 "$GL" git "${cfg[@]}" "${ign[@]}" --log-opts="$range" --redact --no-banner \
+  timeout -k 5 "$CTL_TMO" "$GL" git "${cfg[@]}" "${ign[@]}" --log-opts="$range" --redact --no-banner \
     --report-path "$w/gitleaks.json" "$B" >/dev/null 2>&1 || rc=$?
   case "$rc" in
     0) ;;
     1) f=$(secret_file "$w/gitleaks.json"); rm -rf "$w"
        say "wip non poussé : secret probable dans $f"; return 0 ;;
+    124|137) rm -rf "$w"; say "wip non poussé : contrôle gitleaks interrompu (délai ${CTL_TMO} s)"; return 0 ;;
     *) rm -rf "$w"; say "wip non poussé : contrôle gitleaks impossible (code $rc)"; return 0 ;;
   esac
-  # Clé ISA : même contrôle que l'étape finale, jamais la valeur en sortie.
+  # Clé ISA : même contrôle que l'étape finale, jamais la valeur en sortie. Le diff est borné :
+  # un timeout ou une erreur laisse le passage non poussé (réessai au suivant).
   if [ -n "${WIP_ISA_KEY_FILE:-}" ] && [ -s "$WIP_ISA_KEY_FILE" ]; then
     keylen=$(tr -d ' \t\r\n' < "$WIP_ISA_KEY_FILE" | wc -c)
     if [ "$keylen" -ge 32 ]; then
-      git -C "$B" log -p --binary --no-ext-diff --no-textconv --format= "$range" > "$w/run.diff" 2>/dev/null || true
+      rc=0
+      timeout -k 5 "$CTL_TMO" git -C "$B" log -p --binary --no-ext-diff --no-textconv --format= "$range" \
+        > "$w/run.diff" 2>/dev/null || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        rm -rf "$w"; say "wip non poussé : contrôle de clé ISA incomplet (code $rc)"; return 0
+      fi
       if grep -qiF -- "$(tr -d ' \t\r\n' < "$WIP_ISA_KEY_FILE")" "$w/run.diff" 2>/dev/null; then
         rm -rf "$w"; say "wip non poussé : la clé ISA apparaît dans les commits"; return 0
       fi
@@ -183,18 +199,36 @@ case "${1:-}" in
     if [ "${WIP_TOKEN_STDIN:-0}" = 1 ]; then IFS= read -r TOKEN || true; exec 0</dev/null; fi
     once ;;
   daemon)
+    # Superviseur : $WIP_STATE/pid est SON pid. Chaque passage tourne dans un processus fils borné
+    # par timeout ; un blocage ou un kill mémoire du passage ne tue pas la boucle. Le jeton reste
+    # dans la mémoire du superviseur et n'est repipé sur stdin du fils que pour ce passage.
     if [ "${WIP_TOKEN_STDIN:-0}" = 1 ]; then IFS= read -r TOKEN || true; exec 0</dev/null; fi
-    stop=0; sp=""
-    trap 'stop=1; [ -n "$sp" ] && kill "$sp" 2>/dev/null' TERM INT HUP
+    stop=0; sp=""; wp=""
+    trap 'stop=1; [ -n "$sp" ] && kill "$sp" 2>/dev/null; [ -n "$wp" ] && kill -TERM "$wp" 2>/dev/null' TERM INT HUP
     printf '%s\n' "$$" > "$WIP_STATE/pid"
     say "démarré (toutes les ${INTERVAL} s) → $WIP_BRANCH"
     delay="$FIRST"
     while [ "$stop" = 0 ]; do
       sleep "$delay" & sp=$!; wait "$sp" 2>/dev/null; sp=""
       [ "$stop" = 0 ] || break
-      once
-      delay="$INTERVAL"
+      if [ -n "$TOKEN" ]; then
+        printf '%s\n' "$TOKEN" | WIP_TOKEN_STDIN=1 timeout -k 5 "$PASS_TMO" bash "$self" once &
+      else
+        WIP_TOKEN_STDIN=0 timeout -k 5 "$PASS_TMO" bash "$self" once </dev/null &
+      fi
+      wp=$!
+      printf '%s\n' "$wp" > "$WIP_STATE/worker.pid" 2>/dev/null || true
+      rc=0; wait "$wp" 2>/dev/null || rc=$?
+      wp=""
+      [ "$stop" = 0 ] || break
+      case "$rc" in
+        0) delay="$INTERVAL" ;;
+        124) say "passage interrompu (délai ${PASS_TMO} s dépassé), on réessaie au passage suivant"
+             delay="$INTERVAL" ;;
+        *) say "passage interrompu (code $rc), relance"; delay="$RETRY" ;;
+      esac
     done
+    rm -f "$WIP_STATE/worker.pid" 2>/dev/null || true
     say "arrêté" ;;
   *) echo "usage: wippush.sh once|daemon" >&2; exit 2 ;;
 esac

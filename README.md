@@ -210,13 +210,27 @@ départ) et la recherche de la clé ISA : si quelque chose est trouvé, l'instan
 d'envoi ne touche pas le run : 2 essais de 60 s au plus, puis on passe au prochain instantané (qui
 rattrape le manqué). Le journal de fin se pose ensuite par-dessus, sans conflit.
 
+**Supervision et priorité des démons.** Les deux démons (`livelog.sh daemon` pour le journal en
+direct, `wippush.sh daemon` pour le push périodique des wip) sont des superviseurs : `$STATE/pid`
+est **leur** pid, et chaque passage (instantané ou push) tourne dans un processus fils borné à
+120 s (`LIVE_PASS_TIMEOUT` / `WIP_PASS_TIMEOUT`). Un passage trop long ou tué est signalé puis
+relancé (réessai court de 15 s) sans arrêter le superviseur ; les contrôles (lecture du journal,
+masquage, gitleaks, diff de clé ISA) sont bornés à 180 s (`LIVE_CTL_TIMEOUT` / `WIP_CTL_TIMEOUT`)
+et un contrôle interrompu ne pousse rien. Les démons tournent en `nice -n 0` et leur superviseur,
+comme `Runner.Worker`, a un `oom_score_adj` négatif : si le runner sature, opencode meurt d'abord
+(scope `MemoryMax=5G` quand `systemd-run` est disponible, sinon repli direct) et les démons peuvent
+encore écrire le rapport. Le jeton reste dans la mémoire du superviseur et n'est repipé sur
+l'entrée standard du fils que pour un passage : jamais dans un fichier d'état, un argument ou
+l'environnement d'opencode. SIGTERM au superviseur arrête le passage courant et la boucle (ligne
+`arrêté`), sans redémarrage.
+
 Le pousseur (`opencode/livelog.sh daemon`) est lancé **avant** opencode, en root, avec ses outils
 copiés en root dans `/opt/fullrun-tools` (gitleaks épinglé et vérifié, scripts, destinataire age).
 Le jeton `ANTENLY_PUSH_TOKEN` lui arrive sur l'entrée standard : il n'est ni dans l'environnement
 d'opencode, ni dans un fichier, ni dans une URL, ni à l'écran ; il ne passe à `git push` que par
 l'environnement de ce process root (en-tête `http.extraheader`, comme le step push). Le journal
 brut est lu avec les droits de l'utilisateur du run (un lien posé par opencode vers un fichier root
-est refusé). Le step de contrôle arrête le démon (il finit l'instantané en cours) avant le journal
+est refusé). Le step de contrôle arrête le superviseur (il coupe le passage en cours, borné) avant le journal
 de fin ; le Summary donne le nombre d'instantanés en clair, chiffrés et en échec.
 
 **Journal chiffré quand un contrôle refuse le push.** Si gitleaks (ou un autre contrôle avant push :
@@ -244,7 +258,9 @@ notification de fin annonce alors `bloqué par gitleaks, journal chiffré en art
 l'artefact (`artefact=…`).
 
 Tests locaux (sans réseau réel, sauf téléchargement de gitleaks s'il manque) :
-`opencode/tests/leaklog-test.sh` et `opencode/tests/livelog-test.sh`.
+`opencode/tests/leaklog-test.sh`, `opencode/tests/livelog-test.sh`,
+`opencode/tests/wippush-test.sh` et `opencode/tests/watchdog-test.sh` (timeouts et relance des
+démons).
 
 **Notification de fin.** Dernier step, toujours exécuté (fin, échec, blocage, annulation) : POST au
 webhook opencode-notify, même format que `oc-run` sur la box (`job`, `status` = `fini` / `échec` /

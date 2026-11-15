@@ -1,14 +1,37 @@
 #!/usr/bin/env bash
-# Prépare le journal opencode pour le dépôt PRIVÉ antenly : retire les codes ANSI, masque les
-# motifs de jetons courants et la clé ISA, tronque à OC_LOG_MAX octets (défaut 5 Mo) en gardant
-# le début et la fin. Rien n'est écrit sur stdout.   redact-log.sh <log brut> <sortie>
+# Prépare le journal opencode pour le dépôt PRIVÉ antenly : tronque le brut à OC_LOG_MAX octets
+# (défaut 5 Mo, début et fin gardés) AVANT tout perl, puis retire les codes ANSI, masque les motifs
+# de jetons courants et la clé ISA. Le perl -0777 ne voit donc qu'un fichier déjà borné : un journal
+# énorme ne gonfle jamais la mémoire. Rien n'est écrit sur stdout.   redact-log.sh <log brut> <sortie>
 set +x
 set -uo pipefail
 in="${1:?}"; out="${2:?}"
 MAX="${OC_LOG_MAX:-5242880}"
 [[ "$MAX" =~ ^[0-9]{4,9}$ ]] || MAX=5242880
 [ -f "$in" ] || exit 3
-tmp=$(mktemp)
+
+# Coupe bornée : début + bandeau + fin, comme avant, mais sur le fichier d'entrée (jamais de slurp).
+truncate_file() { # <source> <sortie> <taille totale annoncée>
+  local src="$1" dst="$2" total="$3" head_b tail_b
+  head_b=$(( MAX / 5 )); tail_b=$(( MAX - head_b - 512 ))
+  {
+    printf '[journal tronqué par antenly-ci : %s octets au total, début (%s o) et fin (%s o) conservés]\n\n' \
+      "$total" "$head_b" "$tail_b"
+    head -c "$head_b" "$src" | sed '$d'
+    printf '\n[... %s octets omis ...]\n\n' "$(( total - head_b - tail_b ))"
+    tail -c "$tail_b" "$src" | sed '1d'
+  } > "$dst"
+}
+
+size=$(wc -c < "$in")
+bounded="$in"; cut=""
+if [ "$size" -gt "$MAX" ]; then
+  cut=$(mktemp) || exit 3
+  truncate_file "$in" "$cut" "$size" || { rm -f "$cut"; exit 4; }
+  bounded="$cut"
+fi
+
+tmp=$(mktemp) || { [ -n "$cut" ] && rm -f "$cut"; exit 3; }
 # La clé ISA est lue par perl depuis le fichier (jamais en argument ni en variable d'env).
 OC_ISA_KEY_FILE="${OC_ISA_KEY_FILE:-$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key}" perl -0777 -pe '
   BEGIN {
@@ -33,20 +56,17 @@ OC_ISA_KEY_FILE="${OC_ISA_KEY_FILE:-$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp
   s/(\bbearer\s+)[A-Za-z0-9._~+\/=-]{20,}/$1\[REDACTED\]/gi;
   s/(https?:\/\/[^\s:\/@]+:)[^\s@\/]+@/$1\[REDACTED\]@/g;
   s/(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])/[REDACTED:hex64]/g;
-' "$in" > "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 4; }
+' "$bounded" > "$tmp" 2>/dev/null || { rm -f "$tmp" "$cut"; exit 4; }
+[ -n "$cut" ] && rm -f "$cut"
+
+# Filet : le masquage peut rallonger (remplacements plus longs) ; on ne garde jamais plus de MAX.
 size=$(wc -c < "$tmp")
-mkdir -p "$(dirname "$out")"
-if [ "$size" -le "$MAX" ]; then
-  mv "$tmp" "$out"
-else
-  head_b=$(( MAX / 5 )); tail_b=$(( MAX - head_b - 512 ))
-  {
-    printf '[journal tronqué par antenly-ci : %s octets au total, début (%s o) et fin (%s o) conservés]\n\n' \
-      "$size" "$head_b" "$tail_b"
-    head -c "$head_b" "$tmp" | sed '$d'
-    printf '\n[... %s octets omis ...]\n\n' "$(( size - head_b - tail_b ))"
-    tail -c "$tail_b" "$tmp" | sed '1d'
-  } > "$out"
-  rm -f "$tmp"
+if [ "$size" -gt "$MAX" ]; then
+  cut2=$(mktemp) || { rm -f "$tmp"; exit 3; }
+  truncate_file "$tmp" "$cut2" "$size" || { rm -f "$tmp" "$cut2"; exit 4; }
+  mv -f "$cut2" "$tmp"
 fi
+
+mkdir -p "$(dirname "$out")"
+mv -f "$tmp" "$out"
 chmod 0644 "$out"
