@@ -504,7 +504,7 @@ jobs:
             LIVE_STATE="$L" LIVE_LOG="$OC_LOG" LIVE_JOB="$IN_JOB" LIVE_RUN="$RUN_ID" \
             LIVE_GITLEAKS="$T/gitleaks" LIVE_GL_CONFIG="$gcfg" LIVE_ISA_KEY_FILE="$L/isa.key" \
             LIVE_READ_UID="$(id -u)" LIVE_READ_GID="$(id -g)" LIVE_TOKEN_STDIN=1 \
-            setsid nice -n 10 "$T/livelog.sh" daemon > "$RUNNER_TEMP/live.out" 2>&1 &
+            setsid -f nice -n 0 "$T/livelog.sh" daemon > "$RUNNER_TEMP/live.out" 2>&1 &
           ok=0
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             pid=$(sudo -n cat "$L/pid" 2>/dev/null || true)
@@ -512,6 +512,8 @@ jobs:
             sleep 1
           done
           [ "$ok" = 1 ] || { echo "::warning::démon du journal en direct non démarré : le run continue sans"; exit 0; }
+          # Le superviseur survit à une saturation mémoire : opencode et le runner passent avant lui.
+          echo -500 | sudo -n tee "/proc/$pid/oom_score_adj" >/dev/null 2>&1 || true
           echo "branch=$LOGB" >> "$GITHUB_OUTPUT"
           echo "- Journal en direct : branche \`$LOGB\` d'antenly, instantané toutes les 10 min (chiffré si secret probable)" >> "$GITHUB_STEP_SUMMARY"
           echo "Journal en direct démarré → antenly@$LOGB"
@@ -545,7 +547,7 @@ jobs:
             WIP_BASE_SHA="$BASE_SHA" WIP_GITLEAKS="$T/gitleaks" WIP_GL_CONFIG="$gcfg" \
             WIP_GL_IGNORE="$T/gitleaks-ignore" WIP_ISA_KEY_FILE=/opt/fullrun-live/isa.key WIP_TOKEN_STDIN=1 \
             IN_WIP_PUSH_MIN="$IN_WIP_PUSH_MIN" \
-            setsid nice -n 10 "$T/wippush.sh" daemon > "$RUNNER_TEMP/wip.out" 2>&1 &
+            setsid -f nice -n 0 "$T/wippush.sh" daemon > "$RUNNER_TEMP/wip.out" 2>&1 &
           ok=0
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             pid=$(sudo -n cat "$L/pid" 2>/dev/null || true)
@@ -553,8 +555,26 @@ jobs:
             sleep 1
           done
           [ "$ok" = 1 ] || { echo "::warning::démon de push périodique non démarré : le run continue sans"; exit 0; }
+          echo -500 | sudo -n tee "/proc/$pid/oom_score_adj" >/dev/null 2>&1 || true
           echo "- Push des wip : branche \`$IN_BRANCH\` toutes les ${IN_WIP_PUSH_MIN} min (gitleaks + clé ISA avant chaque envoi)" >> "$GITHUB_STEP_SUMMARY"
           echo "Push périodique des wip démarré (toutes les ${IN_WIP_PUSH_MIN} min)"
+
+      # Priorité mémoire (best-effort, jamais fatal) : si le runner sature, opencode meurt le
+      # premier ; Runner.Worker et les superviseurs des démons restent pour écrire le rapport.
+      - name: Protection mémoire (OOM, best-effort)
+        continue-on-error: true
+        run: |
+          set +x
+          for p in $(pgrep -f '[R]unner.Worker' 2>/dev/null || true); do
+            echo -500 | sudo -n tee "/proc/$p/oom_score_adj" >/dev/null 2>&1 || true
+          done
+          for f in /opt/fullrun-live/pid /opt/fullrun-wip/pid; do
+            p=$(sudo -n cat "$f" 2>/dev/null || true)
+            if [[ "$p" =~ ^[0-9]{1,9}$ ]]; then
+              echo -500 | sudo -n tee "/proc/$p/oom_score_adj" >/dev/null 2>&1 || true
+            fi
+          done
+          echo "Priorité mémoire appliquée (best-effort)"
 
       - name: opencode run (sortie jamais affichée, suivi filtré toutes les 10 min)
         id: oc
@@ -589,9 +609,23 @@ jobs:
           export OC_DEADLINE_EPOCH
           /opt/fullrun-tools/progress.sh start || true
           /opt/fullrun-tools/progress.sh loop & mon=$!
+          # Plafond mémoire global d'opencode (best-effort) : sonde locale/CI avant usage. Le scope
+          # garde l'environnement du step (sinon repli direct) ; opencode meurt avant les démons.
+          scope=()
+          uid=$(id -u); gid=$(id -g)
+          # shellcheck disable=SC2016 # $OC_LOG est évalué par le shell interne de la sonde
+          probe=$(timeout 20 sudo -n -E systemd-run --scope --quiet -p MemoryMax=5G \
+            -- /usr/bin/setpriv --reuid="$uid" --regid="$gid" --init-groups -- \
+            /bin/sh -c 'echo "$(id -u):${OC_LOG:+set}"' 2>/dev/null || true)
+          if [ "$probe" = "$uid:set" ]; then
+            scope=(sudo -n -E systemd-run --scope --quiet -p MemoryMax=5G --
+                   /usr/bin/setpriv --reuid="$uid" --regid="$gid" --init-groups --)
+          else
+            echo "::warning::systemd-run --scope indisponible ou environnement non conservé : pas de plafond mémoire pour opencode"
+          fi
           # opencode tourne dans sa propre session : une annulation (SIGINT/SIGTERM au step) est
           # relayée au moniteur, qui l'arrête proprement avant les steps de rapport et de push.
-          "$CI_DIR/opencode/run-fullrun.sh" & runner=$!
+          "${scope[@]}" "$CI_DIR/opencode/run-fullrun.sh" & runner=$!
           trap 'kill -TERM "$runner" 2>/dev/null || true' INT TERM
           rc=0; wait "$runner" || rc=$?
           if kill -0 "$runner" 2>/dev/null; then rc=0; wait "$runner" || rc=$?; fi

@@ -30,6 +30,15 @@ c1=$(git -C "$remote" rev-parse "refs/heads/$BR") || ko "branche $BR absente du 
 git -C "$remote" show "$c1:.fullrun/logs/testjob-42.log" | grep -q 'LifeOS | Algorithm | Build' || ko "contenu absent"
 ok "instantané en clair poussé sur $BR"
 
+# --- 1b. contrôle gitleaks bloqué : instantané non envoyé, réessai au suivant ---------------
+printf '#!/bin/sh\nsleep 5\n' > "$tmp/gl-sleep"; chmod +x "$tmp/gl-sleep"
+LIVE_STATE="$tmp/state5" LIVE_RUN=45 LIVE_GITLEAKS="$tmp/gl-sleep" LIVE_CTL_TIMEOUT=1 \
+  "$here/livelog.sh" snapshot > "$out" 2>&1 || ko "snapshot (gitleaks bloqué) en échec"
+grep -q 'contrôle gitleaks interrompu' "$out" || ko "timeout gitleaks non signalé : $(cat "$out")"
+git -C "$remote" rev-parse -q --verify refs/heads/fullrun-logs/testjob-45 >/dev/null \
+  && ko "branche créée malgré un contrôle gitleaks interrompu"
+ok "contrôle gitleaks borné : timeout -> instantané non envoyé"
+
 # --- 2. secret que le masquage ne connaît pas (glpat-) : l'instantané part chiffré -----------
 sec=$(fake_glpat)
 printf 'export GITLAB_TOKEN=%s\nsuite du travail\n' "$sec" >> "$LIVE_LOG"
