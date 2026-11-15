@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# bench-capped — exécute une commande dans un sous-scope mémoire borné (8 Go par défaut).
+# Si la commande dépasse le plafond, elle est tuée (OOM cgroup) mais le processus appelant
+# (opencode / run-fullrun) survit.
+#
+# Usage : bench-capped [--limit BYTES] <commande> [args...]
+#
+# Variable d'environnement : BENCH_CAPPED_LIMIT (octets, défaut 8589934592 = 8 Go).
+# L'option --limit surcharge la variable.
+#
+# En cas d'OOM : écriture de « [oom] <commande> <peak> » dans $OC_LOG (si défini) et
+# dans stderr ; code de sortie non nul (137 typique, 1 si le pic n'est pas lisible).
+set -uo pipefail
+
+limit="${BENCH_CAPPED_LIMIT:-8589934592}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --limit) shift; limit="$1"; shift ;;
+    --) shift; break ;;
+    -*) echo "bench-capped: option inconnue $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || { echo "Usage: bench-capped [--limit BYTES] <commande> [args...]" >&2; exit 2; }
+
+cmd_name="$1"
+rc=0
+peak=""
+method=""
+
+# --- Tier 1 : systemd-run --scope (cgroup v2 natif) ---
+if [ -z "$method" ]; then
+  _p=$(timeout 5 systemd-run --scope --quiet -p "MemoryMax=$limit" -p MemorySwapMax=0 \
+    -- /bin/sh -c 'echo ok' 2>/dev/null || true)
+  [ "$_p" = "ok" ] && method="systemd"
+fi
+
+# --- Tier 2 : cgroup v2 direct ---
+if [ -z "$method" ] && [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+  _cg="/sys/fs/cgroup/bench-capped-$$"
+  if sudo -n mkdir -p "$_cg" 2>/dev/null && \
+     echo "$limit" | sudo -n tee "$_cg/memory.max" >/dev/null 2>&1 && \
+     echo 0 | sudo -n tee "$_cg/memory.swap.max" >/dev/null 2>&1; then
+    method="cgroup2"
+  else
+    sudo -n rmdir "$_cg" 2>/dev/null || true
+  fi
+fi
+
+# --- Tier 3 : prlimit --as ---
+if [ -z "$method" ] && command -v prlimit >/dev/null 2>&1; then
+  method="prlimit"
+fi
+
+[ -n "$method" ] || { echo "bench-capped: aucun mécanisme de cap disponible" >&2; exit 2; }
+
+# --- Exécution ---
+case "$method" in
+  systemd)
+    systemd-run --scope --quiet -p "MemoryMax=$limit" -p MemorySwapMax=0 -- "$@"
+    rc=$?
+    ;;
+  cgroup2)
+    "$@" &
+    child=$!
+    echo "$child" | sudo -n tee "$_cg/cgroup.procs" >/dev/null 2>&1 || true
+    wait "$child" 2>/dev/null
+    rc=$?
+    peak=$(cat "$_cg/memory.peak" 2>/dev/null || echo "?")
+    # Nettoyage
+    while read -r p 2>/dev/null; do
+      echo "$p" | sudo -n tee "$(dirname "$_cg")/cgroup.procs" >/dev/null 2>&1 || true
+    done < "$_cg/cgroup.procs" 2>/dev/null
+    sudo -n rmdir "$_cg" 2>/dev/null || true
+    ;;
+  prlimit)
+    prlimit "--as=$limit" -- "$@"
+    rc=$?
+    ;;
+esac
+
+# --- Détection OOM ---
+# Codes typiques : 137 (SIGKILL via cgroup OOM killer), 9 (SIGKILL direct).
+if [ "$rc" -ne 0 ]; then
+  # Heuristique : un SIGKILL (137 = 128+9) est très probablement un OOM cgroup.
+  # Pour prlimit, c'est un SIGSEGV (139 = 128+11) ou SIGABRT.
+  is_oom=0
+  case "$rc" in
+    137|139) is_oom=1 ;;
+  esac
+
+  if [ "$is_oom" -eq 1 ]; then
+    oom_line="[oom] $cmd_name peak=${peak:-?}"
+    echo "$oom_line" >&2
+    [ -n "${OC_LOG:-}" ] && echo "$oom_line" >> "$OC_LOG" 2>/dev/null || true
+  fi
+fi
+
+exit "$rc"

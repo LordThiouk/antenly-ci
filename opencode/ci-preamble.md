@@ -22,5 +22,23 @@ Tu tournes sur un runner GitHub Actions public, pas sur la box.
 - Modèles : principal et Forge `$OC_MODEL_MAIN`, Max `$OC_MODEL_MAX` (gratuits opencode).
 - Pas de VPS, pas de FreeLLM, pas d'ACRCloud, pas de Mac. Pas de merge, pas de déploiement.
 
+## Enveloppe mémoire et bench-capped
+
+Tout le processus opencode tourne dans une enveloppe mémoire de 10 Go (systemd-run / cgroup v2 /
+prlimit selon le runner). **Tout calcul lourd ou benchmark** (compilation, inférence, traitement
+de corpus volumineux) doit passer par `bench-capped` :
+
+```bash
+bench-capped python3 mon_script.py       # cap 8 Go par défaut
+bench-capped --limit 4294967296 cargo bench  # cap personnalisé (4 Go)
+```
+
+Si la commande dépasse le cap, elle est tuée par le noyau (OOM cgroup) mais opencode survit.
+La ligne `[oom] <commande> <peak>` est écrite dans le journal. Un exit non nul signale l'échec.
+
+**Règle commits wip :** faire un `wip:` commit **avant** et **après** chaque bench ou calcul lourd.
+Cela garantit que le travail est sauvegardé même en cas d'OOM, et que le pipeline de push
+périodique peut transmettre l'état.
+
 ---
 
