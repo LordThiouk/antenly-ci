@@ -90,14 +90,22 @@ fi
 # OC_IDLE_SEC : uniquement pour les tests locaux (délai court) ; en CI, OC_IDLE_MIN fait foi.
 IDLE_SEC=$(( OC_IDLE_MIN * 60 ))
 [[ "${OC_IDLE_SEC:-}" =~ ^[0-9]{1,5}$ ]] && IDLE_SEC="$OC_IDLE_SEC"
-# OC_SUBAGENT_IDLE_SEC : seuil propre quand un sous-agent (`task`) est en cours (défaut 480 s).
-# Le flux d'opencode ne donne aucun marqueur de dispatch fiable (mesuré dans les journaux du
-# 2026-11-12) : on applique donc TOUJOURS le plus court des deux seuils (documenté dans PLAN A,
-# étape 1). Le motif de la dernière ligne utile ne sert plus qu'à étiqueter la cause.
-SUBAGENT_IDLE_SEC="${OC_SUBAGENT_IDLE_SEC:-480}"
-[[ "$SUBAGENT_IDLE_SEC" =~ ^[0-9]{1,5}$ && "$SUBAGENT_IDLE_SEC" -ge 1 ]] || SUBAGENT_IDLE_SEC=480
+# Activité d'un sous-agent ou d'un outil lancé par l'agent : elle compte comme celle du parent
+# (voir active() : fichiers de session qui bougent ; CPU des processus ENFANTS de l'agent). La
+# coupure n'a donc lieu qu'après OC_IDLE_MIN minutes sans AUCUNE activité du parent ni des enfants :
+# un vrai blocage reste coupé, simplement plus tard (avant : min(OC_IDLE_MIN, 8 min) quoi qu'il
+# arrive, ce qui tuait un sous-agent ou un banc encore au travail). OC_SUBAGENT_IDLE_SEC reste un
+# plafond OPTIONNEL : posé explicitement, il raccourcit le seuil, mais l'activité continue de
+# remettre le compteur à zéro.
 EFFECTIVE_IDLE="$IDLE_SEC"
-[ "$SUBAGENT_IDLE_SEC" -lt "$EFFECTIVE_IDLE" ] && EFFECTIVE_IDLE="$SUBAGENT_IDLE_SEC"
+SUBAGENT_IDLE_SEC="${OC_SUBAGENT_IDLE_SEC:-}"
+if [[ "$SUBAGENT_IDLE_SEC" =~ ^[0-9]{1,5}$ && "$SUBAGENT_IDLE_SEC" -ge 1 && "$SUBAGENT_IDLE_SEC" -lt "$EFFECTIVE_IDLE" ]]; then
+  EFFECTIVE_IDLE="$SUBAGENT_IDLE_SEC"
+fi
+# Seuil de CPU (ticks, 1/100 s) gagné par les processus enfants entre deux sondes pour compter
+# comme « actifs » ; un enfant bloqué (sleep, attente réseau) n'en gagne pas.
+CHILD_CPU_MIN="${OC_CHILD_CPU_MIN:-10}"
+[[ "$CHILD_CPU_MIN" =~ ^[0-9]{1,6}$ ]] || CHILD_CPU_MIN=10
 cd "$ANTENLY_DIR" || exit 90
 # opencode ne reçoit pas les fichiers de commandes du runner : il ne peut ni poser de variables
 # ou de PATH pour les steps suivants, ni écrire dans le Summary public, ni de sorties de step.
@@ -180,10 +188,36 @@ cpu_tree() {
   for p in "$1" $(tree "$1"); do total=$(( total + $(cpu_of "$p") )); done
   echo "$total"
 }
-# Activité réelle : journal qui grossit, ou fichier de session modifié depuis le dernier passage.
-# Toute activité rafraîchit $OC_ACT.
+# PID du processus opencode réel : celui dont la ligne de commande contient le binaire et qui n'a
+# aucun descendant dans ce cas (les enveloppes setsid / systemd-run / prlimit n'en sont pas).
+agent_pid() {
+  local root="$1" base p q cmd found
+  base=$(basename "$OC_BIN")
+  for p in "$root" $(tree "$root"); do
+    cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null) || continue
+    case "$cmd" in *"$base"*" run"*) ;; *) continue ;; esac
+    found=0
+    for q in $(tree "$p"); do
+      cmd=$(tr '\0' ' ' <"/proc/$q/cmdline" 2>/dev/null) || continue
+      case "$cmd" in *"$base"*" run"*) found=1; break ;; esac
+    done
+    [ "$found" -eq 0 ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+# CPU cumulé des seuls ENFANTS de l'agent (outils, bancs, scripts) ; le CPU d'opencode lui-même ne
+# compte pas (sa boucle d'événements en garde un peu même figé).
+child_cpu() {
+  local a p total=0
+  a=$(agent_pid "$1") || { echo 0; return; }
+  for p in $(tree "$a"); do total=$(( total + $(cpu_of "$p") )); done
+  echo "$total"
+}
+# Activité réelle : journal qui grossit, fichier de session modifié depuis le dernier passage
+# (sous-agents compris), ou processus enfants de l'agent qui consomment du CPU. Toute activité
+# rafraîchit $OC_ACT.
 active() {
-  local pid="$1" cur cur_cpu
+  local pid="$1" cur cur_cpu cc
   cur=$(size); cur_cpu=$(cpu_tree "$pid")
   # Le CPU ne compte que si OC_IDLE_CPU=1 : un opencode figé (sous-agent qui ne revient pas)
   # garde un petit CPU de boucle d'événements, ce qui masquait le blocage (F5/FR-14, 2026-11-12).
@@ -194,6 +228,13 @@ active() {
     touch "$OC_ACT" 2>/dev/null
     return 0
   fi
+  cc=$(child_cpu "$pid")
+  if [ "$cc" -ge $(( ${LAST_CHILD_CPU:-0} + CHILD_CPU_MIN )) ]; then
+    LAST_CHILD_CPU="$cc"
+    touch "$OC_ACT" 2>/dev/null
+    return 0
+  fi
+  LAST_CHILD_CPU="$cc"
   return 1
 }
 
@@ -345,7 +386,7 @@ done_check() {
   OC_HOOKS_LOG="${OC_HOOKS_LOG:-$HOME/.local/state/opencode-lifeos/hooks.log}" \
   OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$ANTENLY_DIR" \
   OC_ISA="${OC_ISA:-${OC_ISA_PATH:-}}" OC_DONE_VERIFY="${OC_DONE_VERIFY:-}" \
-  OC_MAX_SUBAGENT="${OC_MAX_SUBAGENT:-Max}" \
+  OC_MAX_SUBAGENT="${OC_MAX_SUBAGENT:-Max}" OC_DONE_AGENTS="${OC_DONE_AGENTS:-}" \
     bash "$DONE_CHECK_BIN" 2>/dev/null | grep -qx 'done_check=ok'
 }
 maybe_finish() {
@@ -362,7 +403,7 @@ maybe_finish() {
 # Si WATCH_PROBE_SEC > 0, la passe est aussi coupée au bout de ce délai tant qu'aucun token utile
 # n'est apparu (reason=probe) : c'est la sonde qui décide si `--continue` vaut la peine.
 run_watched() {
-  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU probe_end=0 last_done=0
+  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU LAST_CHILD_CPU=0 probe_end=0 last_done=0
   WATCH_RC=0; WATCH_REASON=""
   if [[ "${WATCH_PROBE_SEC:-0}" =~ ^[0-9]{1,4}$ ]] && [ "$WATCH_PROBE_SEC" -ge 1 ]; then
     probe_end=$(( $(date +%s) + WATCH_PROBE_SEC ))
@@ -480,6 +521,18 @@ on_cancel() {
 }
 trap on_cancel INT TERM HUP
 
+# Bloc injecté dans le prompt de reprise : lu à chaque reprise (le fichier évolue pendant le run).
+# Copie figée (root) prioritaire, repli local en test. Jamais bloquant : sans checkpoint, texte neutre.
+resume_context() {
+  local bin="${OC_CHECKPOINT_BIN:-}"
+  if [ -z "$bin" ]; then
+    if [ -f /opt/fullrun-tools/checkpoint.sh ]; then bin=/opt/fullrun-tools/checkpoint.sh
+    else bin="$(cd "$(dirname "$0")" && pwd)/checkpoint.sh"; fi
+  fi
+  [ -f "$bin" ] && bash "$bin" resume-text --job "${OC_JOB:-fullrun}" --repo "$ANTENLY_DIR" 2>/dev/null \
+    | head -c 6000 || true
+}
+
 WATCH_RC=0
 WATCH_REASON=""
 ATTEMPT_START=0
@@ -511,6 +564,15 @@ while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remai
   rewrite_agent_models "$m"
   probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé n'a rien rendu pendant $(( EFFECTIVE_IDLE / 60 )) min et a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
   new_msg="Reprise FullRun après blocage — ceci est une NOUVELLE session, ne t'appuie pas sur la session précédente. Relis le contexte CI, ${OC_REPORT:-le rapport} s'il existe, l'état ISA / FullRun et l'étape courante, puis reprends le FullRun dans l'ordre, sans sauter de porte : un verdict manquant n'est jamais un pass."
+  # Point de reprise : étape suivante et verdicts déjà obtenus (voir checkpoint.sh). Une reprise
+  # repart de là ; elle ne refait ni les étapes validées ni les verdicts encore valables.
+  ctx=$(resume_context)
+  probe_msg="$probe_msg
+
+$ctx"
+  new_msg="$new_msg
+
+$ctx"
   if [ "$PROBE_SEC" -ge 1 ]; then
     OC_MODEL_MAIN="$m" run_pass "$PROBE_SEC" "$OC_BIN" run --continue --model "$m" "$probe_msg"
     rc=$A_RC; useful=$A_USEFUL
