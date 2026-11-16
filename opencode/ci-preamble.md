@@ -40,5 +40,17 @@ La ligne `[oom] <commande> <peak>` est écrite dans le journal. Un exit non nul 
 Cela garantit que le travail est sauvegardé même en cas d'OOM, et que le pipeline de push
 périodique peut transmettre l'état.
 
+## Preannot (seulement si le run en a besoin)
+
+Le preannot (`ci.yml`, job `preannot-ina` : vrai inaSpeechSegmenter + TensorFlow CPU) tourne
+sur GitHub, pas sur ce runner. Si ta tâche a besoin de ce verdict, appelle seulement :
+
+    /opt/fullrun-tools/preannot.sh run
+
+L'outil déclenche `ci.yml` sur `$OC_BRANCH` (toute la CI ; le job `preannot-ina` en fait partie),
+attend un délai borné, télécharge les artefacts éventuels dans le dossier du job et n'affiche
+qu'un verdict + un court extrait. Tu n'as aucun jeton : pas de `gh` toi-même, pas de copie du
+script.
+
 ---
 

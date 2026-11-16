@@ -144,6 +144,21 @@ l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiou
 
 Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
 
+**Preannot (outil figé).** Le preannot n'est pas un workflow à part : c'est le job
+`preannot-ina` de `ci.yml` ci-dessus (vrai inaSpeechSegmenter + TensorFlow CPU). Quand un
+FullRun a besoin de ce verdict, l'agent appelle seulement :
+
+```bash
+/opt/fullrun-tools/preannot.sh run
+```
+
+La copie figée root déclenche `ci.yml` sur la branche de travail (toute la CI, le job
+`preannot-ina` en fait partie), attend un délai borné, télécharge les artefacts éventuels
+dans le dossier du job et n'affiche qu'un verdict + un court extrait en échec. Le jeton est
+le `GITHUB_TOKEN` de ce dépôt (permission `actions: write`, ajoutée au workflow ; aucun
+secret supplémentaire), conservé en root `0600`, jamais dans l'environnement d'opencode.
+Si le déclenchement est refusé, c'est que `actions: write` a été retiré des `permissions`.
+
 **Suivre un run en direct.** Onglet Actions → le run → job `fullrun` → step
 `opencode run (…)`. Une ligne `[suivi]` s'affiche au départ, puis toutes les 10 min, puis à la fin :
 
