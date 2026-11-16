@@ -220,7 +220,7 @@ download_artifacts() {
 }
 
 run_preannot() {
-  local since run_id deadline status conclusion url view s_status s_conclusion s_url rc
+  local since run_id deadline status conclusion url view s_status s_conclusion s_url
   load_config
   # Même garde que les autres outils figés : seulement depuis le FullRun (ou un test
   # avec un `gh` simulé).

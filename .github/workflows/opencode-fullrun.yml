@@ -527,8 +527,6 @@ jobs:
               printf 'PREANNOT_LOG_TAIL=80\n'
               printf 'PREANNOT_LOG_WIDTH=300\n'
               printf 'PREANNOT_ART_DIR=%s\n' "${OC_WORK:-/tmp}/preannot"
-              printf 'PREANNOT_RUN_UID=%s\n' "$(id -u)"
-              printf 'PREANNOT_RUN_GID=%s\n' "$(id -g)"
             } | sudo tee "$T/preannot.state" >/dev/null
             sudo chown root:root "$T/preannot.state"
             sudo chmod 0644 "$T/preannot.state"
