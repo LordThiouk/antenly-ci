@@ -708,6 +708,7 @@ jobs:
             124) stop=plafond; why="plafond atteint" ;;
             125) stop=silence; why="bloqué (silence ${OC_IDLE_MIN} min)" ;;
             126) stop=vide; why="réponse vide (aucun token après reprises)" ;;
+            127) stop=tour; why="fin de tour sans PASS (à reprendre)" ;;
             130) stop=annulation; why="annulé" ;;
             *) stop=erreur; why="erreur opencode (code $rc)" ;;
           esac
@@ -865,6 +866,7 @@ jobs:
             echo "- push des wip : ${wpush} pendant le run${wip_tip:+ (dernier SHA ${wip_tip:0:7})}"
             case "${OC_STOP:-}" in
               ok) echo "- arrêt : terminé" ;;
+              tour) echo "- arrêt : fin de tour sans PASS (reprise à faire, aucune réponse humaine attendue)" ;;
               silence) echo "- arrêt : bloqué (silence $((10#$OC_IDLE_MIN)) min), opencode arrêté par le garde-fou" ;;
               plafond) echo "- arrêt : plafond atteint, opencode arrêté avant la limite du job" ;;
               vide) echo "- arrêt : réponse vide (aucun token après reprises)" ;;
@@ -1180,8 +1182,15 @@ jobs:
           DONE_REASON: ${{ steps.check.outputs.done_reason }}
         run: |
           set +x
+          # « terminé » exige le PASS de Max vérifié : un rc 0 ne prouve que la fin du tour.
+          if [ "${DONE:-}" = ok ]; then
+            ok_why="terminé"
+          else
+            ok_why="fin de tour sans PASS (${DONE_REASON:-a:none})"
+          fi
           case "${OC_STOP:-}" in
-            ok) why="terminé" ;;
+            ok) why="$ok_why" ;;
+            tour) why="fin de tour sans PASS (${DONE_REASON:-a:none})" ;;
             silence) why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
             plafond) why="plafond atteint" ;;
             vide) why="réponse vide (aucun token après reprises)" ;;
@@ -1253,6 +1262,7 @@ jobs:
             silence) status="bloqué"; why="bloqué (silence $((10#$OC_IDLE_MIN)) min)" ;;
             plafond) status="échec"; why="plafond atteint" ;;
             vide) status="échec"; why="réponse vide (aucun token après reprises)" ;;
+            tour) status="échec"; why="fin de tour sans PASS (à reprendre)" ;;
             annulation) status="annulé"; why="annulé" ;;
             erreur) status="échec"; why="erreur opencode" ;;
             ok) status="fini"; why="terminé" ;;

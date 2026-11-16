@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 # Reprise après stall : sonde --continue courte, sinon session neuve ; repli modèle ; erreurs typées.
+# Depuis la règle « fin de tour ≠ terminé », un rc=0 sans PASS vérifié n'est plus un succès : le
+# faux opencode marque donc $T/done sur ses chemins de succès, et un faux done_check.sh factice
+# ($T/done_check) ne rend `done_check=ok` que si ce marqueur existe. Les cas qui attendent rc=0
+# décrivent ainsi un VRAI succès (Max PASS confirmé), pas un simple retour du modèle.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+
+# Faux validateur de fin : PASS uniquement si la passe a marqué une fin réussie.
+cat >"$T/done_check" <<S
+#!/usr/bin/env bash
+[ -f "$T/done" ] && echo done_check=ok || echo done_check=ko raison=a:none
+S
+chmod +x "$T/done_check"
 
 # Faux opencode piloté par $T/mode. Écrit ses arguments dans $T/calls (jamais dans le journal).
 mk() { # $1 = comportement
@@ -17,26 +28,29 @@ printf 'envprofile %s: %s\n' "\$n" "\${LIFEOS_HOOK_PROFILE:-}" >>"\$T_DIR/calls"
 mode=\$(cat "\$T_DIR/mode")
 cont=0; for a in "\$@"; do [ "\$a" = "--continue" ] && cont=1; done
 banner() { printf '> Nix/LifeOS · deepseek-v4.1-flash-free\n'; }
+ok_fin() { echo fini; : >"\$T_DIR/done"; exit 0; }
 hang() { end=\$((SECONDS+30)); while [ \$SECONDS -lt \$end ]; do :; done; }
 case "\$mode" in
   hang-then-ok)
-    [ \$n -ge 2 ] && { echo fini; exit 0; }; hang ;;
+    [ \$n -ge 2 ] && ok_fin; hang ;;
   hang-always)
     hang ;;
   continue-empty)
     [ \$n -eq 1 ] && hang
     if [ \$cont = 1 ]; then banner; exit 0; fi
-    echo fini; exit 0 ;;
+    ok_fin ;;
+  ok-after-done)
+    ok_fin ;;
   provider)
     [ \$n -eq 1 ] && { echo "erreur fournisseur"; exit 1; }
-    echo fini; exit 0 ;;
+    ok_fin ;;
   ratelimit)
     [ \$n -eq 1 ] && { echo "429 Too Many Requests"; exit 1; }
-    echo fini; exit 0 ;;
+    ok_fin ;;
   empty-always)
     banner; exit 0 ;;
   big-ok)
-    banner; head -c 1500000 /dev/zero | tr '\\0' 'x' | fold -w 200; echo; echo fini; exit 0 ;;
+    banner; head -c 1500000 /dev/zero | tr '\\0' 'x' | fold -w 200; echo; ok_fin ;;
   hang-subagent)
     printf 'dispatch subagent Max (task)\\n'; hang ;;
   chain-rotate)
@@ -44,14 +58,14 @@ case "\$mode" in
       1) hang ;;
       2) banner; exit 0 ;;
       3) echo "encore bloque"; exit 1 ;;
-      *) echo fini; exit 0 ;;
+      *) ok_fin ;;
     esac ;;
   *)
     echo "mode inconnu" >&2; exit 2 ;;
 esac
 S
   chmod +x "$T/oc"
-  rm -f "$T/n" "$T/log" "$T/log.status" "$T/log.act" "$T/calls" "$T/log.internal" "$T/log.internal.stamp"
+  rm -f "$T/n" "$T/done" "$T/log" "$T/log.status" "$T/log.act" "$T/calls" "$T/log.internal" "$T/log.internal.stamp"
   mkdir -p "$T/a" "$T/store" "$T/agents" "$T/internals"; echo p >"$T/p"; echo "$1" >"$T/mode"
 }
 
@@ -59,7 +73,7 @@ run() { # $1 = reprises max, $2 = sonde --continue en secondes
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
-  OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
+  OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 calls() { cat "$T/calls" 2>/dev/null || true; }
 
@@ -68,7 +82,7 @@ run_chain() { # $1 = chaîne, $2 = reprises (vide = défaut), $3 = sonde
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
   OC_MODEL_CHAIN="$1" OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 \
   OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC="${3:-0}" OC_STORE_DIR="$T/store" \
-  OC_BIN="$T/oc" OC_STALL_RESUMES="${2:-}" OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
+  OC_BIN="$T/oc" OC_STALL_RESUMES="${2:-}" OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
 
@@ -78,7 +92,7 @@ run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
-  OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
+  OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
 # 1. silence puis reprise réussie (la sonde --continue parle) — cas déjà couvert.
@@ -226,6 +240,18 @@ if [ "$rc" -eq 0 ] \
   echo "ok 13 LIFEOS_FULLRUN=1 transmis par le wrapper, absent hors wrapper"
 else
   echo "FAIL 13 rc=$rc"; calls; fail=1
+fi
+
+# 14. ok-after-done : PASS de Max confirmé dès la première passe -> rc 0, arret=max_pass,
+#     done_check=ok, un seul appel (pas de reprise inutile).
+mk ok-after-done; run 2 0; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(cat "$T/n")" -eq 1 ] \
+   && grep -qx 'done_check=ok' "$T/log.status" \
+   && grep -qx 'arret=max_pass' "$T/log.status" \
+   && ! grep -q 'stall_resume' "$T/log.status"; then
+  echo "ok 14 ok-after-done -> done_check=ok, arret=max_pass, rc 0, un seul appel"
+else
+  echo "FAIL 14 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
 fi
 
 exit $fail

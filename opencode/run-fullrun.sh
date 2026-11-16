@@ -19,14 +19,19 @@
 #  - fin anticipée : done_check.sh (copie figée /opt/fullrun-tools) vérifie Max PASS réel,
 #    hooks.log, vérificateurs OC_DONE_VERIFY, arbre propre et REPORT.md ; si ok et session inactive
 #    depuis OC_DONE_IDLE_SEC (180 s) : `arret=max_pass`, exit 0, aucune reprise ;
+#  - fin de tour : un `rc=0` d'opencode signifie « le tour est fini », PAS « le run est terminé ».
+#    Sans PASS de Max vérifié par done_check.sh, la passe est une reprise (`arret=tour-fini`) :
+#    une session neuve relit l'ISA et continue au lieu d'attendre une réponse humaine ;
+#  - reprises épuisées sans PASS : exit 127, jamais 0 ;
 #  - chaque échec écrit une ligne `[agent-error] type=timeout|empty|provider|429` (comptée par le
 #    workflow) ; jamais de secret ni de texte brut du modèle dans ces lignes.
 # Arrêt propre = SIGINT au groupe de processus d'opencode et à tous ses descendants, puis SIGKILL
 # après OC_KILL_GRACE secondes. La raison est décidée ici (code de sortie), jamais lue dans un
 # fichier qu'opencode pourrait écrire.
 # Codes : 0 ok (dont `arret=max_pass`), 124 plafond, 125 silence ou sous-agent muet, 126 réponses
-# vides épuisées, 90 environnement, 130 annulation ; sinon code d'opencode (124/125 d'opencode
-# lui-même deviennent 1 pour ne pas être confondus avec une décision du moniteur).
+# vides épuisées, 127 fin de tour sans PASS (reprises épuisées), 90 environnement, 130 annulation ;
+# sinon code d'opencode (124/125 d'opencode lui-même deviennent 1 pour ne pas être confondus avec
+# une décision du moniteur).
 #
 # Variables obligatoires : ANTENLY_DIR, OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
 # OC_IDLE_MIN. Optionnelles : OC_BIN, OC_POLL_SEC, OC_KILL_GRACE, OC_IDLE_SEC (tests),
@@ -36,7 +41,7 @@
 # OC_DONE_CHECK_SEC, OC_DONE_IDLE_SEC, OC_DONE_CHECK_BIN, OC_IDLE_CPU.
 # Statut ($OC_LOG.status) : main_rc, stall_resume, fallback=<modèle>, stall_rc, new_session,
 # new_rc, error=<type>, subagent_timeout, done_check=ok,
-# arret=max_pass|plafond|silence|vide|annulation.
+# arret=max_pass|tour-fini|plafond|silence|vide|annulation.
 #
 # Signal « vrai FullRun » : le wrapper exporte LIFEOS_FULLRUN=1 dans son propre environnement
 # avant de lancer opencode. Ce signal n'est pas falsifiable par l'agent : il vit dans l'env du
@@ -488,7 +493,10 @@ maybe_finish
 need_resume=0
 case "$rc" in
   124|130) ;;                      # plafond / annulation : pas de reprise
-  0) [ "$useful" -eq 1 ] || need_resume=1 ;;  # rc 0 mais aucun token : réponse vide
+  # rc 0 = « opencode a fini son tour », pas « le run a atteint son but ». Sans PASS de Max
+  # vérifié par done_check.sh (maybe_finish ci-dessus), c'est une reprise : la boucle relance
+  # une session qui relit l'ISA et continue, au lieu d'attendre une réponse humaine.
+  0) need_resume=1 ;;
   *) need_resume=1 ;;               # 125 silence, 429, provider…
 esac
 
@@ -497,7 +505,7 @@ STALLS=0
 while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remaining)" -gt 900 ]; do
   STALLS=$((STALLS + 1))
   m="${CHAIN[$(( (STALLS - 1) % ${#CHAIN[@]} ))]}"
-  printf '\n[stall] silence %s min, reprise %s/%s\n' "$(( EFFECTIVE_IDLE / 60 ))" "$STALLS" "$MAX_RESUMES" >>"$OC_LOG"
+  printf '\n[stall] fin de tour ou silence, reprise %s/%s\n' "$STALLS" "$MAX_RESUMES" >>"$OC_LOG"
   echo "stall_resume=$STALLS" >>"$OC_LOG.status"
   echo "fallback=$m" >>"$OC_LOG.status"
   rewrite_agent_models "$m"
@@ -525,17 +533,21 @@ while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remai
   need_resume=0
   case "$rc" in
     124|130) ;;
-    0) [ "$useful" -eq 1 ] || need_resume=1 ;;
+    0) need_resume=1 ;;              # tour fini sans PASS vérifié : encore une reprise
     *) need_resume=1 ;;
   esac
 done
 
 # Une chaîne de réponses vides ne doit jamais rendre 0 (verdict manquant ≠ pass).
 if [ "$rc" -eq 0 ] && [ "$useful" -eq 0 ]; then rc=126; fi
+# Une fin de tour sans PASS ne doit jamais rendre 0, même après épuisement des reprises :
+# « terminé » exige done_check=ok, et cet exit 0 court-circuitait toute la chaîne de reprise.
+if [ "$rc" -eq 0 ] && [ "$need_resume" -eq 1 ]; then rc=127; fi
 case "$rc" in
   124) echo "arret=plafond" >>"$OC_LOG.status" ;;
   125) echo "arret=silence" >>"$OC_LOG.status" ;;
   126) echo "arret=vide" >>"$OC_LOG.status" ;;
+  127) echo "arret=tour-fini" >>"$OC_LOG.status" ;;
   130) echo "arret=annulation" >>"$OC_LOG.status" ;;
 esac
 _memcap_cleanup
