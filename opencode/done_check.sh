@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Validation d'un run FullRun sur PASS de Max (PLAN A, étape 4). Script autonome : bash + jq +
-# python3. Sort 0 seulement si TOUT est vrai :
+# python3. OC_DONE_AGENTS (liste séparée par des virgules, défaut = OC_MAX_SUBAGENT = Max) :
+# CHAQUE agent listé (ex. « Max,Silas ») doit satisfaire a et b ; un PASS qui ne vient pas d'une
+# vraie réponse de l'agent dans le stockage opencode (texte écrit par l'agent principal, fichier,
+# rapport) ne compte jamais. OC_DONE_ONLY=verdict s'arrête après a et b (utilisé par
+# checkpoint.sh pour n'enregistrer que des verdicts réels). Sort 0 seulement si TOUT est vrai :
 #   a. stockage opencode : un `task` subagent_type=Max completed, sa session enfant a un message
 #      assistant d'un modèle `-free` avec tokens.output > 0, sa sortie contient PASS/APPROVE/LGTM
 #      sans REQUEST CHANGES/FAIL/BLOCK, et sa fin est postérieure au dernier commit de code ;
@@ -18,9 +22,12 @@ REPORT="${OC_REPORT:-}"
 ISA="${OC_ISA:-${OC_ISA_PATH:-}}"
 REPO="${OC_DONE_REPO:-$(pwd)}"
 MAX_AGENT="${OC_MAX_SUBAGENT:-Max}"
+AGENTS="${OC_DONE_AGENTS:-$MAX_AGENT}"
+ONLY="${OC_DONE_ONLY:-}"
 DONE_VERIFY="${OC_DONE_VERIFY:-}"
 
 ko() { printf 'done_check=ko raison=%s\n' "$1"; exit 1; }
+[[ "$AGENTS" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}(,[A-Za-z][A-Za-z0-9_-]{0,39}){0,5}$ ]] || { printf 'done_check=ko raison=a:agents\n'; exit 1; }
 ok() { printf 'done_check=ok\n'; exit 0; }
 
 command -v python3 >/dev/null 2>&1 || ko a:python3
@@ -34,10 +41,11 @@ last_commit=$(git -C "$REPO" log -1 --format=%ct -- . ':!MEMORY' ':!.fullrun' 2>
 [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=0
 
 # --- a. stockage opencode (SQLite 1.19+ ou arbre JSON) ---
-storage=$(python3 - "$STORE" "$MAX_AGENT" "$last_commit" <<'PY'
+storage=$(python3 - "$STORE" "$AGENTS" "$last_commit" <<'PY'
 import glob, json, os, re, sqlite3, sys
 
-store, max_agent, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+agents = [a for a in agents_arg.split(',') if a]
 PASS = re.compile(r'\{"status"\s*:\s*"pass"\}|\bPASS\b|\bAPPROVE\b|\bLGTM\b')
 FAIL = re.compile(r'REQUEST CHANGES|\bFAIL\b|\bBLOCK\b')
 
@@ -99,67 +107,72 @@ if not sources:
     print('KO:stockage')
     sys.exit(0)
 
-cands = []
-for kind, src, o in task_parts:
-    st = o.get('state') or {}
-    inp = st.get('input') or {}
-    if inp.get('subagent_type') != max_agent or st.get('status') != 'completed':
-        continue
-    cands.append((kind, src, o, st, inp))
+def check(max_agent):
+    """None si l'agent a rendu un vrai PASS ; sinon la raison (none|tokens|verdict|time|model)."""
+    cands = []
+    for kind, src, o in task_parts:
+        st = o.get('state') or {}
+        inp = st.get('input') or {}
+        if inp.get('subagent_type') != max_agent or st.get('status') != 'completed':
+            continue
+        cands.append((kind, src, o, st, inp))
+    if not cands:
+        return 'none'
+    reasons = set()
+    for kind, src, o, st, inp in cands:
+        meta = st.get('metadata') or {}
+        child = meta.get('sessionId') or ''
+        end = (st.get('time') or {}).get('end') or 0
+        try:
+            end = int(end)
+        except Exception:
+            end = 0
+        if end <= last_commit * 1000:
+            reasons.add('time')
+            continue
+        msgs = child_messages(kind, src, child) if child else []
+        if not any((m.get('role') == 'assistant')
+                   and str(m.get('modelID') or '').endswith('-free')
+                   and int((m.get('tokens') or {}).get('output') or 0) > 0
+                   for m in msgs):
+            reasons.add('tokens')
+            continue
+        out = str(st.get('output') or '')
+        if not PASS.search(out) or FAIL.search(out):
+            reasons.add('verdict')
+            continue
+        return None
+    for r in ('tokens', 'verdict', 'time'):
+        if r in reasons:
+            return r
+    return 'model'
 
-if not cands:
-    print('KO:none')
-    sys.exit(0)
 
-reasons = set()
-for kind, src, o, st, inp in cands:
-    meta = st.get('metadata') or {}
-    child = meta.get('sessionId') or ''
-    end = (st.get('time') or {}).get('end') or 0
-    try:
-        end = int(end)
-    except Exception:
-        end = 0
-    if end <= last_commit * 1000:
-        reasons.add('time')
-        continue
-    msgs = child_messages(kind, src, child) if child else []
-    if not any((m.get('role') == 'assistant')
-               and str(m.get('modelID') or '').endswith('-free')
-               and int((m.get('tokens') or {}).get('output') or 0) > 0
-               for m in msgs):
-        reasons.add('tokens')
-        continue
-    out = str(st.get('output') or '')
-    if not PASS.search(out):
-        reasons.add('verdict')
-        continue
-    if FAIL.search(out):
-        reasons.add('verdict')
-        continue
-    print('OK')
-    sys.exit(0)
-
-for r in ('tokens', 'verdict', 'time'):
-    if r in reasons:
-        print('KO:%s' % r)
+for agent in agents:
+    why = check(agent)
+    if why:
+        print('KO:%s' % why)
         sys.exit(0)
-print('KO:model')
+print('OK')
 PY
 ) || ko a:stockage
 [ "$storage" = OK ] || ko "a:${storage#KO:}"
 
-# --- b. hooks.log : ligne du plugin, postérieure au dernier commit de code ---
-hooks_ok=0
-if [ -f "$HOOKS" ]; then
-  while IFS= read -r line; do
-    case "$line" in *"SUBAGENT done subagent_type=$MAX_AGENT ok=true"*) ;; *) continue ;; esac
-    ts=${line%% *}
-    epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
-    if [ "$epoch" -gt "$last_commit" ]; then hooks_ok=1; break; fi
-  done <"$HOOKS"
-fi
-[ "$hooks_ok" -eq 1 ] || ko b:hooks
+# --- b. hooks.log : ligne du plugin PAR agent exigé, postérieure au dernier commit de code ---
+IFS=',' read -r -a agent_list <<<"$AGENTS"
+for ag in "${agent_list[@]}"; do
+  hooks_ok=0
+  if [ -f "$HOOKS" ]; then
+    while IFS= read -r line; do
+      case "$line" in *"SUBAGENT done subagent_type=$ag ok=true"*) ;; *) continue ;; esac
+      ts=${line%% *}
+      epoch=$(date -u -d "$ts" +%s 2>/dev/null) || continue
+      if [ "$epoch" -gt "$last_commit" ]; then hooks_ok=1; break; fi
+    done <"$HOOKS"
+  fi
+  [ "$hooks_ok" -eq 1 ] || ko b:hooks
+done
+[ "$ONLY" = verdict ] && ok
 
 # --- c. vérificateurs relancés (fichier ou liste séparée par des `;`) ---
 if [ -n "$DONE_VERIFY" ]; then

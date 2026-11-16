@@ -277,6 +277,29 @@ Tests locaux (sans réseau réel, sauf téléchargement de gitleaks s'il manque)
 `opencode/tests/wippush-test.sh` et `opencode/tests/watchdog-test.sh` (timeouts et relance des
 démons).
 
+**Reprise, surveillance, verdicts réels.**
+
+- *Reprise depuis la dernière étape.* Après chaque étape validée, l'agent appelle
+  `/opt/fullrun-tools/checkpoint.sh write --job J --step N …` : `.fullrun/<job>_checkpoint.json`
+  (étape, commit, résumé, verdicts). Pas de saut d'étape (N ≤ dernière + 1). À chaque reprise
+  (`stall_resume`, `new_session`) et à chaque relance du job, le prompt reçoit ce fichier et le début
+  de `_DONE.md` avec l'ordre de reprendre à l'étape suivante ; un verdict encore valable (aucun
+  commit de code depuis son SHA) n'est pas redemandé. Le fichier est un indice, pas une preuve : les
+  portes et `done_check.sh` ne le lisent pas.
+- *Ne pas couper un travail en cours.* Comptent comme activité : le journal, les fichiers de session
+  (sous-agents) et le CPU des processus ENFANTS de l'agent (outils, bancs ; `OC_CHILD_CPU_MIN`, 10
+  ticks par sonde). Coupure après `OC_IDLE_MIN` minutes sans aucune de ces activités. L'ancien seuil
+  fixe de 8 min pour les sous-agents n'est plus appliqué par défaut (il coupait un sous-agent ou un
+  banc encore au travail) ; `OC_SUBAGENT_IDLE_SEC`, s'il est posé, reste un plafond optionnel.
+- *Verdicts réels seulement.* `done_check.sh` exige, pour CHAQUE agent de `OC_DONE_AGENTS` (entrée
+  `done_agents` du workflow, défaut `Max` ; ex. `Max,Silas`), une vraie tâche terminée dans le
+  stockage opencode (tokens d'un modèle `-free`, PASS explicite, postérieure au dernier commit de
+  code) et la ligne `SUBAGENT done` du plugin. Un PASS écrit par l'agent principal (message, fichier,
+  checkpoint) ne compte pas ; `checkpoint.sh verdict` refuse de l'enregistrer. Verdict manquant ≠ PASS.
+
+Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
+réduit : seuil 3 s, activité 9 s).
+
 **Notification de fin.** Dernier step, toujours exécuté (fin, échec, blocage, annulation) : POST au
 webhook opencode-notify, même format que `oc-run` sur la box (`job`, `status` = `fini` / `échec` /
 `bloqué` / `annulé`, `duration` en secondes réelles depuis le début du job, `pr_url` vide,
