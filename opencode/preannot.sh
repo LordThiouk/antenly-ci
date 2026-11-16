@@ -6,6 +6,13 @@
 # d'antenly demandé — attend un verdict borné, télécharge les artefacts s'il y en a,
 # et n'affiche qu'un verdict + un court extrait de journal en cas d'échec.
 #
+# Portée du job : GitHub Actions ne sait pas dispatcher un job isolé d'un workflow
+# (`ci.yml` n'a qu'un input `ref`, et découper le workflow en deux casserait la
+# barrière `report-status` qui agrège les huit jobs). Le dispatch lance donc `ci.yml`
+# entier, mais le VERDICT ne lit que le job `preannot-ina` : la conclusion d'un autre
+# job (rust, licences, secrets…) ne peut ni valider ni invalider preannot. Le run
+# global n'est plus qu'une enveloppe pour attendre la fin.
+#
 #   /opt/fullrun-tools/preannot.sh run
 #
 # Le jeton (GITHUB_TOKEN d'antenly-ci, `actions: write`) n'est jamais dans
@@ -153,10 +160,12 @@ iso_minus() {
 
 redact_stream() {
   # Masque le jeton s'il apparaît, coupe les lignes trop longues, garde un tail court.
+  # Le jeton passe par l'ENVIRONNEMENT, jamais par argv : `ps` est lisible par tout
+  # utilisateur de la box, et un secret en argument y resterait visible le temps du filtre.
   local tok="$1" tailn="$2" width="$3"
-  python3 -c '
-import sys
-tok, tailn, width = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+  PREANNOT_REDACT_TOKEN="$tok" python3 -c '
+import os, sys
+tok, tailn, width = os.environ.get("PREANNOT_REDACT_TOKEN", ""), int(sys.argv[1]), int(sys.argv[2])
 out = []
 for line in sys.stdin.read().splitlines():
     if tok:
@@ -169,7 +178,7 @@ if len(out) > tailn:
 sys.stdout.write("\n".join(out))
 if out:
     sys.stdout.write("\n")
-' "$tok" "$tailn" "$width"
+' "$tailn" "$width"
 }
 
 # Le run créé par ce dispatch : même workflow, même ref (run-name `CI antenly@<ref>`),
@@ -192,8 +201,10 @@ print(cands[0]["databaseId"])
 ' "$since" "$ref" "$json" "$RUN_TITLE_PREFIX"
 }
 
+# Verdict borné au job `preannot-ina` : `jobs` est demandé au même appel. Le run entier
+# ne sert qu'à attendre la fin (un échec rust/licences ne dit rien de preannot).
 view_run() {
-  gh_cmd run view "$1" -R "$REPO" --json status,conclusion,url
+  gh_cmd run view "$1" -R "$REPO" --json status,conclusion,url,jobs
 }
 
 # Artefacts : best-effort. Leur absence ne change pas le verdict du run.
@@ -253,6 +264,8 @@ run_preannot() {
   status=""
   conclusion=""
   url=""
+  job_conclusion=""
+  job_name="preannot-ina"
   while [ "$(date +%s)" -lt "$deadline" ]; do
     view=$(view_run "$run_id") || fail "impossible de lire le run ${run_id}"
     eval "$(python3 -c '
@@ -260,10 +273,19 @@ import json,sys,shlex
 d=json.loads(sys.argv[1])
 for k in ("status","conclusion","url"):
     print("s_%s=%s" % (k, shlex.quote(str(d.get(k) or ""))))
-' "$view")"
+# Conclusion du seul job qui nous intéresse (nom de job = clé du workflow, sans `name:`).
+want = sys.argv[2]
+jc = ""
+for j in d.get("jobs") or []:
+    if (j.get("name") or "") == want:
+        jc = str(j.get("conclusion") or "")
+        break
+print("s_job=%s" % shlex.quote(jc))
+' "$view" "$job_name")"
     status="$s_status"
     conclusion="$s_conclusion"
     url="$s_url"
+    job_conclusion="$s_job"
     case "$status" in
       completed|cancelled) break ;;
     esac
@@ -277,7 +299,15 @@ for k in ("status","conclusion","url"):
     exit 124
   fi
 
-  echo "verdict=${conclusion:-$status} status=$status run=$run_id"
+  # Verdict = conclusion du job `preannot-ina` quand GitHub la donne ; sinon (ancienne
+  # réponse `gh`, job absent) repli explicite sur la conclusion du run, annoncé comme tel.
+  verdict_from="run"
+  if [ -n "${job_conclusion:-}" ]; then
+    conclusion="$job_conclusion"
+    verdict_from="job ${job_name}"
+  fi
+
+  echo "verdict=${conclusion:-$status} status=$status run=$run_id verdict_de=$verdict_from"
   [ -n "$url" ] && echo "url=$url"
   download_artifacts "$run_id" "$PREANNOT_ART_DIR"
 
