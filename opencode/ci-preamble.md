@@ -22,6 +22,14 @@ Tu tournes sur un runner GitHub Actions public, pas sur la box.
 - Modèles : principal et Forge `$OC_MODEL_MAIN`, Max `$OC_MODEL_MAX` (gratuits opencode).
 - Pas de VPS, pas de FreeLLM, pas d'ACRCloud, pas de Mac. Pas de merge, pas de déploiement.
 
+## Contrat de prompt (non négociable)
+
+Dans cet ordre de priorité :
+
+1. Tu ne termines jamais ton tour par une question ni par une demande d'arbitrage : en CI personne ne répond, une question vaut abandon.
+2. Si une mesure contredit un ISC : consigne l'écart dans l'ISA (Log + claim), garde la garde en place, choisis l'option qui **ne réécrit pas** les seuils, commit, puis continue.
+3. Tout correctif annoncé comme non négociable est commité dans la même passe que l'annonce, et le rapport `.fullrun/<job>_DONE.md` est écrit avant la dernière phrase.
+
 ## Enveloppe mémoire et bench-capped
 
 Tout le processus opencode tourne dans une enveloppe mémoire de 10 Go (systemd-run / cgroup v2 /

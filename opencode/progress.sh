@@ -45,6 +45,7 @@ reason_label() {
   local n; n=$(num "${OC_IDLE_MIN:-}")
   case "${1:-}" in
     ok) printf 'terminé' ;;
+    tour) printf 'fin de tour sans PASS (à reprendre)' ;;
     silence) printf 'bloqué (silence %s min)' "$n" ;;
     plafond) printf 'plafond atteint' ;;
     annulation) printf 'annulé' ;;

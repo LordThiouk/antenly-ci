@@ -232,4 +232,59 @@ set -e
 printf '%s' "$out" | grep -q 'refus : lancer seulement depuis le FullRun' || ko "refus hors FullRun sans message clair : $out"
 ok "refus : branche vide, ref invalide, main, hors FullRun"
 
+# --- 7. verdict borné au job preannot-ina, pas au run entier ---------------------
+# ci.yml porte huit jobs : un échec rust/secrets ne doit ni valider ni invalider preannot.
+cat > "$tmp/mock-gh-jobs" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${PREANNOT_GH_LOG:?}"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  workflow) exit 0 ;;
+  api)
+    path=""
+    for a in "$@"; do case "$a" in repos/*) path="$a" ;; esac; done
+    case "$path" in */actions/runs/*/artifacts) printf '%s\n' '{"total_count":0,"artifacts":[]}' ;; *) exit 1 ;; esac
+    ;;
+  run)
+    sub="${1:-}"
+    case "$sub" in
+      list) printf '%s\n' '[{"databaseId":55,"createdAt":"2099-01-01T00:00:00Z","displayTitle":"CI antenly@feat/multi","url":"https://example.test/55"}]' ;;
+      view) printf '%s\n' '{"status":"completed","conclusion":"failure","url":"https://example.test/55","jobs":[{"name":"rust","conclusion":"failure"},{"name":"preannot-ina","conclusion":"success"},{"name":"report-status","conclusion":"failure"}]}' ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+MOCK
+chmod +x "$tmp/mock-gh-jobs"
+: > "$tmp/gh.log"
+out=$(PREANNOT_GH="$tmp/mock-gh-jobs" "$sh" run 2>&1) || ko "run avec job preannot vert a échoué : $out"
+printf '%s' "$out" | grep -q 'verdict=success' || ko "verdict du job preannot-ina attendu : $out"
+printf '%s' "$out" | grep -q 'verdict_de=job preannot-ina' || ko "verdict non attribué au job : $out"
+printf '%s' "$out" | grep -q 'extrait des logs' && ko "pas d'extrait quand preannot-ina est vert"
+ok "run : verdict lu sur le job preannot-ina (run global en échec ignoré)"
+
+# --- 8. le jeton n'est jamais un argument de processus ---------------------------
+# Le filtre de journal reçoit le jeton par l'environnement : `ps` reste propre.
+real_py=$(command -v python3)
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/python3" <<SPY
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"\${PREANNOT_SPY_LOG:?}"
+exec "$real_py" "\$@"
+SPY
+chmod +x "$tmp/bin/python3"
+: > "$tmp/spy.log"
+set +e
+out=$(PATH="$tmp/bin:$PATH" PREANNOT_GH="$tmp/mock-gh" PREANNOT_SPY_LOG="$tmp/spy.log" \
+      PREANNOT_ART_DIR="$tmp/art2" "$sh" run 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || ko "run en échec simulé (spy) devrait sortir 1, obtenu $rc : $out"
+[ -s "$tmp/spy.log" ] || ko "le mouchard python3 n'a rien vu (test invalide)"
+grep -Fq "$tok" "$tmp/spy.log" && ko "jeton présent dans les arguments d'un processus"
+printf '%s' "$out" | grep -q 'token=\*\*\*' || ko "le jeton n'est plus masqué dans l'extrait"
+ok "jeton jamais en argument de processus, toujours masqué dans l'extrait"
+
 echo "tous les contrôles preannot sont passés"
