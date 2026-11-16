@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prépare le journal opencode pour le dépôt PRIVÉ antenly : tronque le brut à OC_LOG_MAX octets
 # (défaut 5 Mo, début et fin gardés) AVANT tout perl, puis retire les codes ANSI, masque les motifs
-# de jetons courants et la clé ISA. Le perl -0777 ne voit donc qu'un fichier déjà borné : un journal
+# de jetons courants, la clé ISA et les noms de fichiers du corpus audio (que gitleaks prend pour
+# des clés génériques à cause de leur entropie). Le perl -0777 ne voit donc qu'un fichier déjà borné : un journal
 # énorme ne gonfle jamais la mémoire. Rien n'est écrit sur stdout.   redact-log.sh <log brut> <sortie>
 set +x
 set -uo pipefail
@@ -51,6 +52,12 @@ OC_ISA_KEY_FILE="${OC_ISA_KEY_FILE:-$HOME/.claude/LIFEOS/MEMORY/STATE/.isa-stamp
   s/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/[REDACTED:aws-key]/g;
   s/\bAIza[0-9A-Za-z_-]{30,}/[REDACTED:google-key]/g;
   s/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/[REDACTED:jwt]/g;
+  # Noms de fichiers du corpus audio (<station>_s<k>_<AAAAMMJJ>T<HHMMSS>Z.<ext>) : ce ne sont pas
+  # des secrets, mais la règle gitleaks generic-api-key les prend pour des clés (entropie >= 3,5)
+  # et imprimer un chemin audio dans le journal viole déjà le contrat de prompt. Masquage à la
+  # source, sans allowlist gitleaks qui affaiblirait la détection des vrais jetons.
+  # (Bloc délimité par des quotes simples côté shell : aucune apostrophe ici.)
+  s/\b[a-z][a-z0-9]{0,15}_s\d{1,2}_\d{8}T\d{6}Z\.(?:opus|wav|mp3|m4a|flac|ogg|aac)\b/[REDACTED:audio-file]/g;
   s/(x-access-token:)[^\s@"\x27]+/$1\[REDACTED\]/gi;
   s/((?:authorization|proxy-authorization)\s*[:=]\s*(?:basic|bearer|token)\s+)[A-Za-z0-9._~+\/=-]{8,}/$1\[REDACTED\]/gi;
   s/(\bbearer\s+)[A-Za-z0-9._~+\/=-]{20,}/$1\[REDACTED\]/gi;
