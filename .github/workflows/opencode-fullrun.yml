@@ -62,6 +62,10 @@ on:
 
 permissions:
   contents: read
+  # preannot.sh déclenche ci.yml (job preannot-ina) dans CE dépôt via le
+  # GITHUB_TOKEN du run : la permission Actions en écriture est le seul ajout.
+  # Aucun secret supplémentaire, aucun jeton dans l'environnement d'opencode.
+  actions: write
 
 concurrency:
   group: opencode-fullrun-${{ inputs.branch }}
@@ -473,6 +477,7 @@ jobs:
         env:
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
           BASE_SHA: ${{ steps.prep.outputs.base }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +x
           T=/opt/fullrun-tools; L=/opt/fullrun-live
@@ -483,7 +488,8 @@ jobs:
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
-            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/bench-capped" "$T/"
+            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/bench-capped" \
+            "$CI_DIR/opencode/preannot.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
@@ -505,6 +511,37 @@ jobs:
           fi
           # Clé ISA pour le masquage du journal en direct : root, 0600.
           printf '%s' "${ISA_STAMP_KEY:-}" | sudo sh -c 'umask 077; cat > /opt/fullrun-live/isa.key'
+          # preannot : le GITHUB_TOKEN de CE dépôt (permission actions: write) déclenche
+          # ci.yml, dont le job preannot-ina. Même dépôt, donc aucun second jeton. Le jeton
+          # vit dans un fichier root 0600, jamais dans l'environnement d'opencode ; l'outil
+          # figé le lit en root via sudoers (une seule commande autorisée).
+          if [ -n "${GH_DISPATCH_TOKEN:-}" ]; then
+            printf '::add-mask::%s\n' "$GH_DISPATCH_TOKEN"
+            printf '%s\n' "$GH_DISPATCH_TOKEN" | sudo sh -c 'umask 077; cat > /opt/fullrun-live/preannot.token'
+            sudo chown root:root /opt/fullrun-live/preannot.token
+            sudo chmod 0600 /opt/fullrun-live/preannot.token
+            {
+              printf 'OC_BRANCH=%s\n' "$IN_BRANCH"
+              printf 'PREANNOT_TIMEOUT_SEC=5400\n'
+              printf 'PREANNOT_POLL_SEC=30\n'
+              printf 'PREANNOT_LOG_TAIL=80\n'
+              printf 'PREANNOT_LOG_WIDTH=300\n'
+              printf 'PREANNOT_ART_DIR=%s\n' "${OC_WORK:-/tmp}/preannot"
+            } | sudo tee "$T/preannot.state" >/dev/null
+            sudo chown root:root "$T/preannot.state"
+            sudo chmod 0644 "$T/preannot.state"
+            u=$(id -un)
+            {
+              printf 'Defaults!/opt/fullrun-tools/preannot.sh env_reset\n'
+              printf 'Defaults!/opt/fullrun-tools/preannot.sh secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+              printf '%s ALL=(root) NOPASSWD: /opt/fullrun-tools/preannot.sh run\n' "$u"
+            } | sudo tee /etc/sudoers.d/fullrun-preannot >/dev/null
+            sudo chmod 0440 /etc/sudoers.d/fullrun-preannot
+            sudo visudo -cf /etc/sudoers.d/fullrun-preannot >/dev/null
+            echo "outil preannot figé : ci.yml (job preannot-ina), jeton d'antenly-ci hors d'opencode"
+          else
+            echo "::warning::GITHUB_TOKEN absent : preannot.sh sans jeton (dispatch impossible)"
+          fi
           "$T/gitleaks" version
           echo "Outils figés dans $T (root)"
 
@@ -724,7 +761,7 @@ jobs:
           cd "$ANTENLY_DIR"
           # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age, bench-capped.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped preannot.sh log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.
