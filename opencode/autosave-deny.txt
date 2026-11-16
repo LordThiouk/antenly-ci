@@ -8,6 +8,11 @@
 keys.json
 *credential*
 .env
+auth.json
+*.bak
+*.sqlite3
+*.sqlite
+*.p8
 .env.*
 *.pem
 *.key

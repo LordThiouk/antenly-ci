@@ -31,7 +31,7 @@ files_ever() { git -C "$1" log --all --name-only --format= | sort -u; }
 
 # --- 0. jamais git add -A / add . / add --all -------------------------------------------------
 grep -nE 'git[^#]*\badd\b[^#]*(-A\b|--all\b|[[:space:]]\.([[:space:]]|$))' "$AS" | grep -v '^[0-9]*:#' && ko "autosave.sh contient un git add aveugle"
-grep -nE 'as_git add -- "\$\{paths\[@\]\}"' "$AS" >/dev/null || ko "git add nominatif attendu"
+grep -nE 'as_git add -- "\$\{LP\[@\]\}"' "$AS" >/dev/null || ko "git add nominatif littéral (:(literal)) attendu"
 ok "aucun git add -A / . / --all : seuls des chemins nommés sont ajoutés"
 
 # --- A. carry + checkpoint : commit wip(carry), index de l'agent intact, porte de clôture muette -------
@@ -99,6 +99,21 @@ git -C "$R" cat-file -e HEAD:src/old.py 2>/dev/null && ko "suppression autorisé
 git -C "$R" status --porcelain -uall | grep -q '^?? keys.json$' || ko "keys.json devrait rester non suivi dans l'arbre"
 grep -q 'non commité — liste d.exclusion' "$tmp/out.txt" || ko "raison d'exclusion non annoncée : $(cat "$tmp/out.txt")"
 ok "B. 15 fichiers interdits (clés, identifiants, eval_corpus, fp_offline/fp_engine, tables SDK, audio, evidence, lien, gros, binaire) jamais commités ; 4 autorisés sauvés"
+
+# --- B2. nom de fichier « magique » (:(top)*) : git le lirait comme un motif et prendrait tout l'arbre ----
+R="$tmp/b2"; newrepo "$R"
+printf '{"k":"v"}\n' > "$R/keys.json"; printf 'A=1\n' > "$R/.env"; printf 'ok\n' > "$R/src/ok.py"
+for magic in ':(top)*' ':(glob)**' ':(top)' ':^src' ':(literal)x'; do printf 'm\n' > "$R/$magic"; done
+run_as "$R"
+ever=$(files_ever "$R")
+for bad in keys.json .env; do
+  printf '%s\n' "$ever" | grep -qxF "$bad" && ko "B2. fichier interdit commité via un nom magique : $bad"
+  [ -e "$R/$bad" ] || ko "B2. fichier interdit supprimé : $bad"
+done
+printf '%s\n' "$ever" | grep -qxF 'src/ok.py' || ko "B2. fichier autorisé non sauvé"
+printf '%s\n' "$ever" | grep -qxF ':(top)*' || ko "B2. le fichier au nom magique devrait être sauvé comme un fichier ordinaire"
+n=$(git -C "$R" rev-list --count HEAD); [ "$n" -le 2 ] || ko "B2. trop de commits ($n)"
+ok "B2. fichiers nommés :(top)*, :(glob)**, :(top), :^src : traités comme des noms ordinaires, keys.json et .env jamais commités"
 
 # --- C. fuite : ni commitée ni poussée, valeur jamais affichée ----------------------------------
 R="$tmp/c"; newrepo "$R"

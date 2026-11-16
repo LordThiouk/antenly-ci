@@ -193,17 +193,23 @@ PY
   esac
 }
 
+# Chemins « littéraux » : sans :(literal), un fichier nommé « :(top)* » serait lu par git comme un motif
+# magique et ajouterait tout l'arbre. Tout chemin passé à add / reset / commit est donc préfixé.
+LP=()
+lit() { local p; LP=(); for p in "$@"; do LP+=(":(literal)$p"); done; }
+
 save_group() { # $1 = carry|code ; $2 = message
   local name="$1" msg="$2" lst="$W/$1.lst" p rc keep="$W/keep.lst" skipit q
   local -a paths=() leaks=()
   [ -s "$lst" ] || return 0
   mapfile -d '' -t paths < "$lst"
-  as_git add -- "${paths[@]}" >/dev/null 2>&1 || { echo "autosave : git add refusé ($name), rien commité"; return 0; }
+  lit "${paths[@]}"
+  as_git add -- "${LP[@]}" >/dev/null 2>&1 || { echo "autosave : git add refusé ($name), rien commité"; return 0; }
   scan_staged "$lst"; rc=$?
   if [ "$rc" -eq 1 ]; then
     # Les fichiers qui fuient sortent de l'index (ils restent dans l'arbre, non suivis par ce commit).
     mapfile -d '' -t leaks < "$W/leak.lst"
-    as_git reset -q -- "${leaks[@]}" >/dev/null 2>&1 || true
+    lit "${leaks[@]}"; as_git reset -q -- "${LP[@]}" >/dev/null 2>&1 || true
     for p in "${leaks[@]}"; do echo "autosave : secret probable dans $(printf '%s' "$(basename -- "$p")" | tr -cd 'A-Za-z0-9._ -' | cut -c1-80), non commité"; done
     : > "$keep"
     for p in "${paths[@]}"; do
@@ -215,14 +221,15 @@ save_group() { # $1 = carry|code ; $2 = message
     scan_staged "$keep"; rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    as_git reset -q -- "${paths[@]}" >/dev/null 2>&1 || true
+    lit "${paths[@]}"; as_git reset -q -- "${LP[@]}" >/dev/null 2>&1 || true
     echo "autosave : contrôle gitleaks impossible ou fuite persistante ($name), rien commité"
     return 0
   fi
-  if as_git -c user.name=Nix -c user.email=nix@antenly.local commit -q --no-verify -m "$msg" -- "${paths[@]}" >/dev/null 2>&1; then
+  lit "${paths[@]}"
+  if as_git -c user.name=Nix -c user.email=nix@antenly.local commit -q --no-verify -m "$msg" -- "${LP[@]}" >/dev/null 2>&1; then
     echo "autosave : $msg ($(as_git rev-parse --short HEAD 2>/dev/null)), ${#paths[@]} fichier(s)"
   else
-    as_git reset -q -- "${paths[@]}" >/dev/null 2>&1 || true
+    as_git reset -q -- "${LP[@]}" >/dev/null 2>&1 || true
     echo "autosave : commit refusé ($name), index remis, on réessaie"
   fi
 }

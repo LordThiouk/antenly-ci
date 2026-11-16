@@ -120,12 +120,17 @@ push() {
 # quel commit du run (gitleaks sur la plage, clé ISA) avant d'être poussés. WIP_AUTOSAVE=0 la coupe.
 autosave() {
   [ "${WIP_AUTOSAVE:-1}" = 1 ] || return 0
-  local as="${WIP_AUTOSAVE_BIN:-$(dirname "$self")/autosave.sh}" l
+  local as="${WIP_AUTOSAVE_BIN:-$(dirname "$self")/autosave.sh}" l rc
   [ -f "$as" ] || { say "autosave absent : travail non sauvegardé automatiquement"; return 0; }
   timeout -k 5 "${WIP_AUTOSAVE_TIMEOUT:-60}" env -i PATH="${PATH}" HOME="$WIP_STATE" AS_REPO="$WIP_REPO" AS_BRANCH="$WIP_BRANCH" \
     AS_TMP="$WIP_STATE" AS_GITLEAKS="$GL" AS_GL_CONFIG="${WIP_GL_CONFIG:-}" AS_GL_IGNORE="${WIP_GL_IGNORE:-}" \
-    AS_CTL_TIMEOUT="$CTL_TMO" ${WIP_AUTOSAVE_DENY:+AS_DENY_FILE="$WIP_AUTOSAVE_DENY"} bash "$as" 2>/dev/null \
+    AS_CTL_TIMEOUT="$CTL_TMO" ${WIP_AUTOSAVE_DENY:+AS_DENY_FILE="$WIP_AUTOSAVE_DENY"} bash "$as" 2>"$WIP_STATE/autosave.err" \
     | while IFS= read -r l; do say "$l"; done
+  rc=${PIPESTATUS[0]}
+  # Un échec de l'autosave ne bloque pas le push du reste, mais il est dit (jamais avalé en silence).
+  if [ "$rc" -ne 0 ]; then
+    say "autosave en échec (code $rc) : travail non sauvegardé ce tour-ci$(head -c 200 "$WIP_STATE/autosave.err" 2>/dev/null | tr -cd 'A-Za-z0-9._ :-' | sed 's/^/ — /')"
+  fi
   return 0
 }
 
