@@ -43,6 +43,10 @@ on:
         description: "ISA suivie (MEMORY/WORK/<dossier>/ISA.md) ; vide = déduite du prompt"
         type: string
         default: ""
+      start_step:
+        description: "Étape de départ demandée (build, verify, max, close ou 0-7) ; vide = comportement habituel. C'est une demande : LifeOS ne l'ouvre que si les étapes avant sont prouvées (report signé), sinon il redescend et le dit"
+        type: string
+        default: ""
       base_branch:
         description: "Branche cible de la PR en brouillon (vide = branche par défaut du dépôt antenly)"
         type: string
@@ -106,6 +110,7 @@ jobs:
       OC_MODEL_CHAIN: ${{ inputs.model_chain }}
       IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
       OC_ISA_PATH: ${{ inputs.isa_path }}
+      IN_START_STEP: ${{ inputs.start_step }}
       IN_IDLE_MIN: ${{ inputs.idle_minutes }}
       IN_DONE_AGENTS: ${{ inputs.done_agents }}
       IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
@@ -140,6 +145,14 @@ jobs:
           fi
           if ! [[ "$IN_IDLE_MIN" =~ ^[0-9]{2,3}$ ]] || [ "$((10#$IN_IDLE_MIN))" -lt 10 ] || [ "$((10#$IN_IDLE_MIN))" -gt 120 ]; then
             fail "idle_minutes invalide (entier de 10 à 120)"
+          fi
+          # start_step (facultatif) : une étape connue, jamais deploy. Normalisé en minuscules, transmis à LifeOS
+          # par le wrapper (FULLRUN_START_STEP). Vide = rien n'est transmis.
+          if [ -n "$IN_START_STEP" ]; then
+            start="${IN_START_STEP,,}"
+            [[ "$start" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
+              || fail "start_step invalide (scaffold, completeness_pre, vera, serena, build, verify, max, close ou 0-7 ; jamais deploy)"
+            echo "OC_START_STEP=$start" >> "$GITHUB_ENV"
           fi
           [[ "$IN_DONE_AGENTS" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}(,[A-Za-z][A-Za-z0-9_-]{0,39}){0,5}$ ]] \
             || fail "done_agents invalide (noms séparés par des virgules, ex. Max,Silas)"

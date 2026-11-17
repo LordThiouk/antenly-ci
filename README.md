@@ -368,3 +368,7 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
   (`*settings.json*` → `allow`, plus de refus par composition), seule l'édition du fichier reste
   `deny`. Les fichiers `.env` sont lisibles (lecture, édition, bash) : le pool CI en a besoin.
 - Pas de FreeLLM, de VPS, d'ACRCloud, de Playwright ni de MCP GitHub sur le runner.
+
+## Clé de porte : `start_step`
+
+Input facultatif du workflow (vide par défaut). `start_step=verify` (ou `build`, `max`, `close`, `0` à `7` ; jamais `deploy`) demande au run de démarrer à cette étape. C'est une **demande**, pas un forçage : LifeOS (`FullRunCarry.proveStart`) n'ouvre la porte que si chaque étape avant a un verdict signé (HMAC `isa_stamp`) ancré sur le commit actuel ; sinon le run redescend à la première étape non prouvée et la raison est écrite dans le log et dans le mandat de l'agent. Si l'étape demandée échoue, retour au build. La valeur passe par l'environnement d'opencode (`FULLRUN_START_STEP`, posé par `run-fullrun.sh`), que l'agent ne peut pas modifier. Aucune garde n'est affaiblie : Max PASS reste obligatoire à la fin. Nécessite la version de LifeOS qui contient `start_step` (`lifeos_ref`) ; une version plus ancienne ignore simplement la variable.
