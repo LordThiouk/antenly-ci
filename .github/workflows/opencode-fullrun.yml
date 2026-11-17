@@ -503,8 +503,8 @@ jobs:
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
             "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/checkpoint.sh" \
             "$CI_DIR/opencode/bench-capped" \
-            "$CI_DIR/opencode/preannot.sh" "$T/"
-          sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$T/"
+            "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
+          sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
           # pouvoir être remplacé par l'agent.
@@ -625,6 +625,7 @@ jobs:
             WIP_STATE="$L" WIP_REPO="$ANTENLY_DIR" WIP_BRANCH="$IN_BRANCH" WIP_JOB="$IN_JOB" WIP_RUN="$RUN_ID" \
             WIP_BASE_SHA="$BASE_SHA" WIP_GITLEAKS="$T/gitleaks" WIP_GL_CONFIG="$gcfg" \
             WIP_GL_IGNORE="$T/gitleaks-ignore" WIP_ISA_KEY_FILE=/opt/fullrun-live/isa.key WIP_TOKEN_STDIN=1 \
+            WIP_AUTOSAVE_DENY="$T/autosave-deny.txt" \
             IN_WIP_PUSH_MIN="$IN_WIP_PUSH_MIN" \
             setsid -f nice -n 0 "$T/wippush.sh" daemon > "$RUNNER_TEMP/wip.out" 2>&1 &
           ok=0
@@ -777,7 +778,7 @@ jobs:
           cd "$ANTENLY_DIR"
           # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age, bench-capped.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped preannot.sh log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped preannot.sh autosave.sh autosave-deny.txt log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.
