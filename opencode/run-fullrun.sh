@@ -14,7 +14,9 @@
 #    seul). À la reprise n° i, m = chaîne[(i-1) % longueur], passé en `--model` ET en OC_MODEL_MAIN,
 #    puis réécrit dans $OC_AGENT_DIR/*.md pour que les sous-agents changent aussi ; chaque élément
 #    doit être `opencode/...-free` et différer du principal (sinon code 90) ;
-#  - sous-agent muet : le seuil effectif est min(OC_IDLE_MIN*60, OC_SUBAGENT_IDLE_SEC=480 s) ; la
+#  - sous-agent muet : le seuil de base est OC_IDLE_MIN*60 (le plafond OC_SUBAGENT_IDLE_SEC, ex. 480 s,
+#    ne s'applique que s'il est posé explicitement et le raccourcit alors) ; un seuil PAR AGENT plus long
+#    (OC_AGENT_IDLE_MIN, défaut Forge=40) prolonge l'attente de l'agent en cours, jamais l'inverse ; la
 #    coupure écrit `type=timeout` + `subagent_timeout=1` (verdict MANQUANT, jamais un pass) ;
 #  - fin anticipée : done_check.sh (copie figée /opt/fullrun-tools) vérifie Max PASS réel,
 #    hooks.log, vérificateurs OC_DONE_VERIFY, arbre propre et REPORT.md ; si ok et session inactive
@@ -56,6 +58,12 @@ export LIFEOS_HOOK_PROFILE="${LIFEOS_HOOK_PROFILE:-fullrun}"
   "${OC_DEADLINE_EPOCH:?}" "${OC_IDLE_MIN:?}"
 OC_BIN="${OC_BIN:-opencode}"
 POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
+# Sous-agents qui échouent en « timed out » côté opencode : le principal continue, mais avec le MÊME modèle
+# (peut-être saturé ou sans quota). Au bout de OC_SUBAGENT_FAIL_MAX échecs dans une passe (défaut 2 ; 0 =
+# désactivé), la passe est coupée et la reprise change de modèle pour tous les agents, comme pour un silence.
+SUBFAIL_MAX="${OC_SUBAGENT_FAIL_MAX:-2}"
+[[ "$SUBFAIL_MAX" =~ ^[0-9]{1,2}$ ]] || { echo "OC_SUBAGENT_FAIL_MAX invalide" >&2; exit 90; }
+SUBFAIL_RE='Subagent failed[^[:cntrl:]]*(timed out|timeout)'
 [[ "$OC_DEADLINE_EPOCH" =~ ^[0-9]{9,11}$ ]] || { echo "OC_DEADLINE_EPOCH invalide" >&2; exit 90; }
 [[ "$OC_IDLE_MIN" =~ ^[0-9]{1,3}$ ]] || { echo "OC_IDLE_MIN invalide" >&2; exit 90; }
 # Clé de porte : start_step demandé (input du workflow), transmis à LifeOS par l'environnement d'opencode,
@@ -111,6 +119,31 @@ SUBAGENT_IDLE_SEC="${OC_SUBAGENT_IDLE_SEC:-}"
 if [[ "$SUBAGENT_IDLE_SEC" =~ ^[0-9]{1,5}$ && "$SUBAGENT_IDLE_SEC" -ge 1 && "$SUBAGENT_IDLE_SEC" -lt "$EFFECTIVE_IDLE" ]]; then
   EFFECTIVE_IDLE="$SUBAGENT_IDLE_SEC"
 fi
+# Seuil de silence PAR AGENT (OC_AGENT_IDLE_MIN="Forge=40,Max=30", minutes) : quand le seuil de base
+# (OC_IDLE_MIN) est atteint et que l'agent en cours (task « running » dans le stockage opencode) a un seuil plus
+# long, la coupure attend ce seuil. Défaut : Forge=40 (un audit sur un gros delta est plus long que 20 min).
+# Les agents sans entrée gardent le seuil de base ; une valeur plus courte que la base est sans effet (le seuil
+# de base reste un plancher) ; un plafond OC_SUBAGENT_IDLE_SEC posé explicitement reste maître (aucune
+# extension) ; l'activité remet toujours le compteur à zéro ; le plafond du job (deadline) passe avant tout.
+# Valeur invalide, doublon, agent mal nommé ou hors 1..720 min : refus (90). Variable définie mais vide =
+# aucune entrée. OC_AGENT_IDLE_SEC (mêmes entrées en secondes) : uniquement pour les tests locaux.
+declare -A AGENT_IDLE=()
+AGENT_IDLE_UNIT=60; AGENT_IDLE_MAX=720
+AGENT_IDLE_RAW="${OC_AGENT_IDLE_MIN-Forge=40}"
+if [ -n "${OC_AGENT_IDLE_SEC:-}" ]; then AGENT_IDLE_RAW="$OC_AGENT_IDLE_SEC"; AGENT_IDLE_UNIT=1; AGENT_IDLE_MAX=43200; fi
+if [ -n "$AGENT_IDLE_RAW" ]; then
+  _agent_re='[A-Za-z][A-Za-z0-9_-]{0,39}=[0-9]{1,5}'
+  [[ "$AGENT_IDLE_RAW" =~ ^${_agent_re}(,${_agent_re}){0,9}$ ]] || { echo "OC_AGENT_IDLE_MIN invalide" >&2; exit 90; }
+  IFS=',' read -r -a _agent_idle <<<"$AGENT_IDLE_RAW"
+  for _e in "${_agent_idle[@]}"; do
+    _n="${_e%%=*}"; _v=$(( 10#${_e#*=} ))
+    { [ "$_v" -ge 1 ] && [ "$_v" -le "$AGENT_IDLE_MAX" ]; } || { echo "OC_AGENT_IDLE_MIN hors limites : $_e" >&2; exit 90; }
+    [ -z "${AGENT_IDLE[$_n]+x}" ] || { echo "OC_AGENT_IDLE_MIN : doublon $_n" >&2; exit 90; }
+    AGENT_IDLE[$_n]=$(( _v * AGENT_IDLE_UNIT ))
+  done
+  unset _agent_re _agent_idle _e _n _v
+fi
+AGENT_RUNNING=""; AGENT_LOOKUP_AT=0; AGENT_LIMIT="$EFFECTIVE_IDLE"; AGENT_NOTED=""
 # Seuil de CPU (ticks, 1/100 s) gagné par les processus enfants entre deux sondes pour compter
 # comme « actifs » ; un enfant bloqué (sleep, attente réseau) n'en gagne pas.
 CHILD_CPU_MIN="${OC_CHILD_CPU_MIN:-10}"
@@ -123,6 +156,7 @@ PROMPT=$(cat "$OC_PROMPT_FILE")
 mkdir -p "$(dirname "$OC_LOG")"
 : >>"$OC_LOG"
 : >>"$OC_LOG.status"
+for _n in "${!AGENT_IDLE[@]}"; do echo "agent_idle=$_n:${AGENT_IDLE[$_n]}" >>"$OC_LOG.status"; done; unset _n
 remaining() { echo $(( OC_DEADLINE_EPOCH - $(date +%s) )); }
 size() { stat -c %s "$OC_LOG" 2>/dev/null || echo 0; }
 
@@ -407,6 +441,63 @@ maybe_finish() {
   fi
 }
 
+# Agent dont une tâche (`task`) est en cours dans le stockage opencode : le plus récemment démarré. Vide si
+# inconnu — alors le seuil de base s'applique, jamais une extension.
+running_agent() {
+  timeout 20 python3 - "$OC_STORE_DIR" <<'PY' 2>/dev/null
+import glob, json, os, re, sqlite3, sys
+store = sys.argv[1]
+best = (-1, '')
+def consider(raw):
+    global best
+    try:
+        o = json.loads(raw)
+    except Exception:
+        return
+    if not isinstance(o, dict) or o.get('tool') != 'task':
+        return
+    st = o.get('state') or {}
+    if st.get('status') not in ('running', 'pending'):
+        return
+    a = (st.get('input') or {}).get('subagent_type')
+    try:
+        t = int((st.get('time') or {}).get('start') or 0)
+    except Exception:
+        t = 0
+    if isinstance(a, str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,39}', a) and t >= best[0]:
+        best = (t, a)
+for db in glob.glob(os.path.join(store, '*.db')):
+    try:
+        con = sqlite3.connect('file:%s?mode=ro' % db, uri=True)
+        for (data,) in con.execute('select data from part'):
+            consider(data)
+    except Exception:
+        pass
+for base in (os.path.join(store, 'storage', 'part'), os.path.join(store, 'part')):
+    for f in glob.glob(os.path.join(base, '*', '*.json')):
+        try:
+            consider(open(f, encoding='utf-8', errors='replace').read())
+        except Exception:
+            pass
+print(best[1])
+PY
+}
+# Pose AGENT_LIMIT : seuil de silence applicable à cet instant (>= EFFECTIVE_IDLE, jamais plus court).
+agent_limit() {
+  AGENT_LIMIT="$EFFECTIVE_IDLE"
+  [ "${#AGENT_IDLE[@]}" -gt 0 ] || return 0
+  [ "$EFFECTIVE_IDLE" -eq "$IDLE_SEC" ] || return 0   # plafond OC_SUBAGENT_IDLE_SEC explicite : maître
+  if [ $(( $1 - AGENT_LOOKUP_AT )) -ge 30 ]; then AGENT_LOOKUP_AT=$1; AGENT_RUNNING=$(running_agent | head -n1 | tr -d '\r'); fi
+  [ -n "$AGENT_RUNNING" ] && [ -n "${AGENT_IDLE[$AGENT_RUNNING]+x}" ] || return 0
+  if [ "${AGENT_IDLE[$AGENT_RUNNING]}" -gt "$AGENT_LIMIT" ]; then
+    AGENT_LIMIT="${AGENT_IDLE[$AGENT_RUNNING]}"
+    if [ "$AGENT_NOTED" != "$AGENT_RUNNING" ]; then
+      AGENT_NOTED="$AGENT_RUNNING"
+      echo "agent_idle_extended=$AGENT_RUNNING:$AGENT_LIMIT" >>"$OC_LOG.status"
+    fi
+  fi
+}
+
 # Lance "$@" (sortie ajoutée à $OC_LOG) dans sa propre session, surveille silence et plafond.
 # Pose WATCH_RC (code d'opencode, ou 124 plafond / 125 silence) et WATCH_REASON.
 # Si WATCH_PROBE_SEC > 0, la passe est aussi coupée au bout de ce délai tant qu'aucun token utile
@@ -451,7 +542,13 @@ run_watched() {
       fi
     fi
     if [ "$now" -ge "$OC_DEADLINE_EPOCH" ]; then reason=plafond; break; fi
-    if [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then
+    if [ "$SUBFAIL_MAX" -gt 0 ] \
+      && [ "$(tail -c +"$(( ${ATTEMPT_START:-0} + 1 ))" "$OC_LOG" 2>/dev/null | grep -aEc "$SUBFAIL_RE")" -ge "$SUBFAIL_MAX" ]; then
+      reason=subagent_fail
+      break
+    fi
+    if [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then agent_limit "$now"; fi
+    if [ $(( now - last_act )) -ge "$AGENT_LIMIT" ] && [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then
       # Étiquette seulement : le seuil appliqué est déjà le plus court des deux.
       if tail -n 20 "$OC_LOG" 2>/dev/null | grep -Eqi '(^|[^[:alnum:]_])(task|subagent|@agent)([^[:alnum:]_]|$)'; then
         reason=subagent
@@ -494,6 +591,10 @@ run_pass() {
       log_error timeout
       # Un sous-agent n'a plus rien écrit : la passe est coupée au seuil court (8 min par défaut).
       printf 'subagent_timeout=1\n' >>"$OC_LOG.status"
+      ;;
+    subagent_fail)
+      log_error timeout
+      printf 'subagent_timeout=1\nsubagent_fail=%s\n' "$SUBFAIL_MAX" >>"$OC_LOG.status"
       ;;
     probe) ;; # coupure volontaire : l'absence de token est le constat (type empty ci-dessous)
     max_pass) ;; # fin anticipée : pass confirmé par done_check.sh, pas par le modèle

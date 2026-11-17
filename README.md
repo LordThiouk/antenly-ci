@@ -140,7 +140,8 @@ l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiou
   dans `$RUNNER_TEMP/antenly-corpus` (arborescence conservée) et exporte
   `ANTENLY_CORPUS_DIR` ; le jeton `HF_TOKEN` ne vit que dans cette étape et n'atteint jamais
   opencode. Les logs publics n'affichent que le nombre de fichiers et la taille totale ;
-- `idle_minutes` (défaut `30`, de 10 à 120) : garde-fou de silence, voir plus bas.
+- `idle_minutes` (défaut `30`, de 10 à 120) : garde-fou de silence, voir plus bas ;
+- `agent_idle_minutes` (vide par défaut = `Forge=40`) : silence max **par agent**, ex. `Forge=40,Max=30` (1 à 720 min), voir plus bas.
 
 Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
 
@@ -183,6 +184,11 @@ consomme du CPU sans écrire dans le flux principal) ou modification d'un fichie
 non :
 - si aucune activité pendant `idle_minutes` minutes (défaut 30) : arrêt propre, raison
   **`bloqué (silence N min)`** ;
+- seuil **par agent** (`agent_idle_minutes`, défaut `Forge=40`) : quand `idle_minutes` est atteint et que la tâche
+  en cours (stockage opencode) est celle d'un agent à seuil plus long, la coupure attend ce seuil (un audit Forge
+  sur un gros delta dépasse 20 min). Les autres agents gardent `idle_minutes` ; un seuil plus court que
+  `idle_minutes` est sans effet ; un plafond `OC_SUBAGENT_IDLE_SEC` posé explicitement reste maître ; l'agent
+  introuvable donne le seuil de base ; toute activité remet le compteur à zéro ; valeur invalide : refus ;
 - au plus tard à 335 min après le début du job (plafond 350 - 15 min de marge pour pousser) : arrêt
   propre, raison **`plafond atteint`**.
 

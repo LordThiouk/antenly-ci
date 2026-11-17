@@ -182,7 +182,7 @@
   "provider": {
     "opencode": {
       "options": {
-        "timeout": 300000
+        "timeout": 2400000
       }
     }
   },

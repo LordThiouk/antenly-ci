@@ -6,8 +6,9 @@
 # rapport) ne compte jamais. OC_DONE_ONLY=verdict s'arrête après a et b (utilisé par
 # checkpoint.sh pour n'enregistrer que des verdicts réels). Sort 0 seulement si TOUT est vrai :
 #   a. stockage opencode : un `task` subagent_type=Max completed, sa session enfant a un message
-#      assistant d'un modèle `-free` avec tokens.output > 0, sa sortie contient PASS/APPROVE/LGTM
-#      sans REQUEST CHANGES/FAIL/BLOCK, et sa fin est postérieure au dernier commit de code ;
+#      assistant d'un modèle `-free` avec tokens.output > 0, sa sortie CONCLUT PASS dans un verdict structuré
+#      (JSON final {"verdict":…} ou dernière ligne « VERDICT: PASS »; jamais lu dans le corps, aucun verdict
+#      structuré = inconclusif, raison a:inconclusif), et sa fin est postérieure au dernier commit de code ;
 #   b. hooks.log contient `SUBAGENT done subagent_type=Max ok=true` postérieur au dernier commit
 #      (un `on-agent-stop` lancé à la main en bash ne compte pas : il n'écrit pas cette ligne) ;
 #   c. OC_DONE_VERIFY (fichier ou liste `;`) : toutes les commandes rendent 0 ;
@@ -46,8 +47,94 @@ import glob, json, os, re, sqlite3, sys
 
 store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 agents = [a for a in agents_arg.split(',') if a]
-PASS = re.compile(r'\{"status"\s*:\s*"pass"\}|\bPASS\b|\bAPPROVE\b|\bLGTM\b')
-FAIL = re.compile(r'REQUEST CHANGES|\bFAIL\b|\bBLOCK\b')
+# Verdict lu UNIQUEMENT dans une conclusion structurée, jamais dans le corps (même règle que lifeos#14) :
+#  1. la DERNIÈRE ligne « VERDICT: … » est la conclusion. Le préfixe de ligne ne peut contenir que des espaces, de la
+#     ponctuation, des symboles ou des emoji (« ✅ VERDICT: pass — phrase »), jamais une lettre ni un chiffre
+#     (« Le VERDICT: PASS … » est du corps). Valeur lisible : PASS|FAIL|BLOCKED seul (suivi au plus d'un tiret ou
+#     d'une parenthèse puis d'une phrase) ; « pass | concerns | fail » (plusieurs termes) ou « concerns » ne sont
+#     PAS lisibles : inconclusif, et cette dernière ligne ne cède pas la place à un JSON ni à une ligne antérieure ;
+#  2. le JSON final {"verdict"} > {"status"} > {"result"} ne compte que s'il n'y a AUCUNE ligne VERDICT: ; c'est
+#     le dernier objet JSON du texte, à condition qu'il le termine. Un JSON ne contredit donc jamais une ligne VERDICT.
+# Rien de structuré, ou valeur inconnue : INCONCLUSIF — jamais PASS. Aucun motif FAIL/BLOCK sur le corps.
+LINE = re.compile(r'^(?P<pre>.*?)VERDICT[ \t]*[:\uff1a](?P<rest>.*)$', re.I)
+VALUE = re.compile(r'[\W_]*(?P<w>PASS|FAIL|BLOCKED)\b[\W_]*(?:[(\[\u2014\u2013-].*)?$', re.I)
+
+
+def word(raw):
+    if not isinstance(raw, str):
+        return None
+    w = raw.strip().lower()
+    if w in ('pass', 'approve', 'approved'):
+        return 'pass'
+    if w in ('fail', 'reject', 'rejected', 'blocked', 'block'):
+        return 'fail'
+    return None
+
+
+def final_json(text):
+    """Dernier objet JSON (accolades équilibrées, chaînes respectées) s'il termine le texte, sinon None."""
+    found, end_found, i = None, -1, 0
+    while i < len(text):
+        if text[i] != '{':
+            i += 1
+            continue
+        depth, in_str, esc, j, closed = 0, False, False, i, False
+        while j < len(text):
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == '\\':
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    break
+            j += 1
+        if closed:
+            try:
+                v = json.loads(text[i:j + 1])
+                if isinstance(v, dict):
+                    found, end_found = v, j + 1
+            except Exception:
+                pass
+            i = j + 1
+        else:
+            i += 1
+    if found is not None and re.fullmatch(r'[\s`]*', text[end_found:]):
+        return found
+    return None
+
+
+def verdict_of(out):
+    """'pass' | 'fail' | None (inconclusif : aucun verdict structuré, ou dernière ligne VERDICT illisible)."""
+    text = out.strip()
+    if not text:
+        return None
+    seen, last = False, None
+    for line in text.splitlines():
+        m = LINE.match(line)
+        if not m or any(c.isalnum() for c in m.group('pre')):
+            continue
+        seen = True
+        v = VALUE.match(m.group('rest'))
+        last = word(v.group('w')) if v else None
+    if seen:
+        return last
+    obj = final_json(text)
+    if obj is None:
+        return None
+    for key in ('verdict', 'status', 'result'):
+        if obj.get(key) is not None:
+            return word(obj[key])
+    return None
 
 
 def parse(d):
@@ -137,12 +224,15 @@ def check(max_agent):
                    for m in msgs):
             reasons.add('tokens')
             continue
-        out = str(st.get('output') or '')
-        if not PASS.search(out) or FAIL.search(out):
+        v = verdict_of(str(st.get('output') or ''))
+        if v is None:
+            reasons.add('inconclusif')
+            continue
+        if v != 'pass':
             reasons.add('verdict')
             continue
         return None
-    for r in ('tokens', 'verdict', 'time'):
+    for r in ('tokens', 'verdict', 'inconclusif', 'time'):
         if r in reasons:
             return r
     return 'model'

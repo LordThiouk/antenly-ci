@@ -55,6 +55,10 @@ on:
         description: "Optionnel : chemin, sur la branche antenly testée, d'un fichier listant des chemins du dataset privé LordThiouk/antenly-corpus (un par ligne). Vide = rien."
         type: string
         default: ""
+      agent_idle_minutes:
+        description: "Silence max PAR AGENT, en minutes, ex. « Forge=40,Max=30 » (vide = défaut Forge=40). Plus long que idle_minutes : l'agent en cours garde sa tâche jusqu'à ce seuil ; les autres gardent idle_minutes. Jamais plus court que idle_minutes."
+        type: string
+        default: ""
       idle_minutes:
         description: "Agent figé : si le journal opencode n'écrit plus rien pendant N min (10 à 120), coupe et reprend la session (3 reprises max)"
         type: string
@@ -112,6 +116,7 @@ jobs:
       OC_ISA_PATH: ${{ inputs.isa_path }}
       IN_START_STEP: ${{ inputs.start_step }}
       IN_IDLE_MIN: ${{ inputs.idle_minutes }}
+      IN_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
       IN_DONE_AGENTS: ${{ inputs.done_agents }}
       IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
       IN_HF_CORPUS: ${{ inputs.hf_corpus }}
@@ -145,6 +150,21 @@ jobs:
           fi
           if ! [[ "$IN_IDLE_MIN" =~ ^[0-9]{2,3}$ ]] || [ "$((10#$IN_IDLE_MIN))" -lt 10 ] || [ "$((10#$IN_IDLE_MIN))" -gt 120 ]; then
             fail "idle_minutes invalide (entier de 10 à 120)"
+          fi
+          # agent_idle_minutes (facultatif) : « Agent=min » séparés par des virgules (1 à 720 min, sans doublon) ;
+          # le wrapper revalide (exit 90). Vide = défaut du wrapper (Forge=40).
+          if [ -n "$IN_AGENT_IDLE_MIN" ]; then
+            [[ "$IN_AGENT_IDLE_MIN" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}=[0-9]{1,3}(,[A-Za-z][A-Za-z0-9_-]{0,39}=[0-9]{1,3}){0,9}$ ]] \
+              || fail "agent_idle_minutes invalide (ex. Forge=40,Max=30)"
+            # même plage que le wrapper (1 à 720 min, sans doublon) : refus ici plutôt qu'au lancement
+            declare -A _seen_agent=()
+            IFS=',' read -r -a _agent_entries <<<"$IN_AGENT_IDLE_MIN"
+            for _e in "${_agent_entries[@]}"; do
+              _n="${_e%%=*}"; _v=$((10#${_e#*=}))
+              { [ "$_v" -ge 1 ] && [ "$_v" -le 720 ]; } || fail "agent_idle_minutes : $_n hors plage (1 à 720 min)"
+              [ -z "${_seen_agent[$_n]+x}" ] || fail "agent_idle_minutes : doublon $_n"
+              _seen_agent[$_n]=1
+            done
           fi
           # start_step (facultatif) : une étape connue, jamais deploy. Normalisé en minuscules, transmis à LifeOS
           # par le wrapper (FULLRUN_START_STEP). Vide = rien n'est transmis.
@@ -682,6 +702,7 @@ jobs:
           OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
           OC_LOG: ${{ runner.temp }}/oc/opencode.log
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
           OC_DONE_AGENTS: ${{ inputs.done_agents }}
           OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
           # Doit rester égal à timeout-minutes du job (350) ; marge de push : 15 min.
@@ -697,7 +718,9 @@ jobs:
           # Suivi : lignes [suivi] à valeurs filtrées (liste blanche / nombres), jamais le log lui-même.
           OC_START=$(date +%s); OC_PARENT_PID=$$; export OC_START OC_PARENT_PID
           OC_IDLE_MIN=$((10#$OC_IDLE_MIN)); export OC_IDLE_MIN
-          unset OC_IDLE_SEC  # réservé aux tests locaux
+          unset OC_IDLE_SEC OC_AGENT_IDLE_SEC  # réservés aux tests locaux
+          # Entrée vide = défaut du wrapper (Forge=40) : une variable vide signifierait « aucune entrée ».
+          if [ -n "${OC_AGENT_IDLE_MIN:-}" ]; then export OC_AGENT_IDLE_MIN; else unset OC_AGENT_IDLE_MIN; fi
           t0="$OC_JOB_T0"; [[ "$t0" =~ ^[0-9]{9,11}$ && "$t0" -le "$OC_START" ]] || t0="$OC_START"
           # opencode doit être arrêté (grâce SIGINT et dernier sondage compris) avant plafond - marge.
           OC_DEADLINE_EPOCH=$(( t0 + (OC_JOB_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
