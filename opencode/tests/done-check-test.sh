@@ -149,5 +149,22 @@ else
   ko "10 rc=$rc $(tr '\n' ' ' <"$T/run.log.status" 2>/dev/null)"
 fi
 
+# 11. Conclusion explicite : les mots du corps ne retournent pas une revue conclue PASS
+mklog Max
+mkstore "$T/s11a" "opencode/v4-flash-free" 42 $'Le test a FAIL avant le correctif, le BLOCK est évité, une revue a dit REQUEST CHANGES au tour 1.\n\nVERDICT: PASS' "$ENDP"
+out=$(call "$T/s11a"); [ "$out" = "done_check=ok" ] && ok 11a "corps avec FAIL/BLOCK/REQUEST CHANGES mais VERDICT: PASS final accepté" || ko "11a [$out]"
+mkstore "$T/s11b" "opencode/v4-flash-free" 42 $'Tout semble bon, PASS partout.\n\n**VERDICT: FAIL**' "$ENDP"
+out=$(call "$T/s11b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11b "VERDICT: FAIL final refusé malgré le mot PASS dans le corps" || ko "11b [$out]"
+mkstore "$T/s11c" "opencode/v4-flash-free" 42 $'VERDICT: FAIL (tour 1)\n...corrigé...\nVERDICT: PASS' "$ENDP"
+out=$(call "$T/s11c"); [ "$out" = "done_check=ok" ] && ok 11c "la dernière conclusion décide (FAIL puis PASS)" || ko "11c [$out]"
+mkstore "$T/s11d" "opencode/v4-flash-free" 42 $'VERDICT: PASS (tour 1)\n...régression...\nVERDICT: FAIL' "$ENDP"
+out=$(call "$T/s11d"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11d "la dernière conclusion décide (PASS puis FAIL)" || ko "11d [$out]"
+mkstore "$T/s11e" "opencode/v4-flash-free" 42 $'PASS sur la forme mais le test FAIL toujours' "$ENDP"
+out=$(call "$T/s11e"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11e "sans conclusion explicite : règle d'origine (FAIL dans le corps refuse)" || ko "11e [$out]"
+mkstore "$T/s11f" "opencode/v4-flash-free" 42 $'Revue FAIL puis corrigée\n{"status":"pass"}' "$ENDP"
+out=$(call "$T/s11f"); [ "$out" = "done_check=ok" ] && ok 11f "JSON final {status: pass} accepté" || ko "11f [$out]"
+mkstore "$T/s11g" "opencode/v4-flash-free" 42 $'Aucune faute, PASS.\n{"status":"fail"}' "$ENDP"
+out=$(call "$T/s11g"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11g "JSON final {status: fail} refusé" || ko "11g [$out]"
+
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

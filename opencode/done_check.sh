@@ -48,6 +48,26 @@ store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 agents = [a for a in agents_arg.split(',') if a]
 PASS = re.compile(r'\{"status"\s*:\s*"pass"\}|\bPASS\b|\bAPPROVE\b|\bLGTM\b')
 FAIL = re.compile(r'REQUEST CHANGES|\bFAIL\b|\bBLOCK\b')
+# Conclusion explicite : la DERNIÈRE ligne « VERDICT: PASS|FAIL… » (ou le JSON final) décide. Les mots du
+# corps (« le test a FAIL avant le correctif », « BLOCK évité ») ne retournent pas une revue conclue PASS.
+CONCL = re.compile(r'^[ \t>*_#-]*(?:final[ \t]+)?verdict[ \t*_]*[:=\u2014-][ \t*_]*'
+                   r'(pass(?:ed)?|approve[d]?|lgtm|fail(?:ed)?|reject(?:ed)?|request changes|changes requested|block(?:ed)?)\b',
+                   re.I | re.M)
+JSON_ST = re.compile(r'\{\s*"status"\s*:\s*"(pass|fail)"\s*\}', re.I)
+
+
+def verdict_pass(out):
+    """True si la sortie conclut PASS. Conclusion explicite (dernière) d'abord ; sinon règle d'origine."""
+    last = None
+    for m in CONCL.finditer(out):
+        last = ('pass' if re.match(r'(pass|approve|lgtm)', m.group(1), re.I) else 'fail', m.end())
+    j = None
+    for m in JSON_ST.finditer(out):
+        j = (m.group(1).lower(), m.end())
+    explicit = max((x for x in (last, j) if x), key=lambda x: x[1], default=None)
+    if explicit:
+        return explicit[0] == 'pass'
+    return bool(PASS.search(out)) and not FAIL.search(out)
 
 
 def parse(d):
@@ -138,7 +158,7 @@ def check(max_agent):
             reasons.add('tokens')
             continue
         out = str(st.get('output') or '')
-        if not PASS.search(out) or FAIL.search(out):
+        if not verdict_pass(out):
             reasons.add('verdict')
             continue
         return None

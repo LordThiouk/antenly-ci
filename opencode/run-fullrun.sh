@@ -56,6 +56,12 @@ export LIFEOS_HOOK_PROFILE="${LIFEOS_HOOK_PROFILE:-fullrun}"
   "${OC_DEADLINE_EPOCH:?}" "${OC_IDLE_MIN:?}"
 OC_BIN="${OC_BIN:-opencode}"
 POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
+# Sous-agents qui échouent en « timed out » côté opencode : le principal continue, mais avec le MÊME modèle
+# (peut-être saturé ou sans quota). Au bout de OC_SUBAGENT_FAIL_MAX échecs dans une passe (défaut 2 ; 0 =
+# désactivé), la passe est coupée et la reprise change de modèle pour tous les agents, comme pour un silence.
+SUBFAIL_MAX="${OC_SUBAGENT_FAIL_MAX:-2}"
+[[ "$SUBFAIL_MAX" =~ ^[0-9]{1,2}$ ]] || { echo "OC_SUBAGENT_FAIL_MAX invalide" >&2; exit 90; }
+SUBFAIL_RE='Subagent failed[^[:cntrl:]]*(timed out|timeout)'
 [[ "$OC_DEADLINE_EPOCH" =~ ^[0-9]{9,11}$ ]] || { echo "OC_DEADLINE_EPOCH invalide" >&2; exit 90; }
 [[ "$OC_IDLE_MIN" =~ ^[0-9]{1,3}$ ]] || { echo "OC_IDLE_MIN invalide" >&2; exit 90; }
 # Clé de porte : start_step demandé (input du workflow), transmis à LifeOS par l'environnement d'opencode,
@@ -451,6 +457,11 @@ run_watched() {
       fi
     fi
     if [ "$now" -ge "$OC_DEADLINE_EPOCH" ]; then reason=plafond; break; fi
+    if [ "$SUBFAIL_MAX" -gt 0 ] \
+      && [ "$(tail -c +"$(( ${ATTEMPT_START:-0} + 1 ))" "$OC_LOG" 2>/dev/null | grep -aEc "$SUBFAIL_RE")" -ge "$SUBFAIL_MAX" ]; then
+      reason=subagent_fail
+      break
+    fi
     if [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then
       # Étiquette seulement : le seuil appliqué est déjà le plus court des deux.
       if tail -n 20 "$OC_LOG" 2>/dev/null | grep -Eqi '(^|[^[:alnum:]_])(task|subagent|@agent)([^[:alnum:]_]|$)'; then
@@ -494,6 +505,10 @@ run_pass() {
       log_error timeout
       # Un sous-agent n'a plus rien écrit : la passe est coupée au seuil court (8 min par défaut).
       printf 'subagent_timeout=1\n' >>"$OC_LOG.status"
+      ;;
+    subagent_fail)
+      log_error timeout
+      printf 'subagent_timeout=1\nsubagent_fail=%s\n' "$SUBFAIL_MAX" >>"$OC_LOG.status"
       ;;
     probe) ;; # coupure volontaire : l'absence de token est le constat (type empty ci-dessous)
     max_pass) ;; # fin anticipée : pass confirmé par done_check.sh, pas par le modèle
