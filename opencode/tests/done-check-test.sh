@@ -108,10 +108,10 @@ printf -- '---\nphase: climbing\n---\n' >"$ISA"
 out=$(call "$T/absent")
 [ "$out" = "done_check=ko raison=a:stockage" ] && ok 9b "magasin absent refusé" || ko "9b [$out]"
 
-# 9c. magasin lisible, aucune tâche Max -> a:none (seul cas où « none » est vrai).
+# 9c. magasin lisible, aucune tâche Max -> a:none:Max (seul cas où « none » est vrai ; l'agent est nommé).
 mkstore "$T/s9c" "opencode/v4-flash-free" 42 'VERDICT: PASS' "$ENDP" Forge
 out=$(call "$T/s9c")
-[ "$out" = "done_check=ko raison=a:none" ] && ok 9c "aucune tâche Max refusée" || ko "9c [$out]"
+[ "$out" = "done_check=ko raison=a:none:Max" ] && ok 9c "aucune tâche Max refusée" || ko "9c [$out]"
 
 # 9d. régression F4 : plus de chemin bâti sur le contexte env (HOME n'y est pas -> chaîne vide).
 if grep -qE 'OC_(STORE_DIR|HOOKS_LOG): *\$\{\{ *env\.HOME *\}\}' "$ROOT/.github/workflows/opencode-fullrun.yml"; then
@@ -219,6 +219,57 @@ $txt" "$ENDP"
 done
 mkstore "$T/s11q" "opencode/v4-flash-free" 42 $'{"verdict":"pass","note":"le bloc {fail} est cit\u00e9"}' "$ENDP"
 out=$(call "$T/s11q"); [ "$out" = "done_check=ok" ] && ok 11q "accolades dans une chaîne du JSON final" || ko "11q [$out]"
+
+# 12. done_agents (Max,Silas) : a:none nomme le PREMIER agent sans tâche « completed » ; rien n'est assoupli
+#     (même exigences par agent qu'avant : fin postérieure au dernier commit de code, modèle gratuit, verdict).
+mkstore2() { # $1=dossier ; puis des « Agent:fin_ms » ; chaque tâche : modèle gratuit, 42 tokens, VERDICT: PASS
+  local d="$1"; shift
+  python3 - "$d" "$@" <<'PY'
+import json, os, sqlite3, sys
+d = sys.argv[1]; os.makedirs(d, exist_ok=True)
+con = sqlite3.connect(os.path.join(d, "opencode.db"))
+con.execute("create table part(session_id text, data text)")
+con.execute("create table message(session_id text, data text)")
+for i, spec in enumerate(sys.argv[2:]):
+    agent, end = spec.split(":")
+    part = {"type": "tool", "tool": "task",
+            "state": {"status": "completed", "input": {"subagent_type": agent},
+                      "metadata": {"sessionId": "child%d" % i, "model": {"modelID": "opencode/v4-flash-free"}},
+                      "time": {"end": int(end)}, "output": "Revue.\nVERDICT: PASS"}}
+    # une session par agent : reprise / rotation de modèle (done_check ne filtre aucune session)
+    con.execute("insert into part values(?,?)", ("sess%d" % i, json.dumps(part)))
+    con.execute("insert into message values(?,?)", ("child%d" % i, json.dumps(
+        {"role": "assistant", "modelID": "opencode/v4-flash-free", "tokens": {"output": 42}})))
+con.commit()
+PY
+}
+HOOKS2="$T/hooks2.log"
+for a in Max Silas; do
+  printf '%s SUBAGENT done subagent_type=%s ok=true session=s call=c\n' \
+    "$(date -u -d "@$((COMMIT + 5))" +%Y-%m-%dT%H:%M:%S.000Z)" "$a"
+done >"$HOOKS2"
+call2() { local store="$1"; shift; call "$store" OC_DONE_AGENTS=Max,Silas OC_HOOKS_LOG="$HOOKS2" "$@"; }
+
+mkstore2 "$T/s12a" "Max:$ENDP"
+out=$(call2 "$T/s12a"); [ "$out" = "done_check=ko raison=a:none:Silas" ] && ok 12a "Max sans Silas : a:none:Silas" || ko "12a [$out]"
+mkstore2 "$T/s12b" "Silas:$ENDP"
+out=$(call2 "$T/s12b"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12b "Silas sans Max : a:none:Max" || ko "12b [$out]"
+mkstore2 "$T/s12c" "Max:$ENDP" "Silas:$ENDP"
+out=$(call2 "$T/s12c"); [ "$out" = "done_check=ok" ] && ok 12c "Max + Silas valides (sessions différentes) : ok" || ko "12c [$out]"
+out=$(call2 "$T/s12c" OC_DONE_AGENTS=Max); [ "$out" = "done_check=ok" ] && ok 12c2 "done_agents=Max seul : inchangé (ok)" || ko "12c2 [$out]"
+mkdir -p "$T/s12e"; mkstore2 "$T/s12e"
+out=$(call2 "$T/s12e"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12e "aucun agent : le premier (Max) est nommé" || ko "12e [$out]"
+out=$(call "$T/s12a" OC_DONE_AGENTS=Max OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ok" ] && ok 12f "done_agents=Max, Max présent : ok" || ko "12f [$out]"
+mkstore2 "$T/s12g" "Silas:$ENDP"
+out=$(call "$T/s12g" OC_DONE_AGENTS=Max OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12g "done_agents=Max, aucun Max : a:none:Max" || ko "12g [$out]"
+
+# Max PASS sur un ancien état : du code a changé APRÈS lui -> refus (a:time), même si Silas est frais.
+cp -r "$R" "$T/repo2"; ( cd "$T/repo2" && echo apres >b.txt && git add -A \
+  && GIT_COMMITTER_DATE="@$((COMMIT + 100))" GIT_AUTHOR_DATE="@$((COMMIT + 100))" git commit -qm "code apres" )
+mkstore2 "$T/s12d" "Max:$ENDP" "Silas:$(( (COMMIT + 200) * 1000 ))"
+out=$(call2 "$T/s12d" OC_DONE_REPO="$T/repo2"); [ "$out" = "done_check=ko raison=a:time" ] \
+  && ok 12d "Max PASS antérieur à un commit de code postérieur : refusé (a:time)" || ko "12d [$out]"
+out=$(call2 "$T/s12d"); [ "$out" = "done_check=ok" ] && ok 12d2 "même stockage, dépôt sans commit postérieur : ok (le refus vient bien du commit)" || ko "12d2 [$out]"
 
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

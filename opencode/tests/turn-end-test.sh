@@ -113,7 +113,7 @@ if grep -qF '127) stop=tour; why="fin de tour sans PASS (à reprendre)"' "$WF" \
    && grep -qF 'tour) why="fin de tour sans PASS (${DONE_REASON:-a:none})"' "$WF" \
    && grep -qF 'ok_why="fin de tour sans PASS (${DONE_REASON:-a:none})"' "$WF" \
    && grep -qF 'ok) why="$ok_why"' "$WF" \
-   && grep -qF '::error::run en échec : Max PASS non vérifié' "$WF"; then
+   && grep -qF '::error::run en échec : PASS requis non vérifié' "$WF"; then
   echo "ok 6 workflow : 127 -> tour, « terminé » conditionné au PASS, barrière intacte"
 else
   echo "FAIL 6 contrat du workflow"; grep -n 'stop=tour\|ok_why\|Statut final' "$WF" | head; fail=1

@@ -136,11 +136,11 @@ dc() { env OC_STORE_DIR="$1" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$T/R.md" OC_DONE_R
 echo rapport >"$T/R.md"
 
 PASS_MAIN=1 mkstore3 "$T/s3a"; mklog Max Silas
-out=$(dc "$T/s3a" Max); [ "$out" = "done_check=ko raison=a:none" ] \
+out=$(dc "$T/s3a" Max); [ "$out" = "done_check=ko raison=a:none:Max" ] \
   && ok "3.a « Max PASS » écrit par l'agent principal (aucune tâche Max) : refusé" || ko "3.a [$out]"
 # fichier checkpoint falsifié à la main : ignoré par le validateur
 mkdir -p "$V/.fullrun"; printf '{"verdicts":[{"agent":"Max","verdict":"pass","commit":"%s"}],"steps":{}}\n' "$(git -C "$V" rev-parse HEAD)" >"$V/.fullrun/J3_checkpoint.json"
-out=$(dc "$T/s3a" Max); [ "$out" = "done_check=ko raison=a:none" ] \
+out=$(dc "$T/s3a" Max); [ "$out" = "done_check=ko raison=a:none:Max" ] \
   && ok "3.b verdict écrit à la main dans le checkpoint : sans effet sur le contrôle final" || ko "3.b [$out]"
 rm -f "$V/.fullrun/J3_checkpoint.json"
 bash "$CP" verdict --job J3 --agent Max --repo "$V" >/dev/null 2>&1; rc=$?
@@ -150,7 +150,7 @@ OC_STORE_DIR="$T/s3a" OC_HOOKS_LOG="$HOOKS" bash "$CP" verdict --job J3 --agent 
   && ok "3.c checkpoint.sh verdict refuse un PASS sans vraie réponse de l'agent (rc 3, rien écrit)" || ko "3.c rc=$rc"
 
 mkstore3 "$T/s3b" Max; mklog Max
-out=$(dc "$T/s3b" "Max,Silas"); [ "$out" = "done_check=ko raison=a:none" ] \
+out=$(dc "$T/s3b" "Max,Silas"); [ "$out" = "done_check=ko raison=a:none:Silas" ] \
   && ok "3.d Silas sans vraie réponse : le contrôle final échoue (verdict manquant ≠ PASS)" || ko "3.d [$out]"
 mkstore3 "$T/s3c" Max Silas; mklog Max   # tâche Silas réelle mais ligne plugin absente
 out=$(dc "$T/s3c" "Max,Silas"); [ "$out" = "done_check=ko raison=b:hooks" ] \

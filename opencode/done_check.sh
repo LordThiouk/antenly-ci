@@ -13,7 +13,7 @@
 #      (un `on-agent-stop` lancé à la main en bash ne compte pas : il n'écrit pas cette ligne) ;
 #   c. OC_DONE_VERIFY (fichier ou liste `;`) : toutes les commandes rendent 0 ;
 #   d. arbre propre (hors .fullrun/logs), REPORT.md présent, ISA pas en `phase: complete`.
-# Sortie : une seule ligne `done_check=ok` ou `done_check=ko raison=<a|b|c|d>:<détail>`. Jamais de
+# Sortie : une seule ligne `done_check=ok` ou `done_check=ko raison=<a|b|c|d>:<détail>` (a:none:<Agent> = aucune tâche terminée pour cet agent de OC_DONE_AGENTS). Jamais de
 # texte du modèle, jamais de secret.
 set +x
 set -uo pipefail
@@ -241,7 +241,8 @@ def check(max_agent):
 for agent in agents:
     why = check(agent)
     if why:
-        print('KO:%s' % why)
+        # « none » seul laissait croire qu'il manquait Max : on nomme le premier agent de done_agents sans PASS réel.
+        print('KO:%s' % ('none:%s' % agent if why == 'none' else why))
         sys.exit(0)
 print('OK')
 PY
