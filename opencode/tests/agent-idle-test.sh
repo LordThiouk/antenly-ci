@@ -96,4 +96,23 @@ else ko "plancher : ${g}s $(st)"; fi
 run silent Forge OC_IDLE_MIN=20 OC_IDLE_SEC=12 OC_SUBAGENT_IDLE_SEC=3 OC_AGENT_IDLE_SEC="Forge=9"; g=$(gap)
 if [ "$g" -ge 2 ] && [ "$g" -le 7 ] && ! grep -q 'agent_idle_extended' "$T/log.status"; then
   ok "OC_SUBAGENT_IDLE_SEC explicite : le watchdog court reste en place (${g}s)"; else ko "plafond : ${g}s $(st)"; fi
+
+# 6. La garde du workflow (opencode-fullrun.yml) a la même plage que le wrapper : 1..720 min, sans doublon.
+WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+awk '/# agent_idle_minutes \(facultatif\)/{f=1} /# start_step \(facultatif\)/{f=0} f' "$WF" >"$T/guard.sh"
+[ -s "$T/guard.sh" ] && ok "bloc de garde agent_idle_minutes extrait du workflow" || ko "bloc de garde introuvable"
+guard() { ( fail() { echo "refus: $*"; exit 1; }; IN_AGENT_IDLE_MIN="$1"; . "$T/guard.sh" ) >/dev/null 2>&1; }
+for good in "" "Forge=40" "Forge=1" "Forge=720" "Forge=40,Max=30" "Forge=040"; do
+  guard "$good" && ok "garde workflow : « $good » accepté" || ko "garde workflow : « $good » refusé à tort"
+done
+for bad in "Forge=721" "Forge=999" "Forge=0" "Forge=000" "Forge=40,Forge=50" "Forge=abc" "Forge" "=5" "Forge=1000"; do
+  guard "$bad" && ko "garde workflow : « $bad » accepté à tort" || ok "garde workflow : « $bad » refusé"
+done
+
+# 7. Timeout fournisseur opencode (par requête complète) : 40 min, comme le délai de Forge ; l'ancien 5 min coupait
+#    les audits Forge/Max avec « The operation timed out ».
+python3 - "$HERE/../config/opencode.json" <<'PY' && ok "opencode.json : provider.opencode.options.timeout = 2400000 (40 min)" || ko "opencode.json : timeout fournisseur != 2400000"
+import json, sys
+sys.exit(0 if json.load(open(sys.argv[1]))['provider']['opencode']['options']['timeout'] == 2400000 else 1)
+PY
 exit $fail

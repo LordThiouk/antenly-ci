@@ -191,8 +191,32 @@ mkstore "$T/s11n" "opencode/v4-flash-free" 42 $'Exemple : {"verdict":"pass"}\nMa
 out=$(call "$T/s11n"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11n "faux JSON PASS dans le corps puis vrai JSON final FAIL : le final compte" || ko "11n [$out]"
 mkstore "$T/s11o" "opencode/v4-flash-free" 42 $'Format attendu {"verdict":"fail"} — voir doc.\nVERDICT: PASS' "$ENDP"
 out=$(call "$T/s11o"); [ "$out" = "done_check=ok" ] && ok 11o "JSON cité en milieu de corps : pas une conclusion, la ligne VERDICT décide" || ko "11o [$out]"
-mkstore "$T/s11p" "opencode/v4-flash-free" 42 $'Revue FAIL puis corrig\u00e9e\n{"status":"pass"}' "$ENDP"
-out=$(call "$T/s11p"); [ "$out" = "done_check=ok" ] && ok 11p "JSON final {status: pass} accepté (clé historique)" || ko "11p [$out]"
+# 11p. Le JSON final ne compte QUE s'il n'y a aucune ligne VERDICT: ; priorité verdict > status > result
+mkstore "$T/s11p" "opencode/v4-flash-free" 42 $'Revue FAIL puis corrigée\n{"status":"pass"}' "$ENDP"
+out=$(call "$T/s11p"); [ "$out" = "done_check=ok" ] && ok 11p "sans ligne VERDICT : JSON final {status: pass} accepté (clé historique)" || ko "11p [$out]"
+mkstore "$T/s11p2" "opencode/v4-flash-free" 42 $'✅ VERDICT: pass — ok' "$ENDP"
+out=$(call "$T/s11p2"); [ "$out" = "done_check=ok" ] && ok 11p2 "« ✅ VERDICT: pass — ok » : pass" || ko "11p2 [$out]"
+mkstore "$T/s11p3" "opencode/v4-flash-free" 42 $'VERDICT: FAIL\n{"status":"pass"}' "$ENDP"
+out=$(call "$T/s11p3"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11p3 "VERDICT: FAIL + JSON final {status: pass} : fail, le JSON ne l'emporte jamais" || ko "11p3 [$out]"
+mkstore "$T/s11p4" "opencode/v4-flash-free" 42 $'VERDICT: PASS\nExemple de sortie attendue : {"status":"fail"}' "$ENDP"
+out=$(call "$T/s11p4"); [ "$out" = "done_check=ok" ] && ok 11p4 "VERDICT: PASS + exemple JSON {status: fail} cité en dernier : pass" || ko "11p4 [$out]"
+mkstore "$T/s11p5" "opencode/v4-flash-free" 42 $'Exemple : {"status":"fail"}\nVERDICT: PASS' "$ENDP"
+out=$(call "$T/s11p5"); [ "$out" = "done_check=ok" ] && ok 11p5 "exemple JSON {status: fail} en milieu de corps + VERDICT: PASS : pass" || ko "11p5 [$out]"
+mkstore "$T/s11p6" "opencode/v4-flash-free" 42 $'VERDICT: pass | concerns | fail' "$ENDP"
+out=$(call "$T/s11p6"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 11p6 "ligne modèle « VERDICT: pass | concerns | fail » : inconclusif" || ko "11p6 [$out]"
+mkstore "$T/s11p7" "opencode/v4-flash-free" 42 $'✅ VERDICT: concerns — deux réserves\n{"verdict":"pass"}' "$ENDP"
+out=$(call "$T/s11p7"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 11p7 "VERDICT: concerns + JSON pass : inconclusif (le JSON ne remplace pas une ligne VERDICT)" || ko "11p7 [$out]"
+mkstore "$T/s11p8" "opencode/v4-flash-free" 42 $'VERDICT: PASS\nrelu : voir ci-dessous\nVERDICT: concerns' "$ENDP"
+out=$(call "$T/s11p8"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 11p8 "la DERNIÈRE ligne VERDICT: décide, même non lisible (PASS puis concerns)" || ko "11p8 [$out]"
+n=0
+for k in 'ok:{"verdict":"pass","status":"fail"}' 'ko:{"verdict":"fail","status":"pass"}' 'ok:{"status":"pass","result":"fail"}' 'ko:{"result":"fail"}' 'ko:{"verdict":"maybe","status":"pass"}'; do
+  n=$((n + 1)); exp=${k%%:*}; txt=${k#*:}
+  mkstore "$T/s11q$n" "opencode/v4-flash-free" 42 "Revue.
+$txt" "$ENDP"
+  out=$(call "$T/s11q$n"); if [ "$exp" = ok ]; then want="done_check=ok"; else want_re="^done_check=ko raison=a:(verdict|inconclusif)$"; fi
+  if [ "$exp" = ok ]; then [ "$out" = "$want" ] && ok "11q$n" "priorité JSON verdict > status > result : $txt → pass" || ko "11q$n [$out]"
+  else [[ "$out" =~ $want_re ]] && ok "11q$n" "priorité JSON verdict > status > result : $txt → non pass" || ko "11q$n [$out]"; fi
+done
 mkstore "$T/s11q" "opencode/v4-flash-free" 42 $'{"verdict":"pass","note":"le bloc {fail} est cit\u00e9"}' "$ENDP"
 out=$(call "$T/s11q"); [ "$out" = "done_check=ok" ] && ok 11q "accolades dans une chaîne du JSON final" || ko "11q [$out]"
 

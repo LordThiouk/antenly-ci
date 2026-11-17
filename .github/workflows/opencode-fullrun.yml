@@ -156,6 +156,15 @@ jobs:
           if [ -n "$IN_AGENT_IDLE_MIN" ]; then
             [[ "$IN_AGENT_IDLE_MIN" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}=[0-9]{1,3}(,[A-Za-z][A-Za-z0-9_-]{0,39}=[0-9]{1,3}){0,9}$ ]] \
               || fail "agent_idle_minutes invalide (ex. Forge=40,Max=30)"
+            # même plage que le wrapper (1 à 720 min, sans doublon) : refus ici plutôt qu'au lancement
+            declare -A _seen_agent=()
+            IFS=',' read -r -a _agent_entries <<<"$IN_AGENT_IDLE_MIN"
+            for _e in "${_agent_entries[@]}"; do
+              _n="${_e%%=*}"; _v=$((10#${_e#*=}))
+              { [ "$_v" -ge 1 ] && [ "$_v" -le 720 ]; } || fail "agent_idle_minutes : $_n hors plage (1 à 720 min)"
+              [ -z "${_seen_agent[$_n]+x}" ] || fail "agent_idle_minutes : doublon $_n"
+              _seen_agent[$_n]=1
+            done
           fi
           # start_step (facultatif) : une étape connue, jamais deploy. Normalisé en minuscules, transmis à LifeOS
           # par le wrapper (FULLRUN_START_STEP). Vide = rien n'est transmis.

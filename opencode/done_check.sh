@@ -48,14 +48,16 @@ import glob, json, os, re, sqlite3, sys
 store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 agents = [a for a in agents_arg.split(',') if a]
 # Verdict lu UNIQUEMENT dans une conclusion structurée, jamais dans le corps (même règle que lifeos#14) :
-#  1. le bloc JSON FINAL {"verdict"|"status"|"result": ...} : le dernier objet JSON du texte, à condition
-#     qu'il le termine (un JSON cité au milieu du corps n'est jamais une conclusion) ;
-#  2. à défaut, la dernière ligne « VERDICT: PASS|FAIL|BLOCKED » (ligne entière, hors phrase), avec ou sans
-#     emoji/symbole en préfixe (« ✅ VERDICT: pass ») ; « VERDICT: concerns » n'est pas un verdict : inconclusif.
+#  1. la DERNIÈRE ligne « VERDICT: … » est la conclusion. Le préfixe de ligne ne peut contenir que des espaces, de la
+#     ponctuation, des symboles ou des emoji (« ✅ VERDICT: pass — phrase »), jamais une lettre ni un chiffre
+#     (« Le VERDICT: PASS … » est du corps). Valeur lisible : PASS|FAIL|BLOCKED seul (suivi au plus d'un tiret ou
+#     d'une parenthèse puis d'une phrase) ; « pass | concerns | fail » (plusieurs termes) ou « concerns » ne sont
+#     PAS lisibles : inconclusif, et cette dernière ligne ne cède pas la place à un JSON ni à une ligne antérieure ;
+#  2. le JSON final {"verdict"} > {"status"} > {"result"} ne compte que s'il n'y a AUCUNE ligne VERDICT: ; c'est
+#     le dernier objet JSON du texte, à condition qu'il le termine. Un JSON ne contredit donc jamais une ligne VERDICT.
 # Rien de structuré, ou valeur inconnue : INCONCLUSIF — jamais PASS. Aucun motif FAIL/BLOCK sur le corps.
-# Le préfixe de ligne ne peut contenir que des espaces, de la ponctuation, des symboles ou des emoji
-# (« ✅ VERDICT: pass », format imposé à Max) — jamais une lettre ni un chiffre : « Le VERDICT: PASS … » est du corps.
-LINE = re.compile(r'^(?P<pre>.*?)VERDICT[ \t]*[:\uff1a][\W_]*(?P<w>PASS|FAIL|BLOCKED)\b[\W_]*(?:[(\[\u2014\u2013-].*)?$', re.I)
+LINE = re.compile(r'^(?P<pre>.*?)VERDICT[ \t]*[:\uff1a](?P<rest>.*)$', re.I)
+VALUE = re.compile(r'[\W_]*(?P<w>PASS|FAIL|BLOCKED)\b[\W_]*(?:[(\[\u2014\u2013-].*)?$', re.I)
 
 
 def word(raw):
@@ -112,20 +114,27 @@ def final_json(text):
 
 
 def verdict_of(out):
-    """'pass' | 'fail' | None (inconclusif : aucun verdict structuré)."""
+    """'pass' | 'fail' | None (inconclusif : aucun verdict structuré, ou dernière ligne VERDICT illisible)."""
     text = out.strip()
-    obj = final_json(text) if text else None
-    if obj is not None:
-        v = word(obj.get('verdict') if obj.get('verdict') is not None
-                 else obj.get('status') if obj.get('status') is not None else obj.get('result'))
-        if v:
-            return v
-    last = None
+    if not text:
+        return None
+    seen, last = False, None
     for line in text.splitlines():
         m = LINE.match(line)
-        if m and not any(c.isalnum() for c in m.group('pre')):
-            last = word(m.group('w'))
-    return last
+        if not m or any(c.isalnum() for c in m.group('pre')):
+            continue
+        seen = True
+        v = VALUE.match(m.group('rest'))
+        last = word(v.group('w')) if v else None
+    if seen:
+        return last
+    obj = final_json(text)
+    if obj is None:
+        return None
+    for key in ('verdict', 'status', 'result'):
+        if obj.get(key) is not None:
+            return word(obj[key])
+    return None
 
 
 def parse(d):
