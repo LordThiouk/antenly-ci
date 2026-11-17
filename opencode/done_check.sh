@@ -50,10 +50,12 @@ agents = [a for a in agents_arg.split(',') if a]
 # Verdict lu UNIQUEMENT dans une conclusion structurée, jamais dans le corps (même règle que lifeos#14) :
 #  1. le bloc JSON FINAL {"verdict"|"status"|"result": ...} : le dernier objet JSON du texte, à condition
 #     qu'il le termine (un JSON cité au milieu du corps n'est jamais une conclusion) ;
-#  2. à défaut, la dernière ligne « VERDICT: PASS|FAIL|BLOCKED » (ligne entière, hors phrase).
+#  2. à défaut, la dernière ligne « VERDICT: PASS|FAIL|BLOCKED » (ligne entière, hors phrase), avec ou sans
+#     emoji/symbole en préfixe (« ✅ VERDICT: pass ») ; « VERDICT: concerns » n'est pas un verdict : inconclusif.
 # Rien de structuré, ou valeur inconnue : INCONCLUSIF — jamais PASS. Aucun motif FAIL/BLOCK sur le corps.
-LINE = re.compile(r'^[ \t>*_#-]*VERDICT[ \t]*[:\uff1a][ \t*_`]*(PASS|FAIL|BLOCKED)\b[ \t*_`]*(?:[(\[\u2014\u2013-].*)?$',
-                  re.I)
+# Le préfixe de ligne ne peut contenir que des espaces, de la ponctuation, des symboles ou des emoji
+# (« ✅ VERDICT: pass », format imposé à Max) — jamais une lettre ni un chiffre : « Le VERDICT: PASS … » est du corps.
+LINE = re.compile(r'^(?P<pre>.*?)VERDICT[ \t]*[:\uff1a][\W_]*(?P<w>PASS|FAIL|BLOCKED)\b[\W_]*(?:[(\[\u2014\u2013-].*)?$', re.I)
 
 
 def word(raw):
@@ -121,8 +123,8 @@ def verdict_of(out):
     last = None
     for line in text.splitlines():
         m = LINE.match(line)
-        if m:
-            last = word(m.group(1))
+        if m and not any(c.isalnum() for c in m.group('pre')):
+            last = word(m.group('w'))
     return last
 
 

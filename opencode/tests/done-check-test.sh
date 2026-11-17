@@ -164,6 +164,27 @@ for k in "e:PASS sur la forme mais le test FAIL toujours" "f:APPROVE, LGTM, tout
   mkstore "$T/s11$id" "opencode/v4-flash-free" 42 "$txt" "$ENDP"
   out=$(call "$T/s11$id"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok "11$id" "sans verdict structuré = inconclusif, jamais PASS : « ${txt:-vide} »" || ko "11$id [$out]"
 done
+# 11r. Préfixe emoji/symbole (format de Max : « ✅ VERDICT: pass ») : lu ; un préfixe avec une lettre reste du corps
+n=0
+for k in "pass:✅ VERDICT: pass — aucun blocage" "pass:✔️ VERDICT: PASS" "pass:🟢 **VERDICT: pass**" "pass:- ✅ VERDICT: pass" "pass:> 🚀 VERDICT : Pass (tour 2)" \
+         "fail:❌ VERDICT: fail — régression sur F3" "fail:⛔ VERDICT: blocked" "fail:tout semble pass"$'\n'"❌ VERDICT: fail"; do
+  n=$((n + 1)); exp=${k%%:*}; txt=${k#*:}
+  mkstore "$T/s11r$n" "opencode/v4-flash-free" 42 "$txt" "$ENDP"
+  out=$(call "$T/s11r$n")
+  if [ "$exp" = pass ]; then want="done_check=ok"; else want="done_check=ko raison=a:verdict"; fi
+  [ "$out" = "$want" ] && ok "11r$n" "préfixe emoji/symbole : « ${txt%%$'\n'*} » → $exp" || ko "11r$n [$out]"
+done
+mkstore "$T/s11s" "opencode/v4-flash-free" 42 $'✅ VERDICT: fail (tour 1)\ncorrigé\n✅ VERDICT: pass' "$ENDP"
+out=$(call "$T/s11s"); [ "$out" = "done_check=ok" ] && ok 11s "la dernière ligne ✅ VERDICT décide (fail puis pass)" || ko "11s [$out]"
+n=0
+for txt in "Le ✅ VERDICT: pass est attendu" "voir ✅ VERDICT: pass" "1. VERDICT: pass" "✅ VERDICT: concerns — deux réserves" "✅ VERDICT: pass | concerns | fail — avec la phrase qui décide"; do
+  n=$((n + 1)); mkstore "$T/s11t$n" "opencode/v4-flash-free" 42 "$txt" "$ENDP"
+  out=$(call "$T/s11t$n"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok "11t$n" "inconclusif (lettre en préfixe, ou concerns, ou gabarit) : « $txt »" || ko "11t$n [$out]"
+done
+mkstore "$T/s11u" "opencode/v4-flash-free" 42 $'Revue.\n{"verdict":"pass"}' "$ENDP"
+out=$(call "$T/s11u"); [ "$out" = "done_check=ok" ] && ok 11u "JSON final {verdict: pass} accepté" || ko "11u [$out]"
+mkstore "$T/s11v" "opencode/v4-flash-free" 42 $'Revue.\n{"verdict":"fail"}' "$ENDP"
+out=$(call "$T/s11v"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 11v "JSON final {verdict: fail} refusé" || ko "11v [$out]"
 mkstore "$T/s11m" "opencode/v4-flash-free" 42 $'Exemple attendu : {"verdict":"fail"}\nEn r\u00e9alit\u00e9 tout est bon.\n{"verdict":"pass"}' "$ENDP"
 out=$(call "$T/s11m"); [ "$out" = "done_check=ok" ] && ok 11m "faux JSON dans le corps puis vrai JSON final PASS : le final compte" || ko "11m [$out]"
 mkstore "$T/s11n" "opencode/v4-flash-free" 42 $'Exemple : {"verdict":"pass"}\nMais non.\n{"verdict":"fail"}' "$ENDP"
