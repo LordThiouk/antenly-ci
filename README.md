@@ -372,3 +372,32 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 ## Clé de porte : `start_step`
 
 Input facultatif du workflow (vide par défaut). `start_step=verify` (ou `build`, `max`, `close`, `0` à `7` ; jamais `deploy`) demande au run de démarrer à cette étape. C'est une **demande**, pas un forçage : LifeOS (`FullRunCarry.proveStart`) n'ouvre la porte que si chaque étape avant a un verdict signé (HMAC `isa_stamp`) ancré sur le commit actuel ; sinon le run redescend à la première étape non prouvée et la raison est écrite dans le log et dans le mandat de l'agent. Si l'étape demandée échoue, retour au build. La valeur passe par l'environnement d'opencode (`FULLRUN_START_STEP`, posé par `run-fullrun.sh`), que l'agent ne peut pas modifier. Aucune garde n'est affaiblie : Max PASS reste obligatoire à la fin. Nécessite la version de LifeOS qui contient `start_step` (`lifeos_ref`) ; une version plus ancienne ignore simplement la variable.
+
+### Sauvegarde automatique du travail (`opencode/autosave.sh`)
+
+Avant chaque push de wip, le démon (`wippush.sh`, root, hors opencode) appelle `autosave.sh`, qui
+commite localement, en deux groupes : `wip(carry)` (le `fullrun-carry.json` de l'ISA et le
+`.fullrun/<job>_checkpoint.json`, de simples indices de reprise) puis `wip(autosave)` (l'arbre de
+code non commité). Un runner qui tombe ne perd plus le report ISA ni le travail, et la reprise
+repart de la branche poussée.
+
+Garde-fous (tous couverts par `opencode/tests/autosave-test.sh`, avec un vrai gitleaks) :
+
+- jamais `git add -A` : seuls des chemins nommés un à un, déjà filtrés, sont ajoutés ; le commit ne
+  prend que ces chemins (`git commit -- chemins`), l'index de l'agent n'est pas touché ;
+- liste d'exclusion `opencode/autosave-deny.txt` (copie figée dans `/opt/fullrun-tools`) : clés et
+  identifiants, `eval_corpus.py`, `fp_offline`/`fp_engine`, tables SDK, audio radio, `evidence/`…,
+  plus liens symboliques, binaires et fichiers de plus de 5 Mo. Un fichier refusé reste dans l'arbre,
+  intact et non suivi ; liste absente = rien commité ;
+- gitleaks (config et ignores du run) scanne le contenu **indexé** avant le commit : un fichier qui
+  fuit est retiré de l'index, le reste est sauvé ; contrôle impossible = rien commité. Puis le
+  contrôle de plage et celui de la clé ISA de `wippush.sh` s'appliquent comme à tout commit du run ;
+- aucun passage si l'agent tient l'index (`index.lock`), si une fusion ou un rebase est en cours, ou
+  si la branche courante n'est pas la branche de travail ;
+- le démon root travaille comme propriétaire du dépôt (`setpriv`) : aucun fichier root dans `.git` ;
+- les messages ne contiennent aucun mot de la porte de clôture LifeOS et le commit part hors
+  d'opencode : aucune porte ni hook n'est contourné ou modifié.
+
+`WIP_AUTOSAVE=0` coupe la fonction. Effet à connaître : un commit `wip(autosave)` déplace HEAD ; le
+contrôle de clôture exige des verdicts Forge et Max postérieurs au dernier commit, donc du code sauvé
+après un verdict rend ce verdict périmé (voulu : il portait sur un autre état du code).
