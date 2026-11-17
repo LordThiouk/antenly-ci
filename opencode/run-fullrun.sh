@@ -58,6 +58,15 @@ OC_BIN="${OC_BIN:-opencode}"
 POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
 [[ "$OC_DEADLINE_EPOCH" =~ ^[0-9]{9,11}$ ]] || { echo "OC_DEADLINE_EPOCH invalide" >&2; exit 90; }
 [[ "$OC_IDLE_MIN" =~ ^[0-9]{1,3}$ ]] || { echo "OC_IDLE_MIN invalide" >&2; exit 90; }
+# Clé de porte : start_step demandé (input du workflow), transmis à LifeOS par l'environnement d'opencode,
+# que l'agent ne peut pas modifier. C'est une demande : LifeOS ne l'ouvre que si les étapes avant sont
+# prouvées. Valeur inconnue (ou deploy) = refus ici ; vide = rien n'est exporté, comportement habituel.
+unset FULLRUN_START_STEP
+if [ -n "${OC_START_STEP:-}" ]; then
+  [[ "$OC_START_STEP" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
+    || { echo "OC_START_STEP invalide" >&2; exit 90; }
+  export FULLRUN_START_STEP="$OC_START_STEP"
+fi
 [[ "$POLL" =~ ^[0-9]{1,3}$ && "$POLL" -ge 1 ]] || POLL=30
 [[ "$GRACE" =~ ^[0-9]{1,3}$ ]] || GRACE=60
 # OC_STALL_RESUMES : nombre de reprises après un arrêt (défaut min(chaîne, 6)).
