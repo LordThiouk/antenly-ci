@@ -1260,10 +1260,10 @@ jobs:
           echo "opencode : ${OC_OUTCOME:-non lancé} ; arrêt : $why ; erreurs agent : $errs"
           echo "- Statut final opencode : **$why**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Erreurs agent : $errs" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Validateur de fin (Max PASS) : ${DONE:-non exécuté}${DONE_REASON:+ ($DONE_REASON)}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Validateur de fin (PASS des agents done_agents) : ${DONE:-non exécuté}${DONE_REASON:+ ($DONE_REASON)}" >> "$GITHUB_STEP_SUMMARY"
           # Barrière : un run annoncé terminé sans PASS de Max vérifié n'est pas un succès.
           if [ "${OC_STOP:-}" = ok ] && [ "${DONE:-}" != ok ]; then
-            echo "::error::run en échec : Max PASS non vérifié (${DONE_REASON:-done_check})"
+            echo "::error::run en échec : PASS requis non vérifié (${DONE_REASON:-done_check})"
             exit 1
           fi
           [ "$OC_OUTCOME" = success ] || { echo "::error::run en échec : $why"; exit 1; }
@@ -1329,7 +1329,7 @@ jobs:
           fi
           if [ "${DONE:-}" != ok ] && [ "$status" = fini ]; then
             status="échec"
-            why="terminé, mais Max PASS non vérifié${DONE_REASON:+ ($DONE_REASON)}"
+            why="terminé, mais PASS requis non vérifié${DONE_REASON:+ ($DONE_REASON)}"
           fi
           [ "$JOB_STATUS" = success ] || [ "$status" != fini ] || { status="échec"; why="terminé, mais contrôles ou push en échec"; }
           now=$(date +%s); t0="$OC_JOB_T0"
