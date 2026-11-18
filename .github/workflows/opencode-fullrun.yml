@@ -481,18 +481,24 @@ jobs:
           # jamais un [ "$a" = "$b" ] bash qui court-circuite au premier octet différent) et la clé
           # jamais en argument de commande (jamais dans /proc/<pid>/cmdline) : ISA_STAMP_KEY n'est lue
           # que depuis l'environnement du process python3 (os.environb), jamais passée sur sa ligne
-          # de commande.
-          ok=0
-          if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ] \
-             && python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); want=hmac.new(key,data,hashlib.sha256).hexdigest(); got=open(sys.argv[2]).read().strip(); sys.exit(0 if hmac.compare_digest(want,got) else 1)" "$D/state.tar" "$D/state.sig"; then
-            ok=1
-          fi
-          if [ "$ok" = 1 ] && tar -tf "$D/state.tar" >/dev/null 2>&1; then
-            mkdir -p "$HOME/.claude/LIFEOS/MEMORY/STATE"
-            tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -xf "$D/state.tar"
-            echo "État FullRun restauré depuis le run $PREV_RUN_ID"
+          # de commande. Clé absente/vide signalée à part (message explicite, jamais la valeur de la
+          # clé) — distinct du cas générique « signature invalide » pour que le diagnostic ne soit
+          # jamais confondu avec un artefact réellement falsifié.
+          if [ -z "${ISA_STAMP_KEY:-}" ]; then
+            echo "::warning::ISA_STAMP_KEY absente ou vide : vérification HMAC impossible, reprise sans état (jamais une signature acceptée sans clé pour la vérifier)"
           else
-            echo "::warning::artefact d'état manquant, signature invalide ou archive illisible : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
+            ok=0
+            if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ] \
+               && python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); want=hmac.new(key,data,hashlib.sha256).hexdigest(); got=open(sys.argv[2]).read().strip(); sys.exit(0 if hmac.compare_digest(want,got) else 1)" "$D/state.tar" "$D/state.sig"; then
+              ok=1
+            fi
+            if [ "$ok" = 1 ] && tar -tf "$D/state.tar" >/dev/null 2>&1; then
+              mkdir -p "$HOME/.claude/LIFEOS/MEMORY/STATE"
+              tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -xf "$D/state.tar"
+              echo "État FullRun restauré depuis le run $PREV_RUN_ID"
+            else
+              echo "::warning::artefact d'état manquant, signature invalide ou archive illisible : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
+            fi
           fi
           # Usage unique, acceptée ou non : jamais repris par un autre lien ou un run concurrent.
           art_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREV_RUN_ID/artifacts" --jq ".artifacts[] | select(.name==\"$name\") | .id" 2>/dev/null | head -1) || true
@@ -843,9 +849,12 @@ jobs:
       - name: opencode run (sortie jamais affichée, suivi filtré toutes les 10 min)
         id: oc
         continue-on-error: true
-        # Filet seulement : run-fullrun.sh arrête opencode avant (plafond du job - marge de push).
-        # Chaîné : 35 min (job à 45) ; sinon 340 (job à 350) — comportement inchangé si non chaîné.
-        timeout-minutes: ${{ inputs.chain_enabled == 'true' && 35 || 340 }}
+        # Filet seulement : run-fullrun.sh arrête opencode avant (plafond RÉEL de CE step - marge de
+        # push). Chaîné : 35 min (job à 45, préambule ~10 min) ; sinon 340 (job à 350, préambule ~10
+        # min). Valeur définie UNE SEULE FOIS ici (ancre YAML &oc_step_timeout_min) et reprise par
+        # OC_STEP_TIMEOUT_MIN plus bas (alias *oc_step_timeout_min) : les deux ne peuvent plus
+        # diverger, qu'on édite l'un ou l'autre.
+        timeout-minutes: &oc_step_timeout_min ${{ inputs.chain_enabled == 'true' && 35 || 340 }}
         env:
           OC_JOB: ${{ inputs.job_name }}
           OC_BRANCH: ${{ inputs.branch }}
@@ -856,9 +865,15 @@ jobs:
           OC_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
           OC_DONE_AGENTS: ${{ inputs.done_agents }}
           OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
-          # Doit rester égal à timeout-minutes du job (45 chaîné, 350 sinon) ; marge de push : 5 min
-          # chaîné (job court, push rapide), 15 sinon — comportement inchangé si non chaîné.
-          OC_JOB_TIMEOUT_MIN: ${{ inputs.chain_enabled == 'true' && '45' || '350' }}
+          # Alias de l'ancre posée sur le timeout-minutes de CE step, ligne ci-dessus : BUG CORRIGÉ
+          # (revue du 18/11) — l'ancien calcul lisait le timeout-minutes du JOB (45 chaîné / 350
+          # sinon), pas celui du STEP (35 chaîné / 340 sinon). En mode chaîné (job 45, step 35), ça
+          # plaçait le plafond interne vers 38 min, soit APRÈS le kill GitHub à 35 min : le step était
+          # tué avant que run-fullrun.sh arrête opencode et pousse, d'où le diagnostic « arrêt
+          # opencode inconnu ». Lire l'alias élimine la divergence : toute édition du timeout du step
+          # se répercute ici automatiquement, dans les deux modes.
+          OC_STEP_TIMEOUT_MIN: *oc_step_timeout_min
+          # Marge de push : 5 min chaîné (job court, push rapide), 15 sinon — comportement inchangé.
           OC_PUSH_MARGIN_MIN: ${{ inputs.chain_enabled == 'true' && '5' || '15' }}
           OC_POLL_SEC: "30"
           OC_KILL_GRACE: "60"
@@ -873,12 +888,14 @@ jobs:
           unset OC_IDLE_SEC OC_AGENT_IDLE_SEC  # réservés aux tests locaux
           # Entrée vide = défaut du wrapper (Forge=40) : une variable vide signifierait « aucune entrée ».
           if [ -n "${OC_AGENT_IDLE_MIN:-}" ]; then export OC_AGENT_IDLE_MIN; else unset OC_AGENT_IDLE_MIN; fi
-          # OC_JOB_TIMEOUT_MIN est le timeout-minutes de CE step (job-relative, imposé par GitHub depuis
-          # le début du STEP), jamais depuis le début du JOB (OC_JOB_T0) : les préambules (checkout,
-          # install, etc.) avant ce step rendent les deux horloges incompatibles — un plafond calculé
-          # depuis t0-job peut tomber bien avant ou bien après le vrai kill GitHub du step, selon la
-          # durée du préambule. OC_START (horloge propre à ce step, l.788) est la seule base correcte.
-          OC_DEADLINE_EPOCH=$(( OC_START + (OC_JOB_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
+          # OC_STEP_TIMEOUT_MIN est le timeout-minutes de CE step (imposé par GitHub depuis le début
+          # du STEP), jamais celui du JOB (OC_JOB_T0, step guard) et jamais une valeur redéfinie à la
+          # main ailleurs (alias YAML — une seule source, ligne du step ci-dessus). Compté depuis
+          # OC_START (horloge propre à ce step, pas depuis le début du job) : les préambules
+          # (checkout, install, etc.) avant ce step rendent job-relatif et step-relatif incompatibles
+          # — un plafond calculé depuis t0-job peut tomber bien avant ou bien après le vrai kill
+          # GitHub du step, selon la durée du préambule.
+          OC_DEADLINE_EPOCH=$(( OC_START + (OC_STEP_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
           export OC_DEADLINE_EPOCH
           /opt/fullrun-tools/progress.sh start || true
           /opt/fullrun-tools/progress.sh loop & mon=$!
@@ -1409,6 +1426,14 @@ jobs:
             echo "has_state=false" >> "$GITHUB_OUTPUT"
             echo "Rien à reporter (dossier d'état vide ou absent)"
             exit 0
+          fi
+          # Clé absente/vide : échec explicite plutôt qu'une signature calculée avec une clé vide
+          # (silencieusement acceptée par n'importe qui sans la vraie clé) — message clair, jamais
+          # la valeur de la clé. Le step échoue (exit 1) ; la gate du step chain (SAVE_STATE_OUTCOME)
+          # bloque alors le dispatch du lien suivant.
+          if [ -z "${ISA_STAMP_KEY:-}" ]; then
+            echo "::error::ISA_STAMP_KEY absente ou vide : signature HMAC impossible, état non publié (jamais un artefact signé avec une clé vide)" >&2
+            exit 1
           fi
           D="$RUNNER_TEMP/fullrun-state-save"
           mkdir -p "$D"
