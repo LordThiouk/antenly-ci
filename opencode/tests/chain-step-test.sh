@@ -15,6 +15,12 @@ ok() { echo "OK   $*"; }; ko() { echo "FAIL $*"; fail=1; }
 
 # --- extraction du script du step « chain » depuis le YAML (jamais une copie figée dans ce test :
 # toujours le script réellement publié) ------------------------------------------------------------
+# Le script est repris TEL QUEL, sans aucune substitution : son `export PATH` durci est donc
+# réellement exercé. C'est voulu — la version précédente de ce test remplaçait la ligne PATH par
+# `$FAKES_DIR:$PATH`, ce qui rendait bun trouvable et faisait passer le test alors que la CI cassait
+# (bun installé par setup-bun dans ~/.bun/bin, hors du PATH durci). Les outils de rechange (bun, gh)
+# sont donc posés dans `$HOME/.bun/bin` du HOME jetable du test — exactement l'emplacement réel — et
+# les cas ci-dessous échouent si le script cesse d'y chercher bun.
 python3 - "$WF" "$T/chain.sh" <<'PY'
 import sys, yaml
 wf, out = sys.argv[1], sys.argv[2]
@@ -22,17 +28,9 @@ y = yaml.safe_load(open(wf))
 steps = y["jobs"]["fullrun"]["steps"]
 step = next(s for s in steps if s.get("id") == "chain")
 assert step["name"].startswith("Décision de chaînage"), "step 'chain' renommé : adapter ce test"
-script = step["run"]
-# Le step fixe PATH=/usr/local/bin:/usr/bin:/bin (durcissement contre un PATH empoisonné par le step
-# oc) : ce test le neutralise pour faire passer ses propres bun/gh/jq de rechange en premier, sans
-# jamais toucher à /usr/local/bin réel. C'est une adaptation du harnais de test, pas du script publié
-# (vérifiée juste après par assert).
-needle = "export PATH=/usr/local/bin:/usr/bin:/bin\n"
-assert needle in script, "le step ne fixe plus PATH ainsi : adapter ce test (et vérifier si c'est voulu)"
-script = script.replace(needle, 'export PATH="$FAKES_DIR:$PATH"\n', 1)
 # défaults.run.shell du workflow = "bash --noprofile --norc -euo pipefail {0}" : répliqué ici,
 # jamais une variante plus permissive qui masquerait un bug qui ne se voit que sous -e/-u/pipefail.
-open(out, "w").write("#!/usr/bin/env bash\nset -euo pipefail\n" + script)
+open(out, "w").write("#!/usr/bin/env bash\nset -euo pipefail\n" + step["run"])
 PY
 chmod +x "$T/chain.sh"
 
@@ -54,19 +52,16 @@ assert i_save < i_pub, "save_state doit précéder publish_state"
 print("OK   ordre : save_state puis publish_state, tous deux avant chain")
 PY
 
-# --- bun/gh/jq de rechange, pilotés par des fichiers dans $T -----------------------------------
-mkdir -p "$T/fakes"
-cat >"$T/fakes/jq" <<'S'
-#!/usr/bin/env bash
-exec /usr/bin/jq "$@"
-S
-cat >"$T/fakes/bun" <<S
+# --- bun/gh de rechange, pilotés par des fichiers dans $T — posés dans $HOME/.bun/bin du HOME
+# jetable (l'emplacement réel de setup-bun), pour que le PATH durci du script les trouve ------------
+mkdir -p "$T/home/.bun/bin"
+cat >"$T/home/.bun/bin/bun" <<S
 #!/usr/bin/env bash
 echo "\$DISPATCH_TOKEN" > "$T/bun_saw_dispatch_token"  # vide si -u DISPATCH_TOKEN a fonctionné
 echo called >> "$T/bun_called"
 cat "$T/bun_output.json"
 S
-cat >"$T/fakes/gh" <<S
+cat >"$T/home/.bun/bin/gh" <<S
 #!/usr/bin/env bash
 if [ "\$1" = workflow ] && [ "\$2" = run ]; then
   echo "\$@" > "$T/gh_dispatch_args"
@@ -75,8 +70,8 @@ if [ "\$1" = workflow ] && [ "\$2" = run ]; then
 fi
 exit 0
 S
-chmod +x "$T/fakes"/*
-export FAKES_DIR="$T/fakes"
+chmod +x "$T/home/.bun/bin"/*
+export FAKES_DIR="$T/home/.bun/bin"
 
 run_chain() { # variables d'environnement passées en arguments ; bun_output.json doit déjà exister
   rm -f "$T/out" "$T/summary" "$T/bun_called" "$T/bun_saw_dispatch_token" "$T/gh_dispatch_args"
@@ -86,7 +81,7 @@ run_chain() { # variables d'environnement passées en arguments ; bun_output.jso
   # propre condition, jamais un échec) — les tests B1/M1/hors-un/M3 ci-dessus ne touchent pas à ces
   # variables et doivent continuer de dispatcher normalement ; seuls les tests dédiés ci-dessous les
   # surchargent pour vérifier la nouvelle gate (ordre des steps : save_state/publish_state avant chain).
-  env -i PATH="$PATH" FAKES_DIR="$FAKES_DIR" GITHUB_OUTPUT="$T/out" GITHUB_STEP_SUMMARY="$T/summary" \
+  env -i PATH="$PATH" HOME="$T/home" FAKES_DIR="$FAKES_DIR" GITHUB_OUTPUT="$T/out" GITHUB_STEP_SUMMARY="$T/summary" \
     GITHUB_REF_NAME=fullrun-job-chain GITHUB_WORKSPACE="$T" \
     ANTENLY_DIR="$T/antenly" LIFEOS_DIR="$T/lifeos" \
     IN_BRANCH=feat-x IN_JOB=job1 IN_PROMPT=prompts:p.md IN_PROMPT_BUILD=prompts:b.md \
@@ -94,7 +89,8 @@ run_chain() { # variables d'environnement passées en arguments ; bun_output.jso
     OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free OC_MODEL_FALLBACK=opencode/f-free \
     OC_MODEL_CHAIN=opencode/f-free IN_AGENT_IDLE_MIN= IN_IDLE_MIN=20 IN_DONE_AGENTS=Max \
     IN_WIP_PUSH_MIN=30 IN_HF_CORPUS= OC_ISA_PATH="MEMORY/WORK/x/ISA.md" \
-    IN_CHAIN_PHASE=build IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 RUN_ID=111000 \
+    IN_CHAIN_PHASE=build IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 IN_PREV_RUN_ID= RUN_ID=111000 \
+    RESTORE_STATE_OUTCOME= RESTORE_STATE_STATUS= \
     DISPATCH_TOKEN=secrettoken123 \
     SAVE_STATE_OUTCOME=success HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped \
     "$@" bash "$T/chain.sh"
@@ -168,6 +164,35 @@ run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success \
   SAVE_STATE_OUTCOME=success HAS_STATE=true PUBLISH_STATE_OUTCOME=success
 out_eq continue true && ok "save_state + publish_state réussis (has_state=true) ⇒ dispatch normal" \
   || ko "succès à tort bloqué : $(cat "$T/out")"
+
+# --- restauration de l'état du lien précédent : un artefact REFUSÉ (signature invalide, clé
+# absente, archive illisible) arrête la chaîne — jamais un cold start silencieux qui pourrait refaire
+# ou sauter une tâche ------------------------------------------------------------------------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_PREV_RUN_ID=4242 \
+  RESTORE_STATE_OUTCOME=success RESTORE_STATE_STATUS=refused
+out_eq block true && ok "restore_state refusé ⇒ block=true" || ko "restore refusé : $(cat "$T/out")"
+[ ! -f "$T/gh_dispatch_args" ] && ok "restore_state refusé ⇒ zéro dispatch" \
+  || ko "restore refusé : dispatch quand même envoyé : $(cat "$T/gh_dispatch_args")"
+
+# --- restauration ABSENTE (aucun artefact pour ce run : cas normal des premiers liens, qui n'ont
+# aucun état runtime à transmettre) : tolérée, le dispatch continue ---------------------------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_PREV_RUN_ID=4242 \
+  RESTORE_STATE_OUTCOME=success RESTORE_STATE_STATUS=missing
+out_eq continue true && ok "restore_state missing (premier lien sans état) ⇒ dispatch normal" \
+  || ko "restore missing à tort bloqué : $(cat "$T/out")"
+
+# --- restore_state planté (outcome ≠ success) alors que prev_run_id est fourni ⇒ block -------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_PREV_RUN_ID=4242 \
+  RESTORE_STATE_OUTCOME=failure RESTORE_STATE_STATUS=
+out_eq block true && ok "restore_state en échec (prev_run_id fourni) ⇒ block=true" \
+  || ko "restore en échec : $(cat "$T/out")"
+
+# --- sans prev_run_id, le step restore_state est « skipped » par sa propre condition : aucune gate
+# de restauration ne doit s'appliquer (premier lien d'une chaîne) -----------------------------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_PREV_RUN_ID= \
+  RESTORE_STATE_OUTCOME=skipped RESTORE_STATE_STATUS=
+out_eq continue true && ok "sans prev_run_id ⇒ restore_state ignoré, dispatch normal" \
+  || ko "premier lien à tort bloqué : $(cat "$T/out")"
 
 # --- M3 : next (phase build, reste en build) transmis au dispatch, prev_run_id = ce run ------------
 run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 RUN_ID=999777

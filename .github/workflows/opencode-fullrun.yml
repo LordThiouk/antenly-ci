@@ -143,9 +143,15 @@ jobs:
     # garde au bot d'Actions, qui déclencherait n'importe quel run automatisé avec les vrais secrets.
     if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
     runs-on: ubuntu-latest
-    # Chaîné : 45 min par lien (un job court = une étape, une tâche, ou un agent de verify, chacun
-    # avec une session opencode neuve). Non chaîné : 350 min, comportement inchangé.
-    timeout-minutes: ${{ inputs.chain_enabled == 'true' && 45 || 350 }}
+    # Chaîné : 55 min par lien (un job court = une étape, une tâche, ou un agent de verify, chacun
+    # avec une session opencode neuve). Le step opencode est plafonné à 35 min, dont 5 de marge de
+    # push (plafond interne ≈28,3 min) : les ~20 min restantes couvrent le préambule (deux checkouts
+    # fetch-depth 0, setup-bun/node/uv, npm -g opencode, reconstitution de ~/.claude), le push,
+    # save_state/publish_state et le dispatch du lien suivant. À 45 min il ne restait que ~10 min :
+    # un préambule un peu lent et le job était tué AVANT save_state/chain, ce qui reproduisait
+    # exactement le diagnostic « arrêt opencode inconnu » que cette PR corrige.
+    # Non chaîné : 350 min, comportement inchangé.
+    timeout-minutes: ${{ inputs.chain_enabled == 'true' && 55 || 350 }}
     env:
       IN_BRANCH: ${{ inputs.branch }}
       IN_PROMPT: ${{ inputs.prompt_path }}
@@ -470,11 +476,20 @@ jobs:
           PREV_RUN_ID: ${{ inputs.prev_run_id }}
         run: |
           set +x
+          # Verdict du step, consommé par la gate du step chain : restored (état transporté),
+          # missing (aucun artefact — cas normal des premiers liens, sans état runtime à transmettre)
+          # ou refused (artefact présent mais NON fiable : clé absente, signature invalide, archive
+          # illisible). Un refus arrête la chaîne : repartir en cold start ferait refaire ou sauter
+          # une tâche, sans trace lisible dans le résumé.
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+          sum() { printf '%s\n' "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
           D="$RUNNER_TEMP/fullrun-state-restore"
           mkdir -p "$D"
           name="fullrun-state-${IN_JOB}"
           if ! gh run download "$PREV_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$name" --dir "$D" >/tmp/dl.log 2>&1; then
+            out status missing
             echo "::warning::artefact d'état introuvable pour le run précédent ($PREV_RUN_ID) : reprise sans état (cold start — build_plan/build_tasks/dispatches du lien précédent non transmis)"
+            sum "- État FullRun : artefact introuvable pour le run $PREV_RUN_ID (cold start assumé)"
             exit 0
           fi
           # Signature HMAC vérifiée AVANT toute extraction, en temps constant (hmac.compare_digest,
@@ -485,7 +500,9 @@ jobs:
           # clé) — distinct du cas générique « signature invalide » pour que le diagnostic ne soit
           # jamais confondu avec un artefact réellement falsifié.
           if [ -z "${ISA_STAMP_KEY:-}" ]; then
+            out status refused
             echo "::warning::ISA_STAMP_KEY absente ou vide : vérification HMAC impossible, reprise sans état (jamais une signature acceptée sans clé pour la vérifier)"
+            sum "- État FullRun : **non restauré** — ISA_STAMP_KEY absente, artefact non vérifiable (chaîne arrêtée)"
           else
             ok=0
             if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ] \
@@ -495,9 +512,13 @@ jobs:
             if [ "$ok" = 1 ] && tar -tf "$D/state.tar" >/dev/null 2>&1; then
               mkdir -p "$HOME/.claude/LIFEOS/MEMORY/STATE"
               tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -xf "$D/state.tar"
+              out status restored
               echo "État FullRun restauré depuis le run $PREV_RUN_ID"
+              sum "- État FullRun : restauré depuis le run $PREV_RUN_ID"
             else
+              out status refused
               echo "::warning::artefact d'état manquant, signature invalide ou archive illisible : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
+              sum "- État FullRun : **non restauré** — artefact présent mais refusé (signature invalide, clé différente ou archive illisible) : chaîne arrêtée plutôt qu'un cold start silencieux"
             fi
           fi
           # Usage unique, acceptée ou non : jamais repris par un autre lien ou un run concurrent.
@@ -850,10 +871,10 @@ jobs:
         id: oc
         continue-on-error: true
         # Filet seulement : run-fullrun.sh arrête opencode avant (plafond RÉEL de CE step - marge de
-        # push). Chaîné : 35 min (job à 45, préambule ~10 min) ; sinon 340 (job à 350, préambule ~10
-        # min). Valeur définie UNE SEULE FOIS ici (ancre YAML &oc_step_timeout_min) et reprise par
-        # OC_STEP_TIMEOUT_MIN plus bas (alias *oc_step_timeout_min) : les deux ne peuvent plus
-        # diverger, qu'on édite l'un ou l'autre.
+        # push). Chaîné : 35 min (job à 55 : préambule + push + état + dispatch) ; sinon 340 (job à
+        # 350, préambule ~10 min). Valeur définie UNE SEULE FOIS ici (ancre YAML
+        # &oc_step_timeout_min) et reprise par OC_STEP_TIMEOUT_MIN plus bas (alias
+        # *oc_step_timeout_min) : les deux ne peuvent plus diverger, qu'on édite l'un ou l'autre.
         timeout-minutes: &oc_step_timeout_min ${{ inputs.chain_enabled == 'true' && 35 || 340 }}
         env:
           OC_JOB: ${{ inputs.job_name }}
@@ -866,8 +887,8 @@ jobs:
           OC_DONE_AGENTS: ${{ inputs.done_agents }}
           OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
           # Alias de l'ancre posée sur le timeout-minutes de CE step, ligne ci-dessus : BUG CORRIGÉ
-          # (revue du 18/11) — l'ancien calcul lisait le timeout-minutes du JOB (45 chaîné / 350
-          # sinon), pas celui du STEP (35 chaîné / 340 sinon). En mode chaîné (job 45, step 35), ça
+          # (revue du 18/11) — l'ancien calcul lisait le timeout-minutes du JOB, pas celui du STEP
+          # (35 chaîné / 340 sinon). En mode chaîné (job alors à 45, step 35), ça
           # plaçait le plafond interne vers 38 min, soit APRÈS le kill GitHub à 35 min : le step était
           # tué avant que run-fullrun.sh arrête opencode et pousse, d'où le diagnostic « arrêt
           # opencode inconnu ». Lire l'alias élimine la divergence : toute édition du timeout du step
@@ -980,7 +1001,11 @@ jobs:
         run: |
           set +x
           # PATH fixe : $GITHUB_PATH (écrit par opencode) ne doit pas remplacer git, grep, curl…
-          export PATH=/usr/local/bin:/usr/bin:/bin
+          # mais il DOIT garder le dossier de bun : setup-bun l'installe dans ~/.bun/bin, et le
+          # validateur de fin ci-dessous relance `bun … IsaFrontier/CheckCompleteness/ISATool` pour
+          # la critère c (sans lui, ces commandes rendent 127 et done=ko c:verify n'est qu'un faux
+          # négatif permanent, quelle que soit la qualité du run).
+          export PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
           # Filet : un opencode encore vivant (step interrompu) ne doit plus écrire pendant les contrôles.
           pkill -KILL -f '(^|[ /])opencode run ' 2>/dev/null || true
           cd "$ANTENLY_DIR"
@@ -1476,6 +1501,11 @@ jobs:
           SAVE_STATE_OUTCOME: ${{ steps.save_state.outcome }}
           HAS_STATE: ${{ steps.save_state.outputs.has_state }}
           PUBLISH_STATE_OUTCOME: ${{ steps.publish_state.outcome }}
+          # Verdict de la restauration de l'état du lien précédent (step restore_state) : un artefact
+          # refusé (signature invalide, clé absente, archive illisible) ne doit pas se contenter d'un
+          # warning puis d'un cold start silencieux — le lien suivant pourrait refaire ou sauter une tâche.
+          RESTORE_STATE_OUTCOME: ${{ steps.restore_state.outcome }}
+          RESTORE_STATE_STATUS: ${{ steps.restore_state.outputs.status }}
           IN_BASE: ${{ inputs.base_branch }}
           RUN_ID: ${{ github.run_id }}
           ANTENLY_DIR: ${{ github.workspace }}/antenly
@@ -1487,8 +1517,9 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: "1"
           # Re-pinnés depuis les inputs (jamais depuis l'env du job, que l'étape oc — l'agent IA —
-          # peut avoir réécrit via $GITHUB_ENV) : une valeur ainsi empoisonnée pourrait rediriger ce
-          # dispatch vers une autre branche/ISA/prompt/modèle avec le vrai jeton ANTENLY_CI_DISPATCH_TOKEN.
+          # peut avoir réécrit via $GITHUB_ENV/$GITHUB_PATH) : une valeur ainsi empoisonnée pourrait
+          # rediriger ce dispatch vers une autre branche/ISA/prompt/modèle/job avec le vrai jeton
+          # ANTENLY_CI_DISPATCH_TOKEN. Toute variable utilisée par le dispatch ci-dessous vient d'ici.
           IN_CHAIN_ENABLED: ${{ inputs.chain_enabled }}
           IN_CHAIN_PHASE: ${{ inputs.chain_phase }}
           IN_CHAIN_COUNT: ${{ inputs.chain_count }}
@@ -1499,16 +1530,35 @@ jobs:
           IN_PROMPT_VERIFY: ${{ inputs.prompt_path_verify }}
           IN_PROMPT_CLOSE: ${{ inputs.prompt_path_close }}
           IN_BRANCH: ${{ inputs.branch }}
+          IN_JOB: ${{ inputs.job_name }}
+          IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
+          IN_HF_CORPUS: ${{ inputs.hf_corpus }}
+          IN_IDLE_MIN: ${{ inputs.idle_minutes }}
+          IN_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
+          IN_DONE_AGENTS: ${{ inputs.done_agents }}
+          IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
+          IN_PREV_RUN_ID: ${{ inputs.prev_run_id }}
           OC_MODEL_MAIN: ${{ inputs.model_main }}
           OC_MODEL_MAX: ${{ inputs.model_max }}
           OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
           OC_MODEL_CHAIN: ${{ inputs.model_chain != '' && inputs.model_chain || inputs.model_fallback }}
         run: |
           set +x
-          export PATH=/usr/local/bin:/usr/bin:/bin
+          # PATH minimal — jamais le PATH hérité, que le step oc (l'IA) a pu empoisonner via
+          # $GITHUB_ENV/$GITHUB_PATH — mais il DOIT contenir le dossier de bun : oven-sh/setup-bun
+          # (plus haut dans ce job) installe bun dans ~/.bun/bin, jamais dans /usr/local/bin.
+          # Sans lui, le `bun … FullRunPipeline.ts unit` plus bas échoue en vraie CI, la sortie est
+          # non-JSON, et toute chaîne s'arrête au premier lien sur un diagnostic « sortie illisible »
+          # qui masque la vraie cause (bun: command not found).
+          export PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
           stop_chain() { out block true; out continue false; out reason "$1"; echo "::error::chaînage arrêté : $1"; exit 0; }
           finish_chain() { out block false; out continue false; out reason "$1"; echo "chaîne terminée : $1"; exit 0; }
+
+          # bun est requis juste en dessous (lecture de l'état du lien) : diagnostic explicite plutôt
+          # qu'un « unit --isa illisible » qui masquerait un PATH durci sans le dossier de bun.
+          command -v bun >/dev/null 2>&1 \
+            || stop_chain "bun introuvable après durcissement du PATH (attendu dans $HOME/.bun/bin) : état du lien illisible"
 
           # B1 : la gate anti-secret (check) et le push protègent l'intégrité de la branche/de l'historique
           # — un échec de l'un ou l'autre ne doit JAMAIS être masqué par un redispatch qui, en plus,
@@ -1530,6 +1580,23 @@ jobs:
           fi
           if [ "${HAS_STATE:-}" = true ] && [ "${PUBLISH_STATE_OUTCOME:-}" != success ]; then
             stop_chain "publication de l'artefact d'état en échec (publish_state) : lien suivant non dispatché sans preuve que l'état a été transporté"
+          fi
+
+          # Restauration de l'état du lien précédent (step restore_state, seulement quand prev_run_id
+          # est fourni). Un artefact REFUSÉ (signature invalide, clé ISA_STAMP_KEY absente, archive
+          # illisible) n'est pas un simple mode dégradé : le lien repartirait en cold start et pourrait
+          # refaire ou sauter une tâche, invisible dans le résumé. Un artefact simplement ABSENT
+          # (status=missing) reste toléré : c'est le cas normal des premiers liens, qui n'ont aucun
+          # état runtime à transmettre (save_state a alors écrit has_state=false et publish_state a
+          # été « skipped »). Un step planté (outcome ≠ success) bloque aussi.
+          if [ -n "${IN_PREV_RUN_ID:-}" ]; then
+            [ "${RESTORE_STATE_OUTCOME:-}" = success ] \
+              || stop_chain "restauration de l'état du lien précédent en échec (restore_state) : lien suivant non dispatché"
+            case "${RESTORE_STATE_STATUS:-}" in
+              refused) stop_chain "état du lien précédent refusé (signature/clé/archive) : cold start silencieux refusé, une tâche pourrait être refaite ou sautée" ;;
+              ""|missing|restored) : ;;
+              *) stop_chain "statut de restauration inconnu (${RESTORE_STATE_STATUS}) : lien suivant non dispatché" ;;
+            esac
           fi
 
           # Un lien dont opencode lui-même s'est mal arrêté ne redispatche jamais à l'aveugle.

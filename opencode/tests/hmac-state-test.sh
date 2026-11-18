@@ -73,10 +73,14 @@ run_save() { # variables d'environnement passées en arguments ; $T/home prépar
 }
 
 run_restore() { # variables d'environnement passées en arguments ; $T/fake_artifact rempli au besoin
-  rm -rf "$T/home" "$T/restore_log" "$T/gh_delete_called"
+  rm -rf "$T/home" "$T/restore_log" "$T/gh_delete_called" "$T/restore_out" "$T/restore_summary"
   mkdir -p "$T/home"
+  : >"$T/restore_out"; : >"$T/restore_summary"
+  # GITHUB_OUTPUT/STEP_SUMMARY réels : restore_state publie désormais un verdict
+  # (status=restored|missing|refused) consommé par la gate du step chain.
   env -i PATH="$T/fakes:/usr/bin:/bin" HOME="$T/home" RUNNER_TEMP="$T/runnertmp-restore" \
     GITHUB_REPOSITORY="LordThiouk/antenly-ci" IN_JOB=job1 \
+    GITHUB_OUTPUT="$T/restore_out" GITHUB_STEP_SUMMARY="$T/restore_summary" \
     "$@" bash "$T/restore.sh" >"$T/restore_log" 2>&1
   echo $?
 }
@@ -105,6 +109,8 @@ state_restored && ok "restore_state : signature correcte ⇒ état restauré (ro
   || ko "état non restauré malgré une signature correcte : $(cat "$T/restore_log")"
 grep -q "État FullRun restauré" "$T/restore_log" && ok "restore_state : message de restauration présent" \
   || ko "message de restauration absent : $(cat "$T/restore_log")"
+grep -qx "status=restored" "$T/restore_out" && ok "restore_state : status=restored publié (gate du step chain)" \
+  || ko "status=restored absent : $(cat "$T/restore_out")"
 [ -s "$T/gh_delete_called" ] && ok "restore_state : artefact supprimé après usage (à usage unique)" \
   || ko "suppression de l'artefact non appelée"
 ! grep -q "$REAL_KEY" "$T/restore_log" && ok "restore_state : la clé n'apparaît jamais dans la sortie du step" \
@@ -120,6 +126,8 @@ state_restored && ko "archive modifiée : état restauré quand même !" \
   || ok "restore_state : archive modifiée après signature ⇒ aucune extraction"
 grep -q "signature invalide ou archive illisible" "$T/restore_log" && ok "restore_state : message « signature invalide » (générique, pas « clé absente »)" \
   || ko "message attendu absent : $(cat "$T/restore_log")"
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : archive modifiée ⇒ status=refused (la chaîne s'arrête)" \
+  || ko "status=refused absent : $(cat "$T/restore_out")"
 cp "$T/fake_artifact/state.tar.orig" "$T/fake_artifact/state.tar"
 
 # --- D. restore_state, signature fausse (hex aléatoire, même archive) : rejetée, aucune extraction -
@@ -129,6 +137,8 @@ state_restored && ko "signature fausse : état restauré quand même !" \
   || ok "restore_state : signature fausse ⇒ aucune extraction"
 grep -q "signature invalide ou archive illisible" "$T/restore_log" && ok "restore_state : signature fausse ⇒ même message générique" \
   || ko "message attendu absent : $(cat "$T/restore_log")"
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : signature fausse ⇒ status=refused" \
+  || ko "status=refused absent : $(cat "$T/restore_out")"
 # resigne correctement pour les cas suivants
 cp "$dir/state.sig" "$T/fake_artifact/state.sig"
 
@@ -143,6 +153,18 @@ grep -q "ISA_STAMP_KEY absente ou vide" "$T/restore_log" && ok "restore_state : 
   || ko "message explicite absent : $(cat "$T/restore_log")"
 ! grep -q "signature invalide ou archive illisible" "$T/restore_log" && ok "restore_state : clé absente ⇒ jamais confondu avec le message « signature invalide »" \
   || ko "clé absente a déclenché le message générique au lieu du message dédié"
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : clé absente ⇒ status=refused" \
+  || ko "status=refused absent : $(cat "$T/restore_out")"
+
+# --- H. restore_state, artefact introuvable (aucun état publié par le lien précédent — cas normal
+# des premiers liens) : status=missing, exit 0, jamais confondu avec un refus ----------------------
+touch "$T/download_fail"
+rc=$(run_restore GH_TOKEN=x ISA_STAMP_KEY="$REAL_KEY" PREV_RUN_ID=999)
+rm -f "$T/download_fail"
+[ "$rc" = 0 ] && ok "restore_state : artefact introuvable ⇒ exit 0 (cold start assumé)" \
+  || ko "restore_state exit=$rc : $(cat "$T/restore_log")"
+grep -qx "status=missing" "$T/restore_out" && ok "restore_state : artefact introuvable ⇒ status=missing (toléré par la gate)" \
+  || ko "status=missing absent : $(cat "$T/restore_out")"
 
 # --- F. save_state, ISA_STAMP_KEY absente : échec explicite (exit 1), jamais de signature produite,
 # jamais la clé affichée (vide ici, donc rien à masquer, mais le message ne doit rien contenir de
