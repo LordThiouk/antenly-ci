@@ -151,7 +151,10 @@ jobs:
     # un préambule un peu lent et le job était tué AVANT save_state/chain, ce qui reproduisait
     # exactement le diagnostic « arrêt opencode inconnu » que cette PR corrige.
     # Non chaîné : 350 min, comportement inchangé.
-    timeout-minutes: ${{ inputs.chain_enabled == 'true' && 55 || 350 }}
+    # Ancre &fullrun_job_timeout_min : la valeur est reprise par l'alias *fullrun_job_timeout_min
+    # dans l'env du step oc (OC_JOB_TIMEOUT_MIN), pour que le plafond interne d'opencode tienne
+    # aussi compte de l'horloge du JOB — jamais deux copies qui divergent (revue 2, point 3).
+    timeout-minutes: &fullrun_job_timeout_min ${{ inputs.chain_enabled == 'true' && 55 || 350 }}
     env:
       IN_BRANCH: ${{ inputs.branch }}
       IN_PROMPT: ${{ inputs.prompt_path }}
@@ -464,9 +467,10 @@ jobs:
       # est recréé VIDE à chaque lien chaîné (job = runner neuf, rsync ne copie que lifeos/). Sans
       # cette étape, build/verify perdent toute trace de la tâche ou de l'agent déjà traité par un
       # lien précédent — jamais le dépôt git, jamais un fichier .fullrun, jamais un secret : un
-      # artefact GitHub Actions du run précédent, HMAC-signé (clé ISA_STAMP_KEY déjà sur disque,
-      # étape précédente) et à usage unique (supprimé juste après, acceptée ou non — jamais repris
-      # par un autre lien ou un run concurrent).
+      # artefact GitHub Actions du run précédent, CHIFFRÉ AES-256-CBC (PBKDF2, clé dérivée de
+      # ISA_STAMP_KEY) puis signé HMAC (clé ISA_STAMP_KEY déjà sur disque, étape précédente) et à
+      # usage unique (supprimé juste après, acceptée ou non — jamais repris par un autre lien ou un
+      # run concurrent). Jamais de tar en clair publié (dépôt public — revue 2, point 2).
       - name: Restaurer l'état FullRun (chaînage, artefact signé à usage unique)
         id: restore_state
         if: always() && inputs.chain_enabled == 'true' && inputs.prev_run_id != ''
@@ -479,8 +483,8 @@ jobs:
           # Verdict du step, consommé par la gate du step chain : restored (état transporté),
           # missing (aucun artefact — cas normal des premiers liens, sans état runtime à transmettre)
           # ou refused (artefact présent mais NON fiable : clé absente, signature invalide, archive
-          # illisible). Un refus arrête la chaîne : repartir en cold start ferait refaire ou sauter
-          # une tâche, sans trace lisible dans le résumé.
+          # ou déchiffrement illisible). Un refus arrête la chaîne : repartir en cold start ferait
+          # refaire ou sauter une tâche, sans trace lisible dans le résumé.
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
           sum() { printf '%s\n' "$1" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
           D="$RUNNER_TEMP/fullrun-state-restore"
@@ -492,22 +496,41 @@ jobs:
             sum "- État FullRun : artefact introuvable pour le run $PREV_RUN_ID (cold start assumé)"
             exit 0
           fi
-          # Signature HMAC vérifiée AVANT toute extraction, en temps constant (hmac.compare_digest,
-          # jamais un [ "$a" = "$b" ] bash qui court-circuite au premier octet différent) et la clé
-          # jamais en argument de commande (jamais dans /proc/<pid>/cmdline) : ISA_STAMP_KEY n'est lue
-          # que depuis l'environnement du process python3 (os.environb), jamais passée sur sa ligne
-          # de commande. Clé absente/vide signalée à part (message explicite, jamais la valeur de la
-          # clé) — distinct du cas générique « signature invalide » pour que le diagnostic ne soit
-          # jamais confondu avec un artefact réellement falsifié.
+          # Signature HMAC vérifiée AVANT tout déchiffrement et toute extraction, en temps constant
+          # (hmac.compare_digest, jamais un [ "$a" = "$b" ] bash qui court-circuite au premier octet
+          # différent) et la clé jamais en argument de commande (jamais dans /proc/<pid>/cmdline) :
+          # ISA_STAMP_KEY n'est lue que depuis l'environnement du process python3 (os.environb),
+          # jamais passée sur sa ligne de commande. L'artefact reçu est un tar CHIFFRÉ AES-256-CBC
+          # (clé dérivée de ISA_STAMP_KEY, cf. save_state) : la signature porte sur le chiffré, le
+          # clair n'existe qu'après vérification. Clé absente/vide signalée à part (message explicite,
+          # jamais la valeur de la clé) — distinct du cas générique « signature invalide » pour que le
+          # diagnostic ne soit jamais confondu avec un artefact réellement falsifié.
           if [ -z "${ISA_STAMP_KEY:-}" ]; then
             out status refused
             echo "::warning::ISA_STAMP_KEY absente ou vide : vérification HMAC impossible, reprise sans état (jamais une signature acceptée sans clé pour la vérifier)"
             sum "- État FullRun : **non restauré** — ISA_STAMP_KEY absente, artefact non vérifiable (chaîne arrêtée)"
           else
             ok=0
-            if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ] \
-               && python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); want=hmac.new(key,data,hashlib.sha256).hexdigest(); got=open(sys.argv[2]).read().strip(); sys.exit(0 if hmac.compare_digest(want,got) else 1)" "$D/state.tar" "$D/state.sig"; then
+            if [ -s "$D/state.tar.enc" ] && [ -s "$D/state.sig" ] \
+               && python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); want=hmac.new(key,data,hashlib.sha256).hexdigest(); got=open(sys.argv[2]).read().strip(); sys.exit(0 if hmac.compare_digest(want,got) else 1)" "$D/state.tar.enc" "$D/state.sig"; then
               ok=1
+            fi
+            # Déchiffrement SEULEMENT après une signature valide (jamais du ciphertext non
+            # authentifié, jamais de clé en argv). Même dérivation que save_state, libellé de
+            # séparation de domaine identique. Un déchiffrement en échec (ciphertext corrompu mais
+            # re-signé avec la vraie clé, mauvaise clé, troncature) est un refus : jamais d'extraction.
+            if [ "$ok" = 1 ]; then
+              STATE_ENC_KEY=$(python3 -c "import hmac,hashlib,os; print(hmac.new(os.environb[b'ISA_STAMP_KEY'], b'fullrun-state-aes256-v1', hashlib.sha256).hexdigest())") || STATE_ENC_KEY=""
+              if [ -n "$STATE_ENC_KEY" ]; then
+                export STATE_ENC_KEY
+                if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$D/state.tar.enc" -out "$D/state.tar" -pass env:STATE_ENC_KEY 2>/dev/null; then
+                  rm -f "$D/state.tar"
+                  ok=0
+                fi
+                unset STATE_ENC_KEY
+              else
+                ok=0
+              fi
             fi
             if [ "$ok" = 1 ] && tar -tf "$D/state.tar" >/dev/null 2>&1; then
               mkdir -p "$HOME/.claude/LIFEOS/MEMORY/STATE"
@@ -517,8 +540,8 @@ jobs:
               sum "- État FullRun : restauré depuis le run $PREV_RUN_ID"
             else
               out status refused
-              echo "::warning::artefact d'état manquant, signature invalide ou archive illisible : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
-              sum "- État FullRun : **non restauré** — artefact présent mais refusé (signature invalide, clé différente ou archive illisible) : chaîne arrêtée plutôt qu'un cold start silencieux"
+              echo "::warning::artefact d'état manquant, signature invalide ou archive illisible, ou déchiffrement en échec : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
+              sum "- État FullRun : **non restauré** — artefact présent mais refusé (signature invalide, clé différente, déchiffrement ou archive illisible) : chaîne arrêtée plutôt qu'un cold start silencieux"
             fi
           fi
           # Usage unique, acceptée ou non : jamais repris par un autre lien ou un run concurrent.
@@ -894,6 +917,9 @@ jobs:
           # opencode inconnu ». Lire l'alias élimine la divergence : toute édition du timeout du step
           # se répercute ici automatiquement, dans les deux modes.
           OC_STEP_TIMEOUT_MIN: *oc_step_timeout_min
+          # Alias de l'ancre posée sur le timeout-minutes du JOB (job fullrun) : l'horloge du job
+          # borne aussi le push — voir le calcul d'OC_DEADLINE_EPOCH plus bas (revue 2, point 3).
+          OC_JOB_TIMEOUT_MIN: *fullrun_job_timeout_min
           # Marge de push : 5 min chaîné (job court, push rapide), 15 sinon — comportement inchangé.
           OC_PUSH_MARGIN_MIN: ${{ inputs.chain_enabled == 'true' && '5' || '15' }}
           OC_POLL_SEC: "30"
@@ -911,12 +937,24 @@ jobs:
           if [ -n "${OC_AGENT_IDLE_MIN:-}" ]; then export OC_AGENT_IDLE_MIN; else unset OC_AGENT_IDLE_MIN; fi
           # OC_STEP_TIMEOUT_MIN est le timeout-minutes de CE step (imposé par GitHub depuis le début
           # du STEP), jamais celui du JOB (OC_JOB_T0, step guard) et jamais une valeur redéfinie à la
-          # main ailleurs (alias YAML — une seule source, ligne du step ci-dessus). Compté depuis
-          # OC_START (horloge propre à ce step, pas depuis le début du job) : les préambules
-          # (checkout, install, etc.) avant ce step rendent job-relatif et step-relatif incompatibles
-          # — un plafond calculé depuis t0-job peut tomber bien avant ou bien après le vrai kill
-          # GitHub du step, selon la durée du préambule.
-          OC_DEADLINE_EPOCH=$(( OC_START + (OC_STEP_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
+          # main ailleurs (alias YAML — une seule source, ligne du step ci-dessus). Le plafond interne
+          # est le MIN de DEUX horloges (revue 2, point 3) :
+          #   - step  : compté depuis OC_START (début de ce step), le seul qui borne le kill GitHub
+          #             du step dans le mode chaîné (35 min) ;
+          #   - job   : compté depuis OC_JOB_T0 (step guard), qui borne le kill GitHub du JOB. En mode
+          #             non chaîné, le préambule avant ce step peut s'allonger sans que le step, lui,
+          #             voie sa propre fenêtre rétrécir : sans cette seconde horloge, un préambule
+          #             long pousserait la marge de push sous OC_PUSH_MARGIN_MIN avant le kill du job.
+          # Le min rend la marge structurelle : le plafond retenu est toujours au plus tôt le
+          # job_deadline, donc il reste au moins OC_PUSH_MARGIN_MIN avant le kill du job, quelle que
+          # soit la durée du préambule. Les deux horloges sont validées avant usage (OC_JOB_T0 absent
+          # ou mal formé ⇒ repli sur l'horloge du step, jamais un calcul sur une valeur non numérique).
+          step_deadline=$(( OC_START + (OC_STEP_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
+          job_deadline=$step_deadline
+          if [[ "${OC_JOB_T0:-}" =~ ^[0-9]{9,11}$ && "${OC_JOB_TIMEOUT_MIN:-}" =~ ^[0-9]{1,3}$ ]]; then
+            job_deadline=$(( OC_JOB_T0 + (OC_JOB_TIMEOUT_MIN - OC_PUSH_MARGIN_MIN) * 60 - OC_KILL_GRACE - OC_POLL_SEC - 10 ))
+          fi
+          if [ "$job_deadline" -lt "$step_deadline" ]; then OC_DEADLINE_EPOCH=$job_deadline; else OC_DEADLINE_EPOCH=$step_deadline; fi
           export OC_DEADLINE_EPOCH
           /opt/fullrun-tools/progress.sh start || true
           /opt/fullrun-tools/progress.sh loop & mon=$!
@@ -1429,8 +1467,9 @@ jobs:
       # est recréé VIDE à chaque lien chaîné (job = runner neuf, rsync ne copie que lifeos/). Sans
       # cette étape, build/verify perdent toute trace de la tâche ou de l'agent déjà traité par un
       # lien précédent — jamais le dépôt git, jamais un fichier .fullrun, jamais un secret : un
-      # artefact GitHub Actions de CE run, signé HMAC et à usage unique (supprimé par l'étape de
-      # restauration dès qu'il est lu par le lien suivant, acceptée ou non).
+      # artefact GitHub Actions de CE run, CHIFFRÉ AES-256-CBC (PBKDF2, clé dérivée de
+      # ISA_STAMP_KEY) puis signé HMAC, et à usage unique (supprimé par l'étape de restauration dès
+      # qu'il est lu par le lien suivant, acceptée ou non).
       #
       # Placée AVANT « Décision de chaînage » (pas après) : l'état écrit ici provient entièrement
       # de ce que les steps précédents (notamment « opencode run ») ont déjà produit dans ce dossier
@@ -1463,13 +1502,24 @@ jobs:
           D="$RUNNER_TEMP/fullrun-state-save"
           mkdir -p "$D"
           tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -cf "$D/state.tar" fullrun
+          # Chiffrement AVANT publication (dépôt public — revue 2, point 2) : le HMAC garantit
+          # l'authenticité, pas la confidentialité. Clé de chiffrement DÉRIVÉE du secret HMAC par
+          # séparation de domaine (libellé fixe, sha256) : ISA_STAMP_KEY reste le seul secret, deux
+          # usages n'en partagent jamais la même clé effective. Jamais en argv ni dans un log : la
+          # clé ne circule que par l'environnement du process (os.environb / -pass env:).
+          STATE_ENC_KEY=$(python3 -c "import hmac,hashlib,os; print(hmac.new(os.environb[b'ISA_STAMP_KEY'], b'fullrun-state-aes256-v1', hashlib.sha256).hexdigest())")
+          export STATE_ENC_KEY
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -in "$D/state.tar" -out "$D/state.tar.enc" -pass env:STATE_ENC_KEY
+          unset STATE_ENC_KEY
+          rm -f "$D/state.tar"
           # Clé jamais en argument de commande (jamais dans /proc/<pid>/cmdline) : ISA_STAMP_KEY n'est
           # lue que depuis l'environnement du process python3 (os.environb), jamais passée sur sa
-          # ligne de commande. Même fonction de signature que la vérification côté restore_state.
-          python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); print(hmac.new(key,data,hashlib.sha256).hexdigest())" "$D/state.tar" > "$D/state.sig"
+          # ligne de commande. Même fonction de signature que la vérification côté restore_state,
+          # et calculée sur le CHIFFRÉ (jamais sur le tar en clair, qui n'existe plus).
+          python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); print(hmac.new(key,data,hashlib.sha256).hexdigest())" "$D/state.tar.enc" > "$D/state.sig"
           echo "has_state=true" >> "$GITHUB_OUTPUT"
           echo "dir=$D" >> "$GITHUB_OUTPUT"
-          echo "État FullRun sauvegardé ($(du -h "$D/state.tar" | cut -f1))"
+          echo "État FullRun sauvegardé ($(du -h "$D/state.tar.enc" | cut -f1))"
 
       - name: Publier l'artefact d'état (usage unique, rétention 1 jour)
         id: publish_state
@@ -1478,7 +1528,7 @@ jobs:
         with:
           name: fullrun-state-${{ inputs.job_name }}
           path: |
-            ${{ steps.save_state.outputs.dir }}/state.tar
+            ${{ steps.save_state.outputs.dir }}/state.tar.enc
             ${{ steps.save_state.outputs.dir }}/state.sig
           retention-days: 1
           if-no-files-found: error
@@ -1555,6 +1605,24 @@ jobs:
           stop_chain() { out block true; out continue false; out reason "$1"; echo "::error::chaînage arrêté : $1"; exit 0; }
           finish_chain() { out block false; out continue false; out reason "$1"; echo "chaîne terminée : $1"; exit 0; }
 
+          # Nettoie la sortie brute avant de la journaliser : masque les motifs de jeton connus,
+          # replie les sauts de ligne (une ligne « ::… » injectée deviendrait une workflow command),
+          # échappe « :: » et tronque à 400 caractères. Jamais la sortie complète de unit --isa
+          # dans un log public (dépôt public — revue 2, point 1).
+          safe_raw() {
+            local s
+            s=$(printf '%s' "$1" | sed -E \
+              -e 's/(gh[pousr]_[A-Za-z0-9]{16,})/[REDACTED]/g' \
+              -e 's/(github_pat_[A-Za-z0-9_]{16,})/[REDACTED]/g' \
+              -e 's/(glpat-[A-Za-z0-9_-]{16,})/[REDACTED]/g' \
+              -e 's/(sk-[A-Za-z0-9_-]{16,})/[REDACTED]/g' \
+              -e 's/(xox[baprs]-[A-Za-z0-9-]{10,})/[REDACTED]/g' \
+              -e 's/((Bearer|token|secret|password)[[:space:]]*[=:][[:space:]]*)[^[:space:]]{8,}/\1[REDACTED]/Ig' \
+              -e 's/[A-Za-z0-9_+\/=-]{40,}/[REDACTED]/g' \
+              | tr '\r\n' '  ' | sed -e 's/::/:\:/g')
+            printf '%s' "${s:0:400}"
+          }
+
           # bun est requis juste en dessous (lecture de l'état du lien) : diagnostic explicite plutôt
           # qu'un « unit --isa illisible » qui masquerait un PATH durci sans le dossier de bun.
           command -v bun >/dev/null 2>&1 \
@@ -1626,7 +1694,7 @@ jobs:
           nxt=$(printf '%s' "$raw" | jq -r '.next // ""' 2>/dev/null) || nxt=""
           echo "unit --isa : kind=${kind:-<vide>} reason=${reason:-<aucune>} next=${nxt:-<aucun>}" >> "$GITHUB_STEP_SUMMARY" || true
           if [ -z "$kind" ]; then
-            echo "::error::unit --isa sortie illisible (phase $IN_CHAIN_PHASE, $gran) : $raw" >&2
+            echo "::error::unit --isa sortie illisible (phase $IN_CHAIN_PHASE, $gran) : $(safe_raw "$raw")" >&2
             stop_chain "unit --isa illisible (phase $IN_CHAIN_PHASE, $gran)"
           fi
 

@@ -75,7 +75,7 @@ export FAKES_DIR="$T/home/.bun/bin"
 
 run_chain() { # variables d'environnement passées en arguments ; bun_output.json doit déjà exister
   rm -f "$T/out" "$T/summary" "$T/bun_called" "$T/bun_saw_dispatch_token" "$T/gh_dispatch_args"
-  : >"$T/out"; : >"$T/summary"
+  : >"$T/out"; : >"$T/summary"; : >"$T/err"
   # SAVE_STATE_OUTCOME/HAS_STATE/PUBLISH_STATE_OUTCOME : défauts "cas normal, rien à sauvegarder"
   # (save_state réussi mais dossier d'état vide ⇒ has_state=false ⇒ publish_state "skipped" par sa
   # propre condition, jamais un échec) — les tests B1/M1/hors-un/M3 ci-dessus ne touchent pas à ces
@@ -93,7 +93,7 @@ run_chain() { # variables d'environnement passées en arguments ; bun_output.jso
     RESTORE_STATE_OUTCOME= RESTORE_STATE_STATUS= \
     DISPATCH_TOKEN=secrettoken123 \
     SAVE_STATE_OUTCOME=success HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped \
-    "$@" bash "$T/chain.sh"
+    "$@" bash "$T/chain.sh" 2>"$T/err"
 }
 
 out_eq() { grep -qx "$1=$2" "$T/out" 2>/dev/null; }
@@ -224,6 +224,44 @@ printf '%s\n' 'pas du json' > "$T/bun_output.json"
 run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success
 out_eq block true && ok "unit --isa illisible : bloqué" || ko "illisible : $(cat "$T/out")"
 grep -q "kind=" "$T/summary" 2>/dev/null && ok "unit --isa illisible : kind/reason journalisés dans le résumé" || ko "résumé sans trace : $(cat "$T/summary")"
+
+# --- unit --isa illisible : la sortie BRUTE n'est JAMAIS recrachée en entier dans un log public
+# (dépôt public — revue 2, point 1). Le jeton est GÉNÉRÉ à l'exécution, jamais une valeur fixe ici.
+# Doit vérifier : jetons masqués, sauts de ligne repliés (une ligne « ::… » injectée deviendrait une
+# workflow command), « :: » échappé et troncature à exactement 400 caractères.
+tok=$(printf 'ghp_%s' "$(head -c 256 /dev/urandom | base64 -w0 | tr -dc 'A-Za-z0-9' | head -c 36)")
+{
+  printf '%s\n' "$tok"
+  # Run de 600 alphanumériques : avalé par la règle « 40+ caractères de jeton » du masquage.
+  head -c 600 /dev/zero | tr '\0' 'A'
+  printf '\n::warning::injecte\n'
+  # Remplissage SANS run de 40+ caractères de la classe [A-Za-z0-9_+/=-] (les points cassent les
+  # runs) : une fois le reste masqué, il reste bien plus de 400 caractères — la troncature est donc
+  # réellement exercée, sinon la dernière assertion ne prouverait rien.
+  python3 -c "import sys; sys.stdout.write('ab.ab' * 150)"
+} > "$T/bun_output.json"
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success
+out_eq block true && ok "safe_raw : unit --isa illisible ⇒ bloqué" || ko "safe_raw : $(cat "$T/out")"
+grep -qF "::error::unit --isa sortie illisible" "$T/err" \
+  && ok "safe_raw : message d'erreur présent sur stderr" || ko "safe_raw : message absent : $(cat "$T/err")"
+! grep -qF "$tok" "$T/err" \
+  && ok "safe_raw : le jeton généré n'apparaît jamais dans le log" || ko "safe_raw : fuite du jeton dans stderr"
+grep -qF "[REDACTED]" "$T/err" \
+  && ok "safe_raw : motifs de jeton masqués ([REDACTED])" || ko "safe_raw : aucun marqueur de masquage : $(cat "$T/err")"
+raw_len=$(python3 - "$T/err" <<'PY'
+import sys
+line = next(l.rstrip("\n") for l in open(sys.argv[1], encoding="utf-8", errors="replace")
+            if "::error::unit --isa sortie illisible" in l)
+print(len(line.split(" : ", 1)[1]))
+PY
+)
+[ "$raw_len" = 400 ] \
+  && ok "safe_raw : partie brute tronquée à exactement 400 caractères" \
+  || ko "safe_raw : troncature attendue à 400 caractères (obtenu « $raw_len »)"
+! grep -q '^::warning::injecte' "$T/err" \
+  && ok "safe_raw : aucune workflow command injectée en début de ligne (newlines repliées)" \
+  || ko "safe_raw : injection « ::warning:: » en début de ligne : $(cat "$T/err")"
+
 
 
 # --- step « guard » : même hors-un (chain_count == chain_max) bloqué dès la garde, avant le step oc,

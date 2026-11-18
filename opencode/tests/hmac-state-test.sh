@@ -3,9 +3,13 @@
 # restore_state) du workflow opencode-fullrun.yml : extrait les deux scripts bash embarqués (via
 # python+yaml, comme chain-step-test.sh et start-step-test.sh) et les exécute avec un vrai tar/HOME
 # isolé et un `gh` de rechange, pour prouver que la signature HMAC protège vraiment l'artefact
-# d'état : une bonne signature passe, une signature fausse ou une archive modifiée après signature
-# est refusée SANS extraction, et une clé ISA_STAMP_KEY absente/vide échoue avec un message
+# d'état : une bonne signature passe, une signature fausse ou un chiffré modifié après signature
+# est refusé SANS extraction, et une clé ISA_STAMP_KEY absente/vide échoue avec un message
 # explicite et distinct — jamais la valeur de la clé elle-même, dans aucun des deux steps.
+# Depuis la revue 2 (point 2), l'artefact publié est CHIFFRÉ (AES-256-CBC, clé dérivée de
+# ISA_STAMP_KEY) : ce test vérifie aussi qu'aucun tar en clair n'est produit/publié, que le
+# round-trip save→restore fonctionne, et qu'un déchiffrement en échec (chiffré corrompu mais
+# correctement re-signé) est refusé sans extraction.
 #   opencode/tests/hmac-state-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -33,6 +37,20 @@ open(out_restore, "w").write(header + restore["run"])
 PY
 chmod +x "$T/save.sh" "$T/restore.sh"
 
+# --- chemin publié (statique, sur le YAML publié) : l'artefact uploadé est le CHIFFRÉ, jamais le tar
+# en clair (dépôt public — revue 2, point 2) --------------------------------------------------------
+python3 - "$WF" <<'PY' || fail=1
+import sys, yaml
+y = yaml.safe_load(open(sys.argv[1]))
+steps = y["jobs"]["fullrun"]["steps"]
+pub = next(s for s in steps if s.get("id") == "publish_state")
+paths = pub["with"]["path"]
+lines = [l.strip() for l in str(paths).splitlines()]
+assert any(l.endswith("/state.tar.enc") for l in lines), "publish_state doit publier state.tar.enc : %r" % paths
+assert not any(l.endswith("/state.tar") for l in lines), "publish_state publie encore le tar en clair : %r" % paths
+print("OK   publish_state : seul l'artefact chiffré (state.tar.enc) + sa signature sont publiés")
+PY
+
 # --- gh de rechange pour restore_state : "run download" copie dans $D ce que le test a préparé dans
 # $T/fake_artifact/, "api .../artifacts" renvoie un id bidon, "api -X DELETE" ne fait rien -----------
 mkdir -p "$T/fakes"
@@ -47,7 +65,7 @@ if [ "\$1" = run ] && [ "\$2" = download ]; then
   done
   if [ -f "$T/download_fail" ]; then exit 1; fi
   mkdir -p "\$dir"
-  [ -f "$T/fake_artifact/state.tar" ] && cp "$T/fake_artifact/state.tar" "\$dir/state.tar"
+  [ -f "$T/fake_artifact/state.tar.enc" ] && cp "$T/fake_artifact/state.tar.enc" "\$dir/state.tar.enc"
   [ -f "$T/fake_artifact/state.sig" ] && cp "$T/fake_artifact/state.sig" "\$dir/state.sig"
   exit 0
 fi
@@ -87,19 +105,35 @@ run_restore() { # variables d'environnement passées en arguments ; $T/fake_arti
 
 state_restored() { [ -s "$T/home/.claude/LIFEOS/MEMORY/STATE/fullrun/marker" ]; }
 
-# --- A. save_state, clé présente, état non vide : signature produite, has_state=true ---------------
+sign_with() { # $1 = fichier, $2 = clé ; la clé ne circule que par l'environnement (jamais argv)
+  ISA_STAMP_KEY="$2" python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); print(hmac.new(key,data,hashlib.sha256).hexdigest())" "$1"
+}
+
+reset_artifact() { # remet dans $T/fake_artifact le chiffré et la bonne signature produits par save_state
+  cp "$dir/state.tar.enc" "$T/fake_artifact/state.tar.enc"
+  cp "$dir/state.sig" "$T/fake_artifact/state.sig"
+}
+
+# --- A. save_state, clé présente, état non vide : artefact CHIFFRÉ + signature, has_state=true -----
 mkdir -p "$T/home/.claude/LIFEOS/MEMORY/STATE/fullrun"
 echo contenu > "$T/home/.claude/LIFEOS/MEMORY/STATE/fullrun/marker"
 rc=$(run_save ISA_STAMP_KEY="$REAL_KEY")
 [ "$rc" = 0 ] && ok "save_state : clé présente ⇒ exit 0" || ko "save_state exit=$rc : $(cat "$T/save_log")"
 grep -qx "has_state=true" "$T/save_out" 2>/dev/null && ok "save_state : has_state=true" || ko "has_state absent/faux : $(cat "$T/save_out")"
 dir=$(grep '^dir=' "$T/save_out" | cut -d= -f2-)
-[ -s "$dir/state.tar" ] && [ -s "$dir/state.sig" ] && ok "save_state : state.tar + state.sig produits" \
-  || ko "tar/sig manquants dans $dir"
+[ -s "$dir/state.tar.enc" ] && [ -s "$dir/state.sig" ] && ok "save_state : state.tar.enc + state.sig produits" \
+  || ko "state.tar.enc/sig manquants dans $dir"
+# Dépôt public (revue 2, point 2) : le tar en clair ne doit jamais exister dans le dossier publié,
+# et le chiffré ne doit contenir aucun fragment du clair (ici le mot « contenu » du marker).
+[ ! -e "$dir/state.tar" ] && ok "save_state : state.tar en clair supprimé (jamais publié)" \
+  || ko "state.tar en clair encore présent dans $dir (serait publié)"
+! grep -q "contenu" "$dir/state.tar.enc" 2>/dev/null \
+  && ok "save_state : le clair (contenu du marker) n'est pas lisible dans le chiffré" \
+  || ko "state.tar.enc contient du clair en clair !"
 ! grep -q "$REAL_KEY" "$T/save_log" && ok "save_state : la clé n'apparaît jamais dans la sortie du step" \
   || ko "la clé apparaît dans la sortie de save_state !"
 mkdir -p "$T/fake_artifact"
-cp "$dir/state.tar" "$T/fake_artifact/state.tar"
+cp "$dir/state.tar.enc" "$T/fake_artifact/state.tar.enc"
 cp "$dir/state.sig" "$T/fake_artifact/state.sig"
 
 # --- B. restore_state, même clé, artefact intact : signature vérifiée, état restauré ----------------
@@ -116,19 +150,20 @@ grep -qx "status=restored" "$T/restore_out" && ok "restore_state : status=restor
 ! grep -q "$REAL_KEY" "$T/restore_log" && ok "restore_state : la clé n'apparaît jamais dans la sortie du step" \
   || ko "la clé apparaît dans la sortie de restore_state !"
 
-# --- C. restore_state, archive modifiée APRÈS signature : signature invalide, aucune extraction ----
-cp "$T/fake_artifact/state.tar" "$T/fake_artifact/state.tar.orig"
-printf 'octet-ajoute-apres-signature' >> "$T/fake_artifact/state.tar"
+# --- C. restore_state, chiffré modifié APRÈS signature : signature invalide, aucun déchiffrement,
+# aucune extraction --------------------------------------------------------------------------------
+cp "$T/fake_artifact/state.tar.enc" "$T/fake_artifact/state.tar.enc.orig"
+printf 'octet-ajoute-apres-signature' >> "$T/fake_artifact/state.tar.enc"
 rc=$(run_restore GH_TOKEN=x ISA_STAMP_KEY="$REAL_KEY" PREV_RUN_ID=999)
-[ "$rc" = 0 ] && ok "restore_state : archive modifiée ⇒ exit 0 (cold start, jamais un échec dur)" \
+[ "$rc" = 0 ] && ok "restore_state : chiffré modifié ⇒ exit 0 (cold start, jamais un échec dur)" \
   || ko "restore_state exit=$rc : $(cat "$T/restore_log")"
-state_restored && ko "archive modifiée : état restauré quand même !" \
-  || ok "restore_state : archive modifiée après signature ⇒ aucune extraction"
+state_restored && ko "chiffré modifié : état restauré quand même !" \
+  || ok "restore_state : chiffré modifié après signature ⇒ aucune extraction"
 grep -q "signature invalide ou archive illisible" "$T/restore_log" && ok "restore_state : message « signature invalide » (générique, pas « clé absente »)" \
   || ko "message attendu absent : $(cat "$T/restore_log")"
-grep -qx "status=refused" "$T/restore_out" && ok "restore_state : archive modifiée ⇒ status=refused (la chaîne s'arrête)" \
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : chiffré modifié ⇒ status=refused (la chaîne s'arrête)" \
   || ko "status=refused absent : $(cat "$T/restore_out")"
-cp "$T/fake_artifact/state.tar.orig" "$T/fake_artifact/state.tar"
+cp "$T/fake_artifact/state.tar.enc.orig" "$T/fake_artifact/state.tar.enc"
 
 # --- D. restore_state, signature fausse (hex aléatoire, même archive) : rejetée, aucune extraction -
 printf '%064x' 1 > "$T/fake_artifact/state.sig"
@@ -141,6 +176,50 @@ grep -qx "status=refused" "$T/restore_out" && ok "restore_state : signature faus
   || ko "status=refused absent : $(cat "$T/restore_out")"
 # resigne correctement pour les cas suivants
 cp "$dir/state.sig" "$T/fake_artifact/state.sig"
+
+# --- D2. restore_state, signature VALIDE mais produite avec une AUTRE clé (même chiffré intact) :
+# même longueur de hexdigest, donc le format de la signature ne la trahit pas — seul le HMAC avec la
+# vraie clé la rejette, et aucune extraction n'a lieu ------------------------------------------------
+OTHER_KEY="autre-cle-de-test-tout-aussi-secrete-4c1d2e"
+sign_with "$T/fake_artifact/state.tar.enc" "$OTHER_KEY" > "$T/fake_artifact/state.sig"
+other_sig=$(cat "$T/fake_artifact/state.sig")
+[[ "$other_sig" =~ ^[0-9a-f]{64}$ ]] && ok "autre clé : signature au bon format (64 hex, indiscernable d'une vraie)" \
+  || ko "autre clé : signature mal formée : $other_sig"
+[ "$other_sig" != "$(cat "$dir/state.sig")" ] && ok "autre clé : signature bien différente de celle de la vraie clé" \
+  || ko "autre clé : signature identique à la vraie — le cas ne prouverait rien"
+rc=$(run_restore GH_TOKEN=x ISA_STAMP_KEY="$REAL_KEY" PREV_RUN_ID=999)
+[ "$rc" = 0 ] && ok "autre clé : exit 0 (cold start)" || ko "autre clé : exit=$rc : $(cat "$T/restore_log")"
+state_restored && ko "autre clé : état restauré quand même !" \
+  || ok "restore_state : signature valide d'une autre clé ⇒ aucune extraction (HMAC rejette)"
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : signature d'une autre clé ⇒ status=refused" \
+  || ko "status=refused absent : $(cat "$T/restore_out")"
+! grep -q "$OTHER_KEY" "$T/restore_log" && ok "autre clé : aucune clé dans la sortie du step" \
+  || ko "une clé apparaît dans la sortie de restore_state !"
+
+# --- D3. restore_state, chiffré CORROMPU mais RE-SIGNÉ correctement avec la vraie clé : le HMAC
+# passe, le déchiffrement échoue ⇒ status=refused, aucune extraction. Prouve que l'échec de
+# déchiffrement est bien géré (pas seulement le rejet de signature des cas C/D/D2).
+# Corruption : le dernier octet est RETIRÉ (longueur non multiple de 16 ⇒ openssl échoue de façon
+# déterministe) — une simple substitution du dernier octet ne ferait échouer le padding PKCS#7 que
+# dans ~255/256 des cas, donc un test qui échouerait parfois au hasard.
+reset_artifact
+truncate -s -1 "$T/fake_artifact/state.tar.enc"
+sign_with "$T/fake_artifact/state.tar.enc" "$REAL_KEY" > "$T/fake_artifact/state.sig"
+# Preuve que la signature posée est bien VALIDE pour ce chiffré corrompu (même calcul que le step) :
+# le refus attendu ne peut donc venir que du déchiffrement, jamais d'un HMAC invalide.
+sig_recalc=$(sign_with "$T/fake_artifact/state.tar.enc" "$REAL_KEY")
+[ "$sig_recalc" = "$(cat "$T/fake_artifact/state.sig")" ] \
+  && ok "chiffré corrompu re-signé : HMAC valide pour la vraie clé (échec attendu = déchiffrement)" \
+  || ko "chiffré corrompu : la signature re-posée n'est pas valide, le cas ne prouve rien"
+rc=$(run_restore GH_TOKEN=x ISA_STAMP_KEY="$REAL_KEY" PREV_RUN_ID=999)
+[ "$rc" = 0 ] && ok "chiffré corrompu re-signé : exit 0 (cold start)" || ko "chiffré corrompu : exit=$rc : $(cat "$T/restore_log")"
+state_restored && ko "chiffré corrompu : état restauré quand même !" \
+  || ok "restore_state : déchiffrement en échec ⇒ aucune extraction"
+grep -qx "status=refused" "$T/restore_out" && ok "restore_state : déchiffrement en échec ⇒ status=refused (la chaîne s'arrête)" \
+  || ko "status=refused absent : $(cat "$T/restore_out")"
+! grep -q "État FullRun restauré" "$T/restore_log" \
+  && ok "chiffré corrompu : jamais de message de restauration" || ko "restauration annoncée à tort"
+reset_artifact
 
 # --- E. restore_state, ISA_STAMP_KEY absente : message EXPLICITE et DISTINCT, aucune extraction,
 # jamais confondu avec « signature invalide » (cas C/D) --------------------------------------------
