@@ -65,6 +65,25 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       - run: uv run ruff check .
+      # tests/capture/test_fprint.py::_mp3_64k_mono appelle ffmpeg en sous-processus :
+      # sans binaire, test_mp3_64k_bruit_10db_persiste échoue en FileNotFoundError.
+      # Même recette que preannot-ina : action épinglée puis secours apt, contrôle avant pytest.
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg-python
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: steps.ffmpeg-python.outcome != 'success'
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: ffmpeg/ffprobe présents avant pytest
+        run: |
+          command -v ffmpeg >/dev/null || { echo "::error::ffmpeg absent du PATH"; exit 1; }
+          command -v ffprobe >/dev/null || { echo "::error::ffprobe absent du PATH"; exit 1; }
+          ffmpeg -version | head -1
       - run: uv run pytest -q
       # ISC-27 (ISA 2026-11-02-fr-14-multi-tenant-roles) : l'audit de sécurité
       # interne lit docs/security-audit-*.md et croise la section Blockers de
