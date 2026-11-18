@@ -477,11 +477,15 @@ jobs:
             echo "::warning::artefact d'état introuvable pour le run précédent ($PREV_RUN_ID) : reprise sans état (cold start — build_plan/build_tasks/dispatches du lien précédent non transmis)"
             exit 0
           fi
+          # Signature HMAC vérifiée AVANT toute extraction, en temps constant (hmac.compare_digest,
+          # jamais un [ "$a" = "$b" ] bash qui court-circuite au premier octet différent) et la clé
+          # jamais en argument de commande (jamais dans /proc/<pid>/cmdline) : ISA_STAMP_KEY n'est lue
+          # que depuis l'environnement du process python3 (os.environb), jamais passée sur sa ligne
+          # de commande.
           ok=0
-          if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ]; then
-            want=$(openssl dgst -sha256 -hmac "$ISA_STAMP_KEY" -r < "$D/state.tar" | awk '{print $1}')
-            got=$(tr -d ' \n' < "$D/state.sig")
-            [ "$want" = "$got" ] && ok=1
+          if [ -s "$D/state.tar" ] && [ -s "$D/state.sig" ] \
+             && python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); want=hmac.new(key,data,hashlib.sha256).hexdigest(); got=open(sys.argv[2]).read().strip(); sys.exit(0 if hmac.compare_digest(want,got) else 1)" "$D/state.tar" "$D/state.sig"; then
+            ok=1
           fi
           if [ "$ok" = 1 ] && tar -tf "$D/state.tar" >/dev/null 2>&1; then
             mkdir -p "$HOME/.claude/LIFEOS/MEMORY/STATE"
@@ -1378,6 +1382,57 @@ jobs:
       # jamais --session — aucune session opencode ne survit entre deux jobs) et redispatche le
       # lien suivant tant que la chaîne n'est ni close ni bloquée. Jamais de report sans verdict
       # signé : computeUnitExit (lifeos) est la seule source de vérité, jamais une case cochée ici.
+      # B2 : ~/.claude/LIFEOS/MEMORY/STATE/fullrun/ (build_plan, build_tasks, dispatches — l'état
+      # RUNTIME complet, distinct du report de planification fullrun-carry.json commité avec l'ISA)
+      # est recréé VIDE à chaque lien chaîné (job = runner neuf, rsync ne copie que lifeos/). Sans
+      # cette étape, build/verify perdent toute trace de la tâche ou de l'agent déjà traité par un
+      # lien précédent — jamais le dépôt git, jamais un fichier .fullrun, jamais un secret : un
+      # artefact GitHub Actions de CE run, signé HMAC et à usage unique (supprimé par l'étape de
+      # restauration dès qu'il est lu par le lien suivant, acceptée ou non).
+      #
+      # Placée AVANT « Décision de chaînage » (pas après) : l'état écrit ici provient entièrement
+      # de ce que les steps précédents (notamment « opencode run ») ont déjà produit dans ce dossier
+      # pendant ce job — ni resolveRunStateFromArgs ni computeUnitExit (appelés par `unit --isa` dans
+      # le step chain, plus bas) n'écrivent dans ce dossier : ce sont des lectures pures côté
+      # FullRunPipeline.ts. Sauvegarder puis publier avant de calculer et d'envoyer le dispatch du
+      # lien suivant garantit que l'artefact existe déjà quand ce lien suivant démarre et tente de le
+      # restaurer — jamais une course où le dispatch part avant que l'artefact soit disponible.
+      - name: Sauvegarder l'état FullRun (chaînage, artefact signé à usage unique)
+        id: save_state
+        if: always() && inputs.chain_enabled == 'true'
+        env:
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+        run: |
+          set +x
+          SRC="$HOME/.claude/LIFEOS/MEMORY/STATE/fullrun"
+          if [ ! -d "$SRC" ] || [ -z "$(ls -A "$SRC" 2>/dev/null)" ]; then
+            echo "has_state=false" >> "$GITHUB_OUTPUT"
+            echo "Rien à reporter (dossier d'état vide ou absent)"
+            exit 0
+          fi
+          D="$RUNNER_TEMP/fullrun-state-save"
+          mkdir -p "$D"
+          tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -cf "$D/state.tar" fullrun
+          # Clé jamais en argument de commande (jamais dans /proc/<pid>/cmdline) : ISA_STAMP_KEY n'est
+          # lue que depuis l'environnement du process python3 (os.environb), jamais passée sur sa
+          # ligne de commande. Même fonction de signature que la vérification côté restore_state.
+          python3 -c "import hmac,hashlib,os,sys; key=os.environb[b'ISA_STAMP_KEY']; data=open(sys.argv[1],'rb').read(); print(hmac.new(key,data,hashlib.sha256).hexdigest())" "$D/state.tar" > "$D/state.sig"
+          echo "has_state=true" >> "$GITHUB_OUTPUT"
+          echo "dir=$D" >> "$GITHUB_OUTPUT"
+          echo "État FullRun sauvegardé ($(du -h "$D/state.tar" | cut -f1))"
+
+      - name: Publier l'artefact d'état (usage unique, rétention 1 jour)
+        id: publish_state
+        if: always() && inputs.chain_enabled == 'true' && steps.save_state.outputs.has_state == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fullrun-state-${{ inputs.job_name }}
+          path: |
+            ${{ steps.save_state.outputs.dir }}/state.tar
+            ${{ steps.save_state.outputs.dir }}/state.sig
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Décision de chaînage (chain_enabled)
         id: chain
         if: always() && inputs.chain_enabled == 'true'
@@ -1389,6 +1444,13 @@ jobs:
           CHECK_OUTCOME: ${{ steps.check.outcome }}
           CHECK_REASON: ${{ steps.check.outputs.reason }}
           PUSH_OUTCOME: ${{ steps.push.outcome }}
+          # Ordre des steps (ce correctif) : save_state/publish_state tournent avant ce step, donc
+          # leurs outcomes sont déjà connus ici — un échec de l'un ou l'autre doit empêcher le
+          # dispatch du lien suivant, pour ne jamais envoyer un prev_run_id dont l'artefact n'existe
+          # pas ou n'est pas fiable.
+          SAVE_STATE_OUTCOME: ${{ steps.save_state.outcome }}
+          HAS_STATE: ${{ steps.save_state.outputs.has_state }}
+          PUBLISH_STATE_OUTCOME: ${{ steps.publish_state.outcome }}
           IN_BASE: ${{ inputs.base_branch }}
           RUN_ID: ${{ github.run_id }}
           ANTENLY_DIR: ${{ github.workspace }}/antenly
@@ -1432,6 +1494,17 @@ jobs:
           fi
           if [ "${PUSH_OUTCOME:-}" != success ]; then
             stop_chain "push en échec : rien de nouveau n'est garanti sur la branche, lien suivant non dispatché"
+          fi
+
+          # Ordre des steps : save_state/publish_state sont déjà passés. save_state échoue (outcome
+          # != success) uniquement sur un crash réel (lecture/tar/signature) — jamais sur « rien à
+          # sauvegarder » (has_state=false, exit 0). publish_state n'est contrôlé que si has_state=true :
+          # sinon il est "skipped" par sa propre condition (rien à publier), ce qui n'est pas un échec.
+          if [ "${SAVE_STATE_OUTCOME:-}" != success ]; then
+            stop_chain "sauvegarde de l'état FullRun en échec (save_state) : artefact non fiable, lien suivant non dispatché"
+          fi
+          if [ "${HAS_STATE:-}" = true ] && [ "${PUBLISH_STATE_OUTCOME:-}" != success ]; then
+            stop_chain "publication de l'artefact d'état en échec (publish_state) : lien suivant non dispatché sans preuve que l'état a été transporté"
           fi
 
           # Un lien dont opencode lui-même s'est mal arrêté ne redispatche jamais à l'aveugle.
@@ -1512,42 +1585,6 @@ jobs:
           else
             stop_chain "dispatch du lien suivant refusé (gh workflow run) — $reason"
           fi
-
-      # B2 (suite) : publie l'état RUNTIME de CE lien (après l'appel unit --isa ci-dessus, qui vient
-      # de le mettre à jour) pour que le lien suivant, s'il est dispatché, puisse le restaurer. Jamais
-      # le dépôt git, jamais .fullrun, jamais un secret : seulement l'artefact run, signé HMAC,
-      # rétention 1 jour (à usage unique — supprimé par l'étape de restauration dès qu'il est lu).
-      - name: Sauvegarder l'état FullRun (chaînage, artefact signé à usage unique)
-        id: save_state
-        if: always() && inputs.chain_enabled == 'true'
-        env:
-          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
-        run: |
-          set +x
-          SRC="$HOME/.claude/LIFEOS/MEMORY/STATE/fullrun"
-          if [ ! -d "$SRC" ] || [ -z "$(ls -A "$SRC" 2>/dev/null)" ]; then
-            echo "has_state=false" >> "$GITHUB_OUTPUT"
-            echo "Rien à reporter (dossier d'état vide ou absent)"
-            exit 0
-          fi
-          D="$RUNNER_TEMP/fullrun-state-save"
-          mkdir -p "$D"
-          tar -C "$HOME/.claude/LIFEOS/MEMORY/STATE" -cf "$D/state.tar" fullrun
-          openssl dgst -sha256 -hmac "$ISA_STAMP_KEY" -r < "$D/state.tar" | awk '{print $1}' > "$D/state.sig"
-          echo "has_state=true" >> "$GITHUB_OUTPUT"
-          echo "dir=$D" >> "$GITHUB_OUTPUT"
-          echo "État FullRun sauvegardé ($(du -h "$D/state.tar" | cut -f1))"
-
-      - name: Publier l'artefact d'état (usage unique, rétention 1 jour)
-        if: always() && inputs.chain_enabled == 'true' && steps.save_state.outputs.has_state == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: fullrun-state-${{ inputs.job_name }}
-          path: |
-            ${{ steps.save_state.outputs.dir }}/state.tar
-            ${{ steps.save_state.outputs.dir }}/state.sig
-          retention-days: 1
-          if-no-files-found: error
 
       - name: Statut final
         if: always()

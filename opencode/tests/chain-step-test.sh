@@ -3,7 +3,9 @@
 # bash embarqué (via python+yaml, comme start-step-test.sh le fait pour la garde) et l'exécute avec
 # des GITHUB_OUTPUT/GITHUB_STEP_SUMMARY réels et des bun/gh/jq contrôlés, pour prouver B1 (gate
 # check/push avant toute lecture d'état), M1 (OC_STOP vide = arrêt), le hors-un (chain_max), M3
-# (next/prev_run_id transmis au dispatch) et le DISPATCH_TOKEN jamais dans l'env de bun.
+# (next/prev_run_id transmis au dispatch), le DISPATCH_TOKEN jamais dans l'env de bun, l'ordre des
+# steps save_state/publish_state avant chain (statique, sur le YAML) et la gate correspondante
+# (échec de l'un ou l'autre ⇒ zéro dispatch, jamais masqué par un redispatch à l'aveugle).
 #   opencode/tests/chain-step-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -34,6 +36,24 @@ open(out, "w").write("#!/usr/bin/env bash\nset -euo pipefail\n" + script)
 PY
 chmod +x "$T/chain.sh"
 
+# --- ordre des steps (ce correctif) : save_state et publish_state doivent précéder chain dans le
+# YAML — jamais après, pour que l'artefact existe déjà quand le lien suivant, une fois dispatché par
+# chain, tente de le restaurer (sinon course : le lien suivant peut démarrer et tenter la restauration
+# avant que ce lien-ci ait fini de publier son propre artefact) --------------------------------------
+python3 - "$WF" <<'PY' || fail=1
+import sys, yaml
+y = yaml.safe_load(open(sys.argv[1]))
+steps = y["jobs"]["fullrun"]["steps"]
+ids = [s.get("id") for s in steps]
+i_save = ids.index("save_state")
+i_pub = ids.index("publish_state")
+i_chain = ids.index("chain")
+assert i_save < i_chain, "save_state doit précéder chain (ordre actuel : %r)" % ids
+assert i_pub < i_chain, "publish_state doit précéder chain (ordre actuel : %r)" % ids
+assert i_save < i_pub, "save_state doit précéder publish_state"
+print("OK   ordre : save_state puis publish_state, tous deux avant chain")
+PY
+
 # --- bun/gh/jq de rechange, pilotés par des fichiers dans $T -----------------------------------
 mkdir -p "$T/fakes"
 cat >"$T/fakes/jq" <<'S'
@@ -61,6 +81,11 @@ export FAKES_DIR="$T/fakes"
 run_chain() { # variables d'environnement passées en arguments ; bun_output.json doit déjà exister
   rm -f "$T/out" "$T/summary" "$T/bun_called" "$T/bun_saw_dispatch_token" "$T/gh_dispatch_args"
   : >"$T/out"; : >"$T/summary"
+  # SAVE_STATE_OUTCOME/HAS_STATE/PUBLISH_STATE_OUTCOME : défauts "cas normal, rien à sauvegarder"
+  # (save_state réussi mais dossier d'état vide ⇒ has_state=false ⇒ publish_state "skipped" par sa
+  # propre condition, jamais un échec) — les tests B1/M1/hors-un/M3 ci-dessus ne touchent pas à ces
+  # variables et doivent continuer de dispatcher normalement ; seuls les tests dédiés ci-dessous les
+  # surchargent pour vérifier la nouvelle gate (ordre des steps : save_state/publish_state avant chain).
   env -i PATH="$PATH" FAKES_DIR="$FAKES_DIR" GITHUB_OUTPUT="$T/out" GITHUB_STEP_SUMMARY="$T/summary" \
     GITHUB_REF_NAME=fullrun-job-chain GITHUB_WORKSPACE="$T" \
     ANTENLY_DIR="$T/antenly" LIFEOS_DIR="$T/lifeos" \
@@ -71,6 +96,7 @@ run_chain() { # variables d'environnement passées en arguments ; bun_output.jso
     IN_WIP_PUSH_MIN=30 IN_HF_CORPUS= OC_ISA_PATH="MEMORY/WORK/x/ISA.md" \
     IN_CHAIN_PHASE=build IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 RUN_ID=111000 \
     DISPATCH_TOKEN=secrettoken123 \
+    SAVE_STATE_OUTCOME=success HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped \
     "$@" bash "$T/chain.sh"
 }
 
@@ -114,6 +140,34 @@ grep -q "chain_max atteint" "$T/out" 2>/dev/null && ok "hors-un : raison nommée
 run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20
 [ -f "$T/bun_saw_dispatch_token" ] && [ -z "$(cat "$T/bun_saw_dispatch_token")" ] \
   && ok "DISPATCH_TOKEN absent de l'environnement de bun" || ko "DISPATCH_TOKEN visible par bun : $(cat "$T/bun_saw_dispatch_token" 2>/dev/null)"
+
+# --- ordre des steps (ce correctif) : save_state en échec ⇒ block=true, zéro dispatch --------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success \
+  SAVE_STATE_OUTCOME=failure HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped
+out_eq block true && ok "save_state en échec ⇒ block=true (artefact non fiable)" || ko "save_state échec : $(cat "$T/out")"
+[ ! -f "$T/gh_dispatch_args" ] && ok "save_state en échec ⇒ zéro dispatch (gh workflow run jamais appelé)" \
+  || ko "save_state échec : dispatch quand même envoyé : $(cat "$T/gh_dispatch_args")"
+
+# --- publication en échec (has_state=true, donc publish_state a vraiment tourné) ⇒ block=true,
+# zéro dispatch : jamais un prev_run_id envoyé dont l'artefact n'existe pas ou n'est pas fiable ------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success \
+  SAVE_STATE_OUTCOME=success HAS_STATE=true PUBLISH_STATE_OUTCOME=failure
+out_eq block true && ok "publish_state en échec (has_state=true) ⇒ block=true" || ko "publish_state échec : $(cat "$T/out")"
+[ ! -f "$T/gh_dispatch_args" ] && ok "publish_state en échec ⇒ zéro dispatch" \
+  || ko "publish_state échec : dispatch quand même envoyé : $(cat "$T/gh_dispatch_args")"
+
+# --- has_state=false ⇒ publish_state "skipped" par sa propre condition (rien à publier) : ce n'est
+# PAS un échec (premiers liens avant tout état runtime) — le dispatch doit continuer normalement -----
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success \
+  SAVE_STATE_OUTCOME=success HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped
+out_eq continue true && ok "publish_state skipped (has_state=false) ⇒ dispatch normal (pas un échec)" \
+  || ko "has_state=false à tort bloqué : $(cat "$T/out")"
+
+# --- save_state + publish_state réussis (has_state=true) ⇒ dispatch normal -------------------------
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success \
+  SAVE_STATE_OUTCOME=success HAS_STATE=true PUBLISH_STATE_OUTCOME=success
+out_eq continue true && ok "save_state + publish_state réussis (has_state=true) ⇒ dispatch normal" \
+  || ko "succès à tort bloqué : $(cat "$T/out")"
 
 # --- M3 : next (phase build, reste en build) transmis au dispatch, prev_run_id = ce run ------------
 run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 RUN_ID=999777
