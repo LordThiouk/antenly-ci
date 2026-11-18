@@ -71,6 +71,35 @@ on:
         description: "Push des commits wip de la branche toutes les N min pendant le run (5 à 120)"
         type: string
         default: "30"
+      chain_enabled:
+        description: "Jobs courts chaînés (une étape/tâche/agent par job, session opencode neuve à chaque fois) au lieu d'un seul long job. 'true' pour activer — défaut 'false' : comportement inchangé."
+        type: string
+        default: "false"
+      chain_phase:
+        description: "Interne au chaînage (chain_enabled=true) : phase de ce lien — plan (étapes 0-3), build (étape 4, une tâche), verify (étape 5, un agent), close (étapes 6-7). Ne pas renseigner à la main sauf pour reprendre une chaîne coupée à une phase précise."
+        type: choice
+        options: [plan, build, verify, close]
+        default: plan
+      chain_count:
+        description: "Interne au chaînage : nombre de liens déjà enchaînés. Ne pas renseigner à la main (0 au premier dispatch)."
+        type: string
+        default: "0"
+      chain_max:
+        description: "Plafond d'enchaînements pour une même chaîne (1 à 100) : au-delà, le dernier lien se signale bloqué plutôt que de redispatcher indéfiniment."
+        type: string
+        default: "20"
+      prompt_path_build:
+        description: "chain_enabled=true seulement : prompt de la phase build (étape 4, une tâche par job — même format que prompt_path). Requis dès le premier dispatch, même si ce lien démarre en phase plan."
+        type: string
+        default: ""
+      prompt_path_verify:
+        description: "chain_enabled=true seulement : prompt de la phase verify (étape 5, un agent par job — code-reviewer puis Forge puis Silas, même format que prompt_path). Requis dès le premier dispatch."
+        type: string
+        default: ""
+      prompt_path_close:
+        description: "chain_enabled=true seulement : prompt de la phase close (étapes 6-7, Max puis fermeture — même format que prompt_path). Requis dès le premier dispatch."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -101,9 +130,14 @@ defaults:
 
 jobs:
   fullrun:
+    # Chaîné (chain_enabled=true) : chaque lien est redispatché avec un jeton dédié qui appartient à
+    # LordThiouk (secret ANTENLY_CI_DISPATCH_TOKEN, acte Papa requis) — jamais en élargissant cette
+    # garde au bot d'Actions, qui déclencherait n'importe quel run automatisé avec les vrais secrets.
     if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # Chaîné : 45 min par lien (un job court = une étape, une tâche, ou un agent de verify, chacun
+    # avec une session opencode neuve). Non chaîné : 350 min, comportement inchangé.
+    timeout-minutes: ${{ inputs.chain_enabled == 'true' && 45 || 350 }}
     env:
       IN_BRANCH: ${{ inputs.branch }}
       IN_PROMPT: ${{ inputs.prompt_path }}
@@ -120,8 +154,16 @@ jobs:
       IN_DONE_AGENTS: ${{ inputs.done_agents }}
       IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
       IN_HF_CORPUS: ${{ inputs.hf_corpus }}
+      IN_CHAIN_ENABLED: ${{ inputs.chain_enabled }}
+      IN_CHAIN_PHASE: ${{ inputs.chain_phase }}
+      IN_CHAIN_COUNT: ${{ inputs.chain_count }}
+      IN_CHAIN_MAX: ${{ inputs.chain_max }}
+      IN_PROMPT_BUILD: ${{ inputs.prompt_path_build }}
+      IN_PROMPT_VERIFY: ${{ inputs.prompt_path_verify }}
+      IN_PROMPT_CLOSE: ${{ inputs.prompt_path_close }}
       ANTENLY_DIR: ${{ github.workspace }}/antenly
       CI_DIR: ${{ github.workspace }}/ci
+      LIFEOS_DIR: ${{ github.workspace }}/lifeos
       OPENCODE_DISABLE_AUTOUPDATE: "1"
     steps:
       - name: Garde des entrées (branche, modèles gratuits, chemins)
@@ -178,6 +220,29 @@ jobs:
             || fail "done_agents invalide (noms séparés par des virgules, ex. Max,Silas)"
           if ! [[ "$IN_WIP_PUSH_MIN" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$IN_WIP_PUSH_MIN))" -lt 5 ] || [ "$((10#$IN_WIP_PUSH_MIN))" -gt 120 ]; then
             fail "wip_push_minutes invalide (entier de 5 à 120)"
+          fi
+          # Chaînage (jobs courts) : chain_enabled gate tout le reste. true/false strict (jamais une
+          # autre valeur prise pour "vrai" par accident).
+          [[ "$IN_CHAIN_ENABLED" == "true" || "$IN_CHAIN_ENABLED" == "false" ]] \
+            || fail "chain_enabled invalide (true ou false)"
+          case "$IN_CHAIN_PHASE" in plan|build|verify|close) ;; *) fail "chain_phase invalide (plan, build, verify ou close)" ;; esac
+          if ! [[ "$IN_CHAIN_COUNT" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$IN_CHAIN_COUNT))" -gt 999 ]; then
+            fail "chain_count invalide (entier de 0 à 999)"
+          fi
+          if ! [[ "$IN_CHAIN_MAX" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$IN_CHAIN_MAX))" -lt 1 ] || [ "$((10#$IN_CHAIN_MAX))" -gt 100 ]; then
+            fail "chain_max invalide (entier de 1 à 100)"
+          fi
+          if [ "$IN_CHAIN_ENABLED" = true ]; then
+            [ "$((10#$IN_CHAIN_COUNT))" -le "$((10#$IN_CHAIN_MAX))" ] || fail "chain_count dépasse déjà chain_max : chaîne arrêtée"
+            # Le chaînage lit/écrit l'état par ISA (unit --isa), jamais par session opencode (une
+            # session neuve à chaque lien) : isa_path est donc obligatoire, pas déduit du prompt.
+            [ -n "$OC_ISA_PATH" ] || fail "chain_enabled=true exige isa_path (le chaînage lit l'état par ISA, pas par session)"
+            # Les trois prompts de phase doivent être fournis dès le premier dispatch : un lien ne
+            # peut pas changer de phase sans savoir où trouver le prompt de la phase suivante.
+            for p in "$IN_PROMPT_BUILD" "$IN_PROMPT_VERIFY" "$IN_PROMPT_CLOSE"; do
+              [[ "$p" =~ ^(prompts|antenly|ci):[A-Za-z0-9._/-]+$ && "$p" != *..* ]] \
+                || fail "chain_enabled=true exige prompt_path_build/verify/close (même format que prompt_path)"
+            done
           fi
           for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX" "$OC_MODEL_FALLBACK"; do
             [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle refusé : seuls les modèles opencode/*-free sont admis"
@@ -693,8 +758,9 @@ jobs:
       - name: opencode run (sortie jamais affichée, suivi filtré toutes les 10 min)
         id: oc
         continue-on-error: true
-        # Filet seulement : run-fullrun.sh arrête opencode avant (plafond du job - 15 min).
-        timeout-minutes: 340
+        # Filet seulement : run-fullrun.sh arrête opencode avant (plafond du job - marge de push).
+        # Chaîné : 35 min (job à 45) ; sinon 340 (job à 350) — comportement inchangé si non chaîné.
+        timeout-minutes: ${{ inputs.chain_enabled == 'true' && 35 || 340 }}
         env:
           OC_JOB: ${{ inputs.job_name }}
           OC_BRANCH: ${{ inputs.branch }}
@@ -705,9 +771,10 @@ jobs:
           OC_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
           OC_DONE_AGENTS: ${{ inputs.done_agents }}
           OC_JOB_T0: ${{ steps.guard.outputs.t0 }}
-          # Doit rester égal à timeout-minutes du job (350) ; marge de push : 15 min.
-          OC_JOB_TIMEOUT_MIN: "350"
-          OC_PUSH_MARGIN_MIN: "15"
+          # Doit rester égal à timeout-minutes du job (45 chaîné, 350 sinon) ; marge de push : 5 min
+          # chaîné (job court, push rapide), 15 sinon — comportement inchangé si non chaîné.
+          OC_JOB_TIMEOUT_MIN: ${{ inputs.chain_enabled == 'true' && '45' || '350' }}
+          OC_PUSH_MARGIN_MIN: ${{ inputs.chain_enabled == 'true' && '5' || '15' }}
           OC_POLL_SEC: "30"
           OC_KILL_GRACE: "60"
           OC_PROGRESS_INTERVAL: "600"
@@ -1223,6 +1290,95 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "- PR en brouillon : $url" >> "$GITHUB_STEP_SUMMARY"
 
+      # Un lien ne termine jamais seul : il relit l'état signé qu'il vient d'écrire (unit --isa,
+      # jamais --session — aucune session opencode ne survit entre deux jobs) et redispatche le
+      # lien suivant tant que la chaîne n'est ni close ni bloquée. Jamais de report sans verdict
+      # signé : computeUnitExit (lifeos) est la seule source de vérité, jamais une case cochée ici.
+      - name: Décision de chaînage (chain_enabled)
+        id: chain
+        if: always() && inputs.chain_enabled == 'true'
+        env:
+          DISPATCH_TOKEN: ${{ secrets.ANTENLY_CI_DISPATCH_TOKEN }}
+          OC_STOP: ${{ steps.oc.outputs.stop }}
+          IN_BASE: ${{ inputs.base_branch }}
+          ANTENLY_DIR: ${{ github.workspace }}/antenly
+          LIFEOS_DIR: ${{ github.workspace }}/lifeos
+          BASH_ENV: ""
+          ENV: ""
+          LD_PRELOAD: ""
+          LD_LIBRARY_PATH: ""
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          set +x
+          export PATH=/usr/local/bin:/usr/bin:/bin
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+          stop_chain() { out block true; out continue false; out reason "$1"; echo "::error::chaînage arrêté : $1"; exit 0; }
+          finish_chain() { out block false; out continue false; out reason "$1"; echo "chaîne terminée : $1"; exit 0; }
+
+          # Un lien dont opencode lui-même s'est mal arrêté ne redispatche jamais à l'aveugle.
+          case "${OC_STOP:-}" in
+            silence|plafond|vide|annulation|erreur) stop_chain "lien en échec (arrêt opencode : ${OC_STOP})" ;;
+          esac
+
+          case "$IN_CHAIN_PHASE" in
+            plan|close) gran=step ;;
+            build) gran=task ;;
+            verify) gran=agent ;;
+          esac
+          ISA_ABS="$ANTENLY_DIR/$OC_ISA_PATH"
+          [ -f "$ISA_ABS" ] || stop_chain "ISA introuvable ($OC_ISA_PATH) : état illisible"
+
+          set +e
+          raw=$(bun "$LIFEOS_DIR/LIFEOS/TOOLS/FullRunPipeline.ts" unit --isa "$ISA_ABS" --stop-after "$gran" 2>&1)
+          set -e
+          kind=$(printf '%s' "$raw" | jq -r '.exit // ""' 2>/dev/null) || kind=""
+          reason=$(printf '%s' "$raw" | jq -r '.reason // ""' 2>/dev/null) || reason=""
+          nxt=$(printf '%s' "$raw" | jq -r '.next // ""' 2>/dev/null) || nxt=""
+          [ -n "$kind" ] || stop_chain "unit --isa illisible (phase $IN_CHAIN_PHASE, $gran)"
+
+          case "$kind" in
+            echec) stop_chain "${reason:-echec} (phase $IN_CHAIN_PHASE)" ;;
+            termine) finish_chain "${reason:-run clos}" ;;
+          esac
+          # kind = suite_a_faire : décide la phase et le prompt du prochain lien.
+          next_phase="$IN_CHAIN_PHASE"; next_prompt="$IN_PROMPT"
+          case "$IN_CHAIN_PHASE" in
+            plan)   [ "$nxt" = 4 ] && { next_phase=build;  next_prompt="$IN_PROMPT_BUILD"; } ;;
+            build)  [ "$nxt" = 5 ] && { next_phase=verify; next_prompt="$IN_PROMPT_VERIFY"; } ;;
+            verify) [ "$nxt" = 6 ] && { next_phase=close;  next_prompt="$IN_PROMPT_CLOSE"; } ;;
+            close)  next_prompt="$IN_PROMPT_CLOSE" ;;
+          esac
+          new_count=$((10#$IN_CHAIN_COUNT + 1))
+          [ "$new_count" -le "$((10#$IN_CHAIN_MAX))" ] \
+            || stop_chain "chain_max atteint (${IN_CHAIN_MAX}) sans conclure — $reason"
+
+          [ -n "${DISPATCH_TOKEN:-}" ] \
+            || stop_chain "secret ANTENLY_CI_DISPATCH_TOKEN absent (acte Papa requis) : lien suivant non dispatché — $reason"
+          [[ "$next_prompt" =~ ^(prompts|antenly|ci):[A-Za-z0-9._/-]+$ ]] \
+            || stop_chain "prompt de la phase $next_phase invalide ou vide"
+
+          echo "::add-mask::$DISPATCH_TOKEN"
+          if GH_TOKEN="$DISPATCH_TOKEN" gh workflow run opencode-fullrun.yml \
+               --repo LordThiouk/antenly-ci --ref "${GITHUB_REF_NAME}" \
+               -f branch="$IN_BRANCH" -f prompt_path="$next_prompt" -f job_name="$IN_JOB" \
+               -f model_main="$OC_MODEL_MAIN" -f model_max="$OC_MODEL_MAX" \
+               -f model_fallback="$OC_MODEL_FALLBACK" -f model_chain="$OC_MODEL_CHAIN" \
+               -f lifeos_ref="$IN_LIFEOS_REF" -f isa_path="$OC_ISA_PATH" -f start_step="" \
+               -f base_branch="${IN_BASE:-}" -f hf_corpus="$IN_HF_CORPUS" \
+               -f agent_idle_minutes="$IN_AGENT_IDLE_MIN" -f idle_minutes="$IN_IDLE_MIN" \
+               -f done_agents="$IN_DONE_AGENTS" -f wip_push_minutes="$IN_WIP_PUSH_MIN" \
+               -f chain_enabled=true -f chain_phase="$next_phase" -f chain_count="$new_count" \
+               -f chain_max="$IN_CHAIN_MAX" -f prompt_path_build="$IN_PROMPT_BUILD" \
+               -f prompt_path_verify="$IN_PROMPT_VERIFY" -f prompt_path_close="$IN_PROMPT_CLOSE" \
+               >/dev/null 2>&1; then
+            out block false; out continue true
+            out reason "lien $new_count/$IN_CHAIN_MAX dispatché (phase $next_phase) — $reason"
+            echo "Chaînage : lien suivant dispatché (phase $next_phase, $new_count/$IN_CHAIN_MAX)"
+          else
+            stop_chain "dispatch du lien suivant refusé (gh workflow run) — $reason"
+          fi
+
       - name: Statut final
         if: always()
         env:
@@ -1232,6 +1388,8 @@ jobs:
           OC_WORK: ${{ runner.temp }}/oc
           DONE: ${{ steps.check.outputs.done }}
           DONE_REASON: ${{ steps.check.outputs.done_reason }}
+          CHAIN_BLOCK: ${{ steps.chain.outputs.block }}
+          CHAIN_REASON: ${{ steps.chain.outputs.reason }}
         run: |
           set +x
           # « terminé » exige le PASS de Max vérifié : un rc 0 ne prouve que la fin du tour.
@@ -1261,7 +1419,19 @@ jobs:
           echo "- Statut final opencode : **$why**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Erreurs agent : $errs" >> "$GITHUB_STEP_SUMMARY"
           echo "- Validateur de fin (PASS des agents done_agents) : ${DONE:-non exécuté}${DONE_REASON:+ ($DONE_REASON)}" >> "$GITHUB_STEP_SUMMARY"
-          # Barrière : un run annoncé terminé sans PASS de Max vérifié n'est pas un succès.
+          if [ "$IN_CHAIN_ENABLED" = true ]; then
+            # Chaîné : le verdict de ce LIEN vient de unit --isa (step « Décision de chaînage »),
+            # jamais de OC_STOP/DONE — un « tour »/« fin de tour sans PASS » est le déroulement
+            # normal d'un lien intermédiaire, pas un échec. Seul un lien bloqué (CHAIN_BLOCK=true :
+            # arrêt opencode anormal, echec lifeos, chain_max atteint, ou dispatch refusé) échoue.
+            echo "- Chaînage : ${CHAIN_REASON:-non évalué}" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${CHAIN_BLOCK:-}" = true ]; then
+              echo "::error::chaîne bloquée : ${CHAIN_REASON:-raison inconnue}"
+              exit 1
+            fi
+            exit 0
+          fi
+          # Non chaîné (comportement historique, inchangé) : « terminé » exige le PASS de Max.
           if [ "${OC_STOP:-}" = ok ] && [ "${DONE:-}" != ok ]; then
             echo "::error::run en échec : PASS requis non vérifié (${DONE_REASON:-done_check})"
             exit 1
@@ -1272,8 +1442,10 @@ jobs:
       # même après échec ou annulation ; ne fait jamais échouer le job. Contenu neutre : codes,
       # raison, SHA, URL, ISC, modèle ; jamais de texte du modèle. URL et clé passées à curl par
       # stdin (-K -), jamais en argument ni à l'écran ; aucun script du dépôt n'est lancé ici.
+      # Chaîné (chain_enabled=true) : silencieux tant qu'un lien suivant est dispatché
+      # (steps.chain.outputs.continue == 'true') — seules la fin de chaîne et un blocage notifient.
       - name: Notification de fin (opencode-notify)
-        if: always()
+        if: always() && (inputs.chain_enabled != 'true' || steps.chain.outputs.continue != 'true')
         continue-on-error: true
         timeout-minutes: 3
         env:
