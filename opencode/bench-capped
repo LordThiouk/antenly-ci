@@ -49,6 +49,21 @@ set -uo pipefail
 out="$1"
 trust_cg="$2"
 shift 2
+# Placement déterministe : ce processus se déplace LUI-MÊME dans le cgroup avant
+# tout fork. Le déplacement par le parent après `&` était une course : la commande
+# naissait dans le cgroup ambiant, échappait au plafond et épuisait le runner
+# (SIGTERM -> exit 143 du step). Échec de placement = sortie 3, jamais un OOM.
+if [ -n "${BENCH_CAPPED_CGROUP:-}" ]; then
+  cg_name=${BENCH_CAPPED_CGROUP##*/}
+  echo "$$" | sudo -n tee "$BENCH_CAPPED_CGROUP/cgroup.procs" >/dev/null 2>&1 || {
+    echo "bench-capped: placement de $$ dans $BENCH_CAPPED_CGROUP refusé" >&2
+    exit 3
+  }
+  case "$(cat /proc/self/cgroup 2>/dev/null)" in
+    *"$cg_name"*) ;;
+    *) echo "bench-capped: placement de $$ non vérifié (attendu $cg_name)" >&2; exit 3 ;;
+  esac
+fi
 timef="$out.time"
 if [ -x /usr/bin/time ]; then
   /usr/bin/time -f '%M' -o "$timef" -- "$@" &
@@ -138,9 +153,10 @@ case "$method" in
     rc=$?
     ;;
   cgroup2)
-    "$_tmp/inner" "$_tmp/peak" 1 "$@" &
+    # Le cible se place elle-même (voir inner) : aucun fork ne précède l'entrée
+    # dans le cgroup, donc la commande et ses descendants héritent du plafond.
+    BENCH_CAPPED_CGROUP="$_cg" "$_tmp/inner" "$_tmp/peak" 1 "$@" &
     child=$!
-    echo "$child" | sudo -n tee "$_cg/cgroup.procs" >/dev/null 2>&1 || true
     wait "$child" 2>/dev/null
     rc=$?
     cgpeak=$(tr -dc '0-9' < "$_cg/memory.peak" 2>/dev/null || true)
