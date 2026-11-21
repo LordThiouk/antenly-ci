@@ -4,6 +4,11 @@
 #    (code 125). L'activité n'est pas que la croissance de $OC_LOG : les fichiers de session
 #    comptent aussi (un sous-agent travaille sans écrire dans le flux principal) ; le CPU ne
 #    compte pas (un opencode figé garde un petit CPU de boucle d'événements).
+#  - erreur agent puis silence : dès qu'une ligne `[agent-error] type=timeout|empty|provider` paraît
+#    dans la passe, l'absence d'activité pendant OC_ERROR_IDLE_SEC (240 s par défaut) coupe la passe
+#    et déclenche le MÊME repli que le silence (même MAX_RESUMES, même `fallback=`). Indispensable en
+#    chaîne : le seuil normal de 20 min y consomme tout le temps restant avant le push. type=429 est
+#    exclu — le quota garde son comportement (repli au code de sortie, jamais une coupure anticipée).
 #  - plafond : à OC_DEADLINE_EPOCH (heure absolue, marge de push prise par le workflow), arrêt
 #    propre (code 124).
 # Reprise après un arrêt :
@@ -37,7 +42,7 @@
 #
 # Variables obligatoires : ANTENLY_DIR, OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
 # OC_IDLE_MIN. Optionnelles : OC_BIN, OC_POLL_SEC, OC_KILL_GRACE, OC_IDLE_SEC (tests),
-# OC_SUBAGENT_IDLE_SEC, OC_STALL_RESUMES, OC_CONTINUE_PROBE_SEC, OC_MODEL_CHAIN,
+# OC_ERROR_IDLE_SEC, OC_SUBAGENT_IDLE_SEC, OC_STALL_RESUMES, OC_CONTINUE_PROBE_SEC, OC_MODEL_CHAIN,
 # OC_MODEL_FALLBACK (compat), OC_STORE_DIR, OC_AGENT_DIR, OC_INTERNAL_LOG,
 # OC_INTERNAL_LOG_DIR, OC_HOOKS_LOG, OC_DONE_VERIFY, OC_ISA/OC_ISA_PATH, OC_REPORT,
 # OC_DONE_CHECK_SEC, OC_DONE_IDLE_SEC, OC_DONE_CHECK_BIN, OC_IDLE_CPU.
@@ -107,6 +112,11 @@ fi
 # OC_IDLE_SEC : uniquement pour les tests locaux (délai court) ; en CI, OC_IDLE_MIN fait foi.
 IDLE_SEC=$(( OC_IDLE_MIN * 60 ))
 [[ "${OC_IDLE_SEC:-}" =~ ^[0-9]{1,5}$ ]] && IDLE_SEC="$OC_IDLE_SEC"
+# OC_ERROR_IDLE_SEC : délai court APRÈS une erreur agent (timeout/empty/provider) sans activité ;
+# 0 désactive. Seul ce délai est raccourci : le seuil de silence normal (IDLE_SEC/EFFECTIVE_IDLE) et
+# le repli 429 restent intacts. Valeur invalide = environnement refusé (90), jamais avalée.
+ERROR_IDLE_SEC="${OC_ERROR_IDLE_SEC:-240}"
+[[ "$ERROR_IDLE_SEC" =~ ^[0-9]{1,5}$ ]] || { echo "OC_ERROR_IDLE_SEC invalide" >&2; exit 90; }
 # Activité d'un sous-agent ou d'un outil lancé par l'agent : elle compte comme celle du parent
 # (voir active() : fichiers de session qui bougent ; CPU des processus ENFANTS de l'agent). La
 # coupure n'a donc lieu qu'après OC_IDLE_MIN minutes sans AUCUNE activité du parent ni des enfants :
@@ -210,9 +220,22 @@ useful_from() {
 
 # Trace courte, sans secret ni texte du modèle, d'un échec agent. Le workflow compte ces lignes
 # par type exact (timeout|empty|provider|429) dans le statut final et le JSON opencode-notify.
+# Au plus UNE ligne error= par passe : le `log_error empty` générique (sortie vide) ne doit pas
+# s'ajouter à un type déjà tracé (silence, sous-agent, error_idle, 429/provider).
+ERR_WRITTEN=0
 log_error() {
   case "$1" in timeout|empty|provider|429) ;; *) return 0 ;; esac
+  [ "$ERR_WRITTEN" -eq 0 ] || return 0
+  ERR_WRITTEN=1
   printf '[agent-error] type=%s\n' "$1" >>"$OC_LOG"
+  printf 'error=%s\n' "$1" >>"$OC_LOG.status"
+}
+# error_idle : le marqueur [agent-error] est déjà dans la passe (écrit par le plugin), on ne le
+# duplique pas — seul le type réel est porté au statut, une seule fois.
+log_error_status() {
+  case "$1" in timeout|empty|provider|429) ;; *) return 0 ;; esac
+  [ "$ERR_WRITTEN" -eq 0 ] || return 0
+  ERR_WRITTEN=1
   printf 'error=%s\n' "$1" >>"$OC_LOG.status"
 }
 
@@ -503,7 +526,7 @@ agent_limit() {
 # Si WATCH_PROBE_SEC > 0, la passe est aussi coupée au bout de ce délai tant qu'aucun token utile
 # n'est apparu (reason=probe) : c'est la sonde qui décide si `--continue` vaut la peine.
 run_watched() {
-  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU LAST_CHILD_CPU=0 probe_end=0 last_done=0
+  local pid pgid last_act now reason="" LAST_SIZE LAST_CPU LAST_CHILD_CPU=0 probe_end=0 last_done=0 error_at=0 err
   WATCH_RC=0; WATCH_REASON=""
   if [[ "${WATCH_PROBE_SEC:-0}" =~ ^[0-9]{1,4}$ ]] && [ "$WATCH_PROBE_SEC" -ge 1 ]; then
     probe_end=$(( $(date +%s) + WATCH_PROBE_SEC ))
@@ -523,6 +546,18 @@ run_watched() {
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s)
     if active "$pid"; then last_act="$now"; fi
+    # Erreur agent écrite DANS cette passe (timeout/empty/provider — jamais 429), puis plus rien :
+    # on arme un délai court, indépendant du seuil de silence normal. Une activité postérieure
+    # réarme le compteur : on ne coupe que si RIEN ne suit l'erreur.
+    if [ "$ERROR_IDLE_SEC" -ge 1 ]; then
+      err=$(tail -c +"$(( ${ATTEMPT_START:-0} + 1 ))" "$OC_LOG" 2>/dev/null \
+            | grep -a -E -m1 '^\[agent-error\] type=(timeout|empty|provider)$' || true)
+      if [ -z "$err" ]; then
+        error_at=0
+      elif [ "$error_at" -eq 0 ] || [ "$last_act" -gt "$error_at" ]; then
+        error_at="$now"
+      fi
+    fi
     # Validateur indépendant, périodique : Max a-t-il rendu un PASS vérifiable (a/b/c/d) ?
     if [ $(( now - last_done )) -ge "$DONE_CHECK_SEC" ]; then
       last_done=$now
@@ -545,6 +580,14 @@ run_watched() {
     if [ "$SUBFAIL_MAX" -gt 0 ] \
       && [ "$(tail -c +"$(( ${ATTEMPT_START:-0} + 1 ))" "$OC_LOG" 2>/dev/null | grep -aEc "$SUBFAIL_RE")" -ge "$SUBFAIL_MAX" ]; then
       reason=subagent_fail
+      break
+    fi
+    # Coupure courte sur erreur agent suivie de silence : WATCH_RC=125 comme un silence, donc
+    # exactement la même reprise (même MAX_RESUMES, même `fallback=<modèle>`). Le 429 n'atteint
+    # jamais cette branche : son repli reste lié au code de sortie d'opencode.
+    if [ "$error_at" -gt 0 ] && [ $(( now - error_at )) -ge "$ERROR_IDLE_SEC" ] \
+       && [ "$last_act" -le "$error_at" ]; then
+      reason=error_idle
       break
     fi
     if [ $(( now - last_act )) -ge "$EFFECTIVE_IDLE" ]; then agent_limit "$now"; fi
@@ -579,7 +622,9 @@ run_watched() {
 # Pose A_RC, A_USEFUL (0/1) et A_REASON. $1 = durée de sonde (0 = aucune), le reste = arguments.
 run_pass() {
   local probe="$1"; shift
-  local delta="${OC_LOG}.last"
+  local delta="${OC_LOG}.last" err_type=""
+  ERR_WRITTEN=0
+  A_ERR_TYPE=""                 # type d'erreur de CETTE passe, lu par le message de reprise
   ATTEMPT_START=$(size)
   WATCH_PROBE_SEC="$probe"
   run_watched "$@"
@@ -587,6 +632,14 @@ run_pass() {
   if useful_from "$ATTEMPT_START"; then A_USEFUL=1; else A_USEFUL=0; fi
   case "$A_REASON" in
     silence) log_error timeout ;;
+    error_idle)
+      # Le marqueur est déjà dans la passe : ne pas dupliquer la ligne [agent-error]. Le statut
+      # porte le type réel lu dans le journal, pour rester lisible comme une reprise sur silence.
+      err_type=$(tail -c +"$(( ATTEMPT_START + 1 ))" "$OC_LOG" 2>/dev/null \
+                 | grep -a -E -o -m1 'type=(timeout|empty|provider)' | cut -d= -f2 || true)
+      A_ERR_TYPE="$err_type"
+      [ -n "$err_type" ] && log_error_status "$err_type"
+      ;;
     subagent)
       log_error timeout
       # Un sous-agent n'a plus rien écrit : la passe est coupée au seuil court (8 min par défaut).
@@ -599,10 +652,8 @@ run_pass() {
     probe) ;; # coupure volontaire : l'absence de token est le constat (type empty ci-dessous)
     max_pass) ;; # fin anticipée : pass confirmé par done_check.sh, pas par le modèle
   esac
-  if [ "$A_USEFUL" -eq 0 ] && [ "$A_REASON" != max_pass ]; then
-    log_error empty
-  fi
-  # 429 / limite d'usage : uniquement dans la sortie de CETTE passe (pas un 429 périmé).
+  # 429 / limite d'usage : uniquement dans la sortie de CETTE passe (pas un 429 périmé). Classé
+  # AVANT le vide générique pour que le vrai motif gagne si la passe est aussi jugée « vide ».
   if [ "$A_RC" -ne 0 ] && [ "$A_RC" -ne 124 ] && [ "$A_RC" -ne 125 ]; then
     delta_from "$ATTEMPT_START" "$delta"
     if grep -qiE '\b429\b|too many requests|rate.?limit|usage limit' "$delta"; then
@@ -611,6 +662,10 @@ run_pass() {
       log_error provider
     fi
     rm -f "$delta"
+  fi
+  # Vide générique : seulement si aucun type n'a déjà été tracé pour cette passe (unicité error=).
+  if [ "$A_USEFUL" -eq 0 ] && [ "$A_REASON" != max_pass ]; then
+    log_error empty
   fi
   collect_internal_logs
   return 0
@@ -646,6 +701,7 @@ resume_context() {
 WATCH_RC=0
 WATCH_REASON=""
 ATTEMPT_START=0
+A_ERR_TYPE=""
 
 # --- Passe principale ---
 run_pass 0 "$OC_BIN" run --model "$OC_MODEL_MAIN" --title "${OC_JOB:-fullrun}" "$PROMPT"
@@ -672,7 +728,14 @@ while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remai
   echo "stall_resume=$STALLS" >>"$OC_LOG.status"
   echo "fallback=$m" >>"$OC_LOG.status"
   rewrite_agent_models "$m"
-  probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé n'a rien rendu pendant $(( EFFECTIVE_IDLE / 60 )) min et a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
+  # Cause réelle de la coupure : une erreur agent suivie de OC_ERROR_IDLE_SEC secondes sans
+  # activité n'a RIEN à voir avec le seuil de silence normal (20 min par défaut). Le modèle doit
+  # relire le bon diagnostic, sinon il cherche un blocage qui n'a pas eu lieu.
+  if [ "${A_REASON:-}" = error_idle ]; then
+    probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé a signalé une erreur de type ${A_ERR_TYPE:-inconnu}, puis est resté sans activité ${ERROR_IDLE_SEC} s (OC_ERROR_IDLE_SEC) ; il a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
+  else
+    probe_msg="Reprends exactement où tu t'es arrêté. Le dernier agent lancé n'a rien rendu pendant $(( EFFECTIVE_IDLE / 60 )) min et a été coupé ; son verdict est MANQUANT (jamais un pass). Relis le contexte CI ci-dessus et ${OC_REPORT:-le rapport} s'il existe, puis continue le FullRun dans l'ordre des étapes, sans sauter de porte."
+  fi
   new_msg="Reprise FullRun après blocage — ceci est une NOUVELLE session, ne t'appuie pas sur la session précédente. Relis le contexte CI, ${OC_REPORT:-le rapport} s'il existe, l'état ISA / FullRun et l'étape courante, puis reprends le FullRun dans l'ordre, sans sauter de porte : un verdict manquant n'est jamais un pass."
   # Point de reprise : étape suivante et verdicts déjà obtenus (voir checkpoint.sh). Une reprise
   # repart de là ; elle ne refait ni les étapes validées ni les verdicts encore valables.
