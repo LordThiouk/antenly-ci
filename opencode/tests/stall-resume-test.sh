@@ -69,6 +69,17 @@ case "\$mode" in
   error-429)
     [ \$n -eq 1 ] && { echo "[agent-error] type=429"; hang; }
     ok_fin ;;
+  error-idle-provider)
+    [ \$n -eq 1 ] && { echo "[agent-error] type=provider"; hang; }
+    ok_fin ;;
+  error-idle-resume)
+    # Marqueur puis activité réelle au-delà du seuil court : le compteur d'erreur doit se réarmer.
+    [ \$n -eq 1 ] && {
+      echo "[agent-error] type=timeout"
+      for i in 1 2 3 4 5 6; do echo "token apres erreur \$i"; sleep 1; done
+      ok_fin
+    }
+    ok_fin ;;
   *)
     echo "mode inconnu" >&2; exit 2 ;;
 esac
@@ -107,6 +118,17 @@ run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
 run_err() { # $1 = reprises max, $2 = OC_ERROR_IDLE_SEC, $3 = OC_IDLE_SEC (silence normal)
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
   OC_MODEL_CHAIN="opencode/glm-free,opencode/mini-free" \
+  OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC="$3" \
+  OC_ERROR_IDLE_SEC="$2" OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=2 \
+  OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" OC_AGENT_DIR="$T/agents" \
+  OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
+}
+
+# Variante MODE SIMPLE : OC_MODEL_FALLBACK seul (pas de OC_MODEL_CHAIN), pour prouver que le repli
+# rapide sur erreur agent reste actif hors chaînage. Mêmes délais courts que run_err.
+run_err_simple() { # $1 = reprises max, $2 = OC_ERROR_IDLE_SEC, $3 = OC_IDLE_SEC (silence normal)
+  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
+  OC_MODEL_FALLBACK=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC="$3" \
   OC_ERROR_IDLE_SEC="$2" OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=2 \
   OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" OC_AGENT_DIR="$T/agents" \
@@ -277,12 +299,13 @@ fi
 #     (10 s). Même compteur (1/2), même statut fallback que la reprise sur silence.
 mk error-idle
 t0=$(date +%s); run_err 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
-if [ "$rc" -eq 0 ] && [ "$dt" -lt 9 ] \
-   && grep -q '^\[agent-error\] type=timeout' "$T/log" \
-   && grep -q '^\[stall\] .*reprise 1/2' "$T/log" \
-   && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
-   && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
-   && grep -q '^error=timeout' "$T/log.status"; then
+if [ "$rc" -eq 0 ] && [ "$dt" -ge 2 ] && [ "$dt" -lt 9 ] \
+    && grep -q '^\[agent-error\] type=timeout' "$T/log" \
+    && grep -q '^\[stall\] .*reprise 1/2' "$T/log" \
+    && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
+    && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
+    && [ "$(grep -c '^error=' "$T/log.status")" -eq 1 ] \
+    && grep -q '^error=timeout' "$T/log.status"; then
   echo "ok 15 erreur timeout + silence court -> repli immédiat sur la chaîne (${dt}s)"
 else
   echo "FAIL 15 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
@@ -291,11 +314,12 @@ fi
 # 16. même chose avec une erreur empty.
 mk error-empty
 t0=$(date +%s); run_err 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
-if [ "$rc" -eq 0 ] && [ "$dt" -lt 9 ] \
-   && grep -q '^\[agent-error\] type=empty' "$T/log" \
-   && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
-   && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
-   && grep -q '^error=empty' "$T/log.status"; then
+if [ "$rc" -eq 0 ] && [ "$dt" -ge 2 ] && [ "$dt" -lt 9 ] \
+    && grep -q '^\[agent-error\] type=empty' "$T/log" \
+    && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
+    && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
+    && [ "$(grep -c '^error=' "$T/log.status")" -eq 1 ] \
+    && grep -q '^error=empty' "$T/log.status"; then
   echo "ok 16 erreur empty + silence court -> repli immédiat (${dt}s)"
 else
   echo "FAIL 16 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
@@ -328,6 +352,91 @@ if [ "$rc" -eq 90 ] && [ ! -f "$T/calls" ]; then
   echo "ok 19 OC_ERROR_IDLE_SEC invalide -> 90, opencode jamais lancé"
 else
   echo "FAIL 19 rc=$rc"; calls; fail=1
+fi
+
+# 20. réarmement : le marqueur est écrit PUIS l'agent continue à écrire des tokens au-delà du seuil
+#     court (3 s). Le compteur d'erreur doit repartir de zéro : aucune coupure, un seul appel, aucun
+#     fallback. Une régression qui couperait dès le marqueur échouerait ici.
+mk error-idle-resume
+t0=$(date +%s); run_err 2 3 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$dt" -ge 5 ] && [ "$(cat "$T/n")" -eq 1 ] \
+    && grep -q '^\[agent-error\] type=timeout' "$T/log" \
+    && ! grep -q '^\[stall\]' "$T/log" \
+    && ! grep -q '^fallback=' "$T/log.status"; then
+  echo "ok 20 erreur puis activité > seuil -> compteur réarmé, aucun repli, un seul appel (${dt}s)"
+else
+  echo "FAIL 20 rc=$rc dt=${dt}s n=$(cat "$T/n")"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 21. type=provider sur le chemin error_idle (marqueur + silence), pas seulement par code de sortie.
+mk error-idle-provider
+t0=$(date +%s); run_err 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$dt" -ge 2 ] && [ "$dt" -lt 9 ] \
+    && grep -q '^\[agent-error\] type=provider' "$T/log" \
+    && grep -q '^\[stall\] .*reprise 1/2' "$T/log" \
+    && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
+    && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
+    && [ "$(grep -c '^error=' "$T/log.status")" -eq 1 ] \
+    && grep -q '^error=provider' "$T/log.status"; then
+  echo "ok 21 marqueur provider + silence -> repli rapide sur la chaîne (${dt}s)"
+else
+  echo "FAIL 21 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 22. message de reprise : sur une coupure error_idle il doit dire la VRAIE cause (type d'erreur et
+#     OC_ERROR_IDLE_SEC), pas « n'a rien rendu pendant 20 min ». Silence normal réglé à 1200 s pour
+#     rendre le mensonge détectable. Le faux opencode trace tous ses arguments dans $T/calls.
+mk error-idle; run_err 2 2 1200; rc=$?
+if [ "$rc" -eq 0 ] \
+    && grep -q 'erreur de type timeout' "$T/calls" \
+    && grep -q 'OC_ERROR_IDLE_SEC' "$T/calls" \
+    && grep -q '2 s' "$T/calls" \
+    && ! grep -q "n'a rien rendu pendant" "$T/calls"; then
+  echo "ok 22 reprise error_idle : vraie cause (erreur timeout, 2 s via OC_ERROR_IDLE_SEC)"
+else
+  echo "FAIL 22 rc=$rc"; calls; fail=1
+fi
+
+# 23. non-régression : sur un SILENCE normal, le message historique reste inchangé.
+mk hang-then-ok; run 3 2; rc=$?
+if [ "$rc" -eq 0 ] && grep -q "n'a rien rendu pendant" "$T/calls" \
+    && ! grep -q 'OC_ERROR_IDLE_SEC' "$T/calls"; then
+  echo "ok 23 reprise sur silence : message historique conservé"
+else
+  echo "FAIL 23 rc=$rc"; calls; fail=1
+fi
+
+# 24. OC_ERROR_IDLE_SEC reste actif en MODE SIMPLE (OC_MODEL_FALLBACK seul, aucun OC_MODEL_CHAIN) :
+#     le repli rapide sert aussi au mode non chaîné, comme décidé.
+mk error-idle
+t0=$(date +%s); run_err_simple 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$dt" -ge 2 ] && [ "$dt" -lt 9 ] \
+    && grep -q '^call 2: run --continue --model opencode/fb-free' "$T/calls" \
+    && grep -q '^fallback=opencode/fb-free' "$T/log.status" \
+    && grep -q '^error=timeout' "$T/log.status"; then
+  echo "ok 24 OC_ERROR_IDLE_SEC actif en mode simple (fallback unique) (${dt}s)"
+else
+  echo "FAIL 24 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 25. le câblage du workflow reste inconditionnel (aucune garde chain_enabled) : une seule valeur
+#     littérale dans l'env du step oc, identique en chaîné et hors chaîné.
+yml="$HERE/../../.github/workflows/opencode-fullrun.yml"
+if [ "$(grep -c 'OC_ERROR_IDLE_SEC:' "$yml")" -eq 1 ] \
+    && grep -Eq '^[[:space:]]+OC_ERROR_IDLE_SEC: "240"[[:space:]]*$' "$yml"; then
+  echo "ok 25 OC_ERROR_IDLE_SEC=240 sans condition dans le workflow (mode simple et chaîné)"
+else
+  echo "FAIL 25 câblage workflow absent ou conditionné"; fail=1
+fi
+
+# 26. aucune passe n'écrit deux lignes error= dans le statut. Ici une passe muette coupée au silence
+#     écrivait historyquement error=timeout PUIS error=empty.
+mk hang-always; run_err 0 0 3; rc=$?
+if [ "$rc" -eq 125 ] && [ "$(grep -c '^error=' "$T/log.status")" -eq 1 ] \
+    && grep -q '^error=timeout' "$T/log.status"; then
+  echo "ok 26 passe muette coupée : une seule ligne error= dans le statut"
+else
+  echo "FAIL 26 rc=$rc errors=$(grep -c '^error=' "$T/log.status")"; tail -n 10 "$T/log.status"; fail=1
 fi
 
 exit $fail
