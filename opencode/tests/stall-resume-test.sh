@@ -60,6 +60,15 @@ case "\$mode" in
       3) echo "encore bloque"; exit 1 ;;
       *) ok_fin ;;
     esac ;;
+  error-idle)
+    [ \$n -eq 1 ] && { echo "[agent-error] type=timeout"; hang; }
+    ok_fin ;;
+  error-empty)
+    [ \$n -eq 1 ] && { echo "[agent-error] type=empty"; hang; }
+    ok_fin ;;
+  error-429)
+    [ \$n -eq 1 ] && { echo "[agent-error] type=429"; hang; }
+    ok_fin ;;
   *)
     echo "mode inconnu" >&2; exit 2 ;;
 esac
@@ -93,6 +102,15 @@ run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
   OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
+}
+
+run_err() { # $1 = reprises max, $2 = OC_ERROR_IDLE_SEC, $3 = OC_IDLE_SEC (silence normal)
+  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
+  OC_MODEL_CHAIN="opencode/glm-free,opencode/mini-free" \
+  OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC="$3" \
+  OC_ERROR_IDLE_SEC="$2" OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=2 \
+  OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" OC_AGENT_DIR="$T/agents" \
+  OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
 # 1. silence puis reprise réussie (la sonde --continue parle) — cas déjà couvert.
@@ -252,6 +270,64 @@ if [ "$rc" -eq 0 ] && [ "$(cat "$T/n")" -eq 1 ] \
   echo "ok 14 ok-after-done -> done_check=ok, arret=max_pass, rc 0, un seul appel"
 else
   echo "FAIL 14 rc=$rc n=$(cat "$T/n")"; calls; tail -n 8 "$T/log.status"; fail=1
+fi
+
+# 15. défaut 2 : une erreur agent timeout écrite pendant la passe, puis plus aucune activité, coupe
+#     la passe après OC_ERROR_IDLE_SEC (2 s) et reprend sur la chaîne — bien avant le silence normal
+#     (10 s). Même compteur (1/2), même statut fallback que la reprise sur silence.
+mk error-idle
+t0=$(date +%s); run_err 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$dt" -lt 9 ] \
+   && grep -q '^\[agent-error\] type=timeout' "$T/log" \
+   && grep -q '^\[stall\] .*reprise 1/2' "$T/log" \
+   && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
+   && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
+   && grep -q '^error=timeout' "$T/log.status"; then
+  echo "ok 15 erreur timeout + silence court -> repli immédiat sur la chaîne (${dt}s)"
+else
+  echo "FAIL 15 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 16. même chose avec une erreur empty.
+mk error-empty
+t0=$(date +%s); run_err 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 0 ] && [ "$dt" -lt 9 ] \
+   && grep -q '^\[agent-error\] type=empty' "$T/log" \
+   && grep -q '^call 2: run --continue --model opencode/glm-free' "$T/calls" \
+   && grep -q '^fallback=opencode/glm-free' "$T/log.status" \
+   && grep -q '^error=empty' "$T/log.status"; then
+  echo "ok 16 erreur empty + silence court -> repli immédiat (${dt}s)"
+else
+  echo "FAIL 16 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log"; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 17. marqueur 429 : comportement INTACT — aucune coupure anticipée, le seuil de silence normal (10 s)
+#     fait foi, aucun modèle de secours n'est lancé ici (reprises désactivées pour isoler la passe).
+mk error-429
+t0=$(date +%s); run_err 0 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
+if [ "$rc" -eq 125 ] && [ "$dt" -ge 9 ] && [ "$(cat "$T/n")" -eq 1 ] \
+   && grep -q '^\[agent-error\] type=429' "$T/log" \
+   && grep -qx 'arret=silence' "$T/log.status" \
+   && ! grep -q '^fallback=' "$T/log.status"; then
+  echo "ok 17 marqueur 429 -> seuil de silence normal conservé (${dt}s), pas de repli anticipé"
+else
+  echo "FAIL 17 rc=$rc dt=${dt}s n=$(cat "$T/n")"; calls; tail -n 10 "$T/log.status"; fail=1
+fi
+
+# 18. la variable est câblée dans l'env du step opencode du workflow (défaut 240 s).
+if grep -q 'OC_ERROR_IDLE_SEC:' "$HERE/../../.github/workflows/opencode-fullrun.yml" \
+   && grep -q 'OC_ERROR_IDLE_SEC:-240' "$R"; then
+  echo "ok 18 OC_ERROR_IDLE_SEC câblée dans le workflow, défaut 240 s"
+else
+  echo "FAIL 18 variable non câblée"; fail=1
+fi
+
+# 19. OC_ERROR_IDLE_SEC invalide -> erreur d'environnement 90, rien n'est lancé (jamais avalée).
+mk ok-after-done; run_err 2 abc 10; rc=$?
+if [ "$rc" -eq 90 ] && [ ! -f "$T/calls" ]; then
+  echo "ok 19 OC_ERROR_IDLE_SEC invalide -> 90, opencode jamais lancé"
+else
+  echo "FAIL 19 rc=$rc"; calls; fail=1
 fi
 
 exit $fail
