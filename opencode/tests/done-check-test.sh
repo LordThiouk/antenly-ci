@@ -7,6 +7,8 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 DC="$ROOT/opencode/done_check.sh"
+# shellcheck source=verdict-cli.sh
+source "$HERE/verdict-cli.sh"
 RUN="$ROOT/opencode/run-fullrun.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -270,6 +272,29 @@ mkstore2 "$T/s12d" "Max:$ENDP" "Silas:$(( (COMMIT + 200) * 1000 ))"
 out=$(call2 "$T/s12d" OC_DONE_REPO="$T/repo2"); [ "$out" = "done_check=ko raison=a:time" ] \
   && ok 12d "Max PASS antérieur à un commit de code postérieur : refusé (a:time)" || ko "12d [$out]"
 out=$(call2 "$T/s12d"); [ "$out" = "done_check=ok" ] && ok 12d2 "même stockage, dépôt sans commit postérieur : ok (le refus vient bien du commit)" || ko "12d2 [$out]"
+
+# 13. Source unique du verdict (incident 22 nov. 2026) : le pipeline lifeos lisait pass dans l'enveloppe
+#     opencode 1.19 (<task id state="completed"> … <task_result>), l'ancien lecteur python lisait « inconclusif ».
+#     done_check.sh délègue désormais à LIFEOS/TOOLS/FullRunVerdict.ts (pass|fail|unknown, code 0/1/3).
+env119() { printf '<task id="ses_abc" state="%s">\n<summary>Revue</summary>\n<task_result>\n%s\n</task_result>\n</task>' "$1" "$2"; }
+mkstore "$T/s13a" "opencode/v4-flash-free" 42 "$(env119 completed $'Revue terminée.\n{"status":"pass"}')" "$ENDP"
+out=$(call "$T/s13a"); [ "$out" = "done_check=ok" ] && ok 13a "enveloppe <task> 1.19 + JSON final pass : pass (comme le pipeline)" || ko "13a [$out]"
+mkstore "$T/s13b" "opencode/v4-flash-free" 42 "$(env119 completed 'VERDICT: FAIL')" "$ENDP"
+out=$(call "$T/s13b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 13b "enveloppe 1.19 + VERDICT: FAIL : refusé" || ko "13b [$out]"
+mkstore "$T/s13c" "opencode/v4-flash-free" 42 "$(env119 error '{"status":"pass"}')" "$ENDP"
+out=$(call "$T/s13c"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 13c "enveloppe 1.19 en erreur + JSON pass cité : inconclusif, jamais pass" || ko "13c [$out]"
+mkstore "$T/s13d" "opencode/v4-flash-free" 42 $'task_id: ses_x (for resuming...)\n\n<task_result>\nVERDICT: PASS\n</task_result>' "$ENDP"
+out=$(call "$T/s13d"); [ "$out" = "done_check=ok" ] && ok 13d "ancienne enveloppe task_id/<task_result> + VERDICT: PASS : pass" || ko "13d [$out]"
+# CLI absent ou défaillant : jamais pass, panne nommée (a:verdict-cli), jamais « inconclusif » silencieux.
+mkstore "$T/s13e" "opencode/v4-flash-free" 42 $'Revue.\n{"status":"pass"}' "$ENDP"
+out=$(call "$T/s13e" OC_VERDICT_CLI=/nonexistent/FullRunVerdict.ts); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13e "CLI introuvable : refus nommé a:verdict-cli, jamais ok" || ko "13e [$out]"
+FAKE="$T/fakebun"; mkdir -p "$FAKE"
+printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 3\n' >"$FAKE/bun-pass-rc3"; chmod +x "$FAKE/bun-pass-rc3"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-pass-rc3"); [ "$out" != "done_check=ok" ] && ok 13f "stdout « pass » mais code 3 : pas pass (le code ET la sortie doivent dire pass)" || ko "13f [$out]"
+printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 0\n' >"$FAKE/bun-unknown-rc0"; chmod +x "$FAKE/bun-unknown-rc0"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown-rc0"); [ "$out" != "done_check=ok" ] && ok 13g "code 0 mais sortie « unknown » : pas pass" || ko "13g [$out]"
+printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 3\n' >"$FAKE/bun-unknown"; chmod +x "$FAKE/bun-unknown"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 13h "code 3 (unknown) : inconclusif" || ko "13h [$out]"
 
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

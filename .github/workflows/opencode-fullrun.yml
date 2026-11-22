@@ -757,6 +757,17 @@ jobs:
             "$CI_DIR/opencode/bench-capped" \
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
+          # CLI de verdict lifeos (source unique du verdict lu par done_check.sh) : bundle autonome construit ici,
+          # copié en root — l'agent ne peut pas le remplacer pour fabriquer un PASS. Absent (lifeos_ref ancien) :
+          # done_check.sh refuse nommément (a:verdict-cli), jamais de PASS par défaut.
+          V="$GITHUB_WORKSPACE/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts"
+          if [ -f "$V" ]; then
+            bun build "$V" --target bun --outfile "$RUNNER_TEMP/FullRunVerdict.js" >/dev/null
+            sudo install -o root -g root -m 0644 "$RUNNER_TEMP/FullRunVerdict.js" "$T/FullRunVerdict.js"
+            rm -f "$RUNNER_TEMP/FullRunVerdict.js"
+          else
+            echo "::warning::lifeos@$IN_LIFEOS_REF sans LIFEOS/TOOLS/FullRunVerdict.ts : verdicts d'agent non vérifiables (a:verdict-cli)"
+          fi
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
           # pouvoir être remplacé par l'agent.

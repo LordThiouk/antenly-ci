@@ -13,6 +13,8 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 RUN="$ROOT/opencode/run-fullrun.sh"; CP="$ROOT/opencode/checkpoint.sh"; DC="$ROOT/opencode/done_check.sh"
+# shellcheck source=verdict-cli.sh
+source "$HERE/verdict-cli.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok() { echo "ok $1"; pass=$((pass + 1)); }
