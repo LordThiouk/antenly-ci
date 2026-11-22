@@ -105,6 +105,12 @@ rm -f "$R/pas-commite.txt"
 printf -- '---\nphase: complete\n---\n' >"$ISA"
 out=$(call "$T/s6"); [ "$out" = "done_check=ko raison=d:isa-complete" ] && ok 9 "ISA close refusée" || ko "9 [$out]"
 printf -- '---\nphase: climbing\n---\n' >"$ISA"
+# 9v. validate_only (OC_DONE_VALIDATE_ONLY=1) : seul d:isa-complete est sauté ; le reste reste exigé
+printf -- '---\nphase: complete\n---\n' >"$ISA"
+out=$(call "$T/s6" OC_DONE_VALIDATE_ONLY=1); [ "$out" = "done_check=ok" ] && ok 9vb "validate_only : ISA close acceptée" || ko "9vb [$out]"
+out=$(call "$T/s6" OC_DONE_VALIDATE_ONLY=true); [ "$out" = "done_check=ko raison=d:isa-complete" ] && ok 9vc "validate_only : seule la valeur exacte 1 compte" || ko "9vc [$out]"
+out=$(call "$T/s3" OC_DONE_VALIDATE_ONLY=1); [ "$out" = "done_check=ko raison=a:tokens" ] && ok 9vd "validate_only : les contrôles a restent exigés" || ko "9vd [$out]"
+printf -- '---\nphase: climbing\n---\n' >"$ISA"
 
 # 9b. magasin absent -> a:stockage : un chemin faux n'est pas « aucune tâche Max » (run F4).
 out=$(call "$T/absent")
@@ -380,13 +386,20 @@ else
   # Production : aucun env d'override, aucun mode test.
   callp() { local store="$1"; shift
     env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT \
-        OC_STORE_DIR="$store" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$REPORT" OC_ISA="$ISA" OC_DONE_REPO="$R" "$@" bash "$DC" 2>/dev/null; }
+        OC_STORE_DIR="$store" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$REPORT" OC_ISA="$ISA" OC_DONE_REPO="$R" "$@" bash "$DC" 2>>"$T/callp.err"; }
   # Injection comme le ferait $GITHUB_ENV : mode test + faux CLI + faux bun « toujours pass » dans l'environnement.
   printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 0\n' >"$FAKE/bun-always-pass"; chmod +x "$FAKE/bun-always-pass"; : >"$FAKE/fake-cli.js"
   INJ=(OC_DONE_TEST_MODE=1 OC_VERDICT_CLI="$FAKE/fake-cli.js" OC_BUN="$FAKE/bun-always-pass")
   mkstore "$T/s14a" "opencode/v4-flash-free" 42 "$(env119 completed $'Revue terminée.\n{"status":"pass"}')" "$ENDP"
   mkstore "$T/s14b" "opencode/v4-flash-free" 42 "$(env119 completed 'VERDICT: FAIL')" "$ENDP"
   install_pt
+  # Diagnostic (jamais de secret : chemins, uid, modes) : si le chemin de production est refusé, dit pourquoi.
+  : >"$T/callp.err"; out=$(callp "$T/s14a")
+  if [ "$out" != "done_check=ok" ]; then
+    echo "diag 14 : sortie [$out] ; $(tr '\n' ' ' <"$T/callp.err")"
+    stat -c 'diag %n uid=%u gid=%g mode=%a type=%F' / /opt "$PT" "$PT"/* 2>&1 | sed 's/^/  /'
+    echo "diag uid=$(id -u) bun=$BUNBIN -> $(readlink -f "$BUNBIN") GITHUB_ACTIONS=${GITHUB_ACTIONS:-}"
+  fi
   out=$(callp "$T/s14a"); [ "$out" = "done_check=ok" ] && ok 14a "production : bundle réel + bun root, sans OC_VERDICT_CLI ni mode test : pass" || ko "14a [$out]"
   out=$(callp "$T/s14b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14b "production : VERDICT: FAIL refusé par le vrai bundle" || ko "14b [$out]"
   out=$(callp "$T/s14b" OC_BUN="$FAKE/bun-always-pass" OC_VERDICT_CLI="$FAKE/fake-cli.js"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14c "hors mode test, OC_BUN/OC_VERDICT_CLI ignorés : le CLI root l'emporte (FAIL reste refusé)" || ko "14c [$out]"
@@ -439,11 +452,32 @@ FT=$(awk '/^ *T=\/opt\/fullrun-tools/{t=$1} /CLI de verdict lifeos/{print t; exi
 DCDIR=$(sed -n "s/^PROD_CLI = '\(.*\)\/FullRunVerdict.js'/\1/p" "$DC")
 [ "$FT" = "T=$PT" ] && [ "$DCDIR" = "$PT" ] && ok 15e "dossier de gel du workflow = $PT = constante de done_check.sh = constante des tests" || ko "15e gel [$FT] done_check [$DCDIR] test [$PT]"
 grep -q 'etc/fullrun-done-test-mode' "$ROOT/.github/workflows/ci.yml" && grep -q "$MARK" "$DC" && ok 15f "ci.yml pose le marqueur root du mode test ($MARK), lu par done_check.sh" || ko "15f marqueur mode test"
-# B1 : chaque appelant de done_check.sh vide explicitement les variables de test.
-PURGE='env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT'
-miss=""; for f in .github/workflows/opencode-fullrun.yml opencode/run-fullrun.sh opencode/checkpoint.sh; do
-  grep -qF "$PURGE" "$ROOT/$f" || miss="$miss $f"; done
-[ -z "$miss" ] && ok 15g "workflow, run-fullrun.sh et checkpoint.sh vident OC_DONE_TEST_MODE/OC_VERDICT_CLI/OC_BUN à chaque appel" || ko "15g sans purge :$miss"
+# B1 (v3) : UN seul point d'appel de done_check.sh, qui purge le mode test et les surcharges du CLI.
+LIBF="$ROOT/opencode/done-check-call.sh"
+if grep -qF 'env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT bash "$1"' "$LIBF" 2>/dev/null; then
+  ok 15g1 "done-check-call.sh : fullrun_done_check purge OC_DONE_TEST_MODE/OC_VERDICT_CLI/OC_BUN/OC_VERDICT_TIMEOUT"; else ko "15g1 fonction centrale sans purge"; fi
+# Détecteur d'appel direct (hors lib, tests, done_check.sh lui-même, commentaires) : refuse bash/sh/exec sur done_check ou $DC / $DONE_CHECK_BIN,
+# et toute exécution directe de ".../done_check.sh".
+direct_calls() { # $1 = racine du dépôt ; imprime fichier:ligne des appels directs
+  grep -rnE --include='*.sh' --include='*.yml' --include='*.yaml' \
+    -e '(^|[[:space:];(&|])(bash|sh|exec)[[:space:]]+"?[^[:space:]]*done_check' \
+    -e '(^|[[:space:];(&|])(bash|sh|exec)[[:space:]]+"\$\{?(DC|DONE_CHECK_BIN)\}?"' \
+    -e '"\$[A-Za-z_{}]*/done_check\.sh"[[:space:]]*(2>|\||\)|$|OC_)' \
+    -e '(^|[[:space:]])\./done_check\.sh' \
+    "$1/opencode" "$1/.github" 2>/dev/null \
+  | grep -vE '^[^:]*opencode/tests/|^[^:]*opencode/done-check-call\.sh:|^[^:]*opencode/done_check\.sh:' \
+  | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' | grep -v 'fullrun_done_check'
+}
+found=$(direct_calls "$ROOT")
+[ -z "$found" ] && ok 15g2 "aucun appel direct (non purgé) de done_check.sh dans le dépôt" || ko "15g2 appels directs :$(printf '\n  %s' $found)"
+# Témoin négatif : le détecteur DOIT voir chaque forme d'appel direct, et laisser passer l'appel centralisé.
+DT="$T/dc-detect"; mkdir -p "$DT/opencode" "$DT/.github"; nd=0; nm=0
+for form in 'bash "$DC" 2>/dev/null' 'bash "$DONE_CHECK_BIN" | grep x' 'x=$(OC_A=1 "$T/done_check.sh" 2>/dev/null | head -n1)' 'bash /opt/fullrun-tools/done_check.sh' './done_check.sh'; do
+  printf '%s\n' "$form" >"$DT/opencode/x.sh"
+  if [ -n "$(direct_calls "$DT")" ]; then nd=$((nd + 1)); else nm=$((nm + 1)); echo "  non détecté : $form"; fi
+done
+printf '%s\n' 'x=$(OC_A=1 fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1)' '# bash "$DC"' >"$DT/opencode/x.sh"
+[ "$nm" -eq 0 ] && [ -z "$(direct_calls "$DT")" ] && ok 15g3 "détecteur : 5 formes d'appel direct vues, appel centralisé et commentaire acceptés" || ko "15g3 détecteur ($nd vues, $nm manquées)"
 # M5 : README — la phrase du verdict est complète (parenthèses et backticks équilibrés, finit par « jamais PASS. »).
 RL=$(grep -F "Le verdict est lu par le CLI lifeos" "$ROOT/README.md" | head -1)
 python3 - "$RL" <<'PY' && ok 15h "README : phrase du verdict complète (parenthèses/backticks équilibrés)" || ko "15h README : phrase tronquée ou déséquilibrée"

@@ -108,6 +108,11 @@ on:
         description: "Interne au chaînage : cible imposée au lien suivant — ID de tâche en phase build, nom d'agent en phase verify (calculé par unit --isa, jamais à la main)."
         type: string
         default: ""
+      validate_only:
+        description: "Clôture déjà faite (ISA phase: complete) : relance seulement la validation des verdicts ; saute uniquement le contrôle d:isa-complete du validateur de fin"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -753,7 +758,7 @@ jobs:
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
-            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/checkpoint.sh" \
+            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/done-check-call.sh" "$CI_DIR/opencode/checkpoint.sh" \
             "$CI_DIR/opencode/bench-capped" \
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
@@ -945,6 +950,7 @@ jobs:
           OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
           OC_LOG: ${{ runner.temp }}/oc/opencode.log
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_DONE_VALIDATE_ONLY: ${{ inputs.validate_only == true && '1' || '' }}
           # Repli rapide : une erreur agent (timeout/empty/provider) sans activité pendant 240 s
           # coupe la passe et tente le modèle suivant. Le silence normal et le 429 sont inchangés.
           # Valeur identique en chaîné et hors chaîné : un seul comportement, pas de cas divergente.
@@ -1056,6 +1062,7 @@ jobs:
           OC_OUTCOME: ${{ steps.oc.outcome }}
           OC_STOP: ${{ steps.oc.outputs.stop }}
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
+          OC_DONE_VALIDATE_ONLY: ${{ inputs.validate_only == true && '1' || '' }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Valeurs du step > $GITHUB_ENV : opencode ne peut ni changer la branche, ni la base,
@@ -1338,8 +1345,9 @@ jobs:
             echo 'if [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "$isa"; fi'
             echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
           } >"$vf"
-          dc_out=$(env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
-                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" "$T/done_check.sh" 2>/dev/null | head -n1) || true
+          dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" \
+                   OC_DONE_VALIDATE_ONLY="${OC_DONE_VALIDATE_ONLY:-}" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
           rm -f "$vf"
           case "$dc_out" in
             "done_check=ok")

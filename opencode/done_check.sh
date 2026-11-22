@@ -13,7 +13,9 @@
 #   b. hooks.log contient `SUBAGENT done subagent_type=Max ok=true` postérieur au dernier commit
 #      (un `on-agent-stop` lancé à la main en bash ne compte pas : il n'écrit pas cette ligne) ;
 #   c. OC_DONE_VERIFY (fichier ou liste `;`) : toutes les commandes rendent 0 ;
-#   d. arbre propre (hors .fullrun/logs), REPORT.md présent, ISA pas en `phase: complete`.
+#   d. arbre propre (hors .fullrun/logs), REPORT.md présent, ISA pas en `phase: complete`
+#      (OC_DONE_VALIDATE_ONLY=1, valeur exacte 1 seulement : clôture déjà faite, ce seul contrôle « ISA pas
+#      complete » est sauté ; tous les autres restent exigés).
 # Sortie : une seule ligne `done_check=ok` ou `done_check=ko raison=<a|b|c|d>:<détail>` (a:none:<Agent> = aucune tâche terminée pour cet agent de OC_DONE_AGENTS). Jamais de
 # texte du modèle, jamais de secret.
 set +x
@@ -75,23 +77,33 @@ class VerdictCliError(Exception):
     pass
 
 
-def trusted(path):
-    """Fichier régulier à root ; ni lien (nulle part dans le chemin) ; ni lui ni aucun ancêtre jusqu'à / inscriptible par g/o."""
+def trusted_why(path):
+    """None si le fichier est digne de confiance ; sinon la raison PRÉCISE (fichier, uid, mode — jamais de secret).
+    Règle : fichier régulier à root ; ni lien (nulle part dans le chemin) ; ni lui ni aucun ancêtre jusqu'à /
+    inscriptible par le groupe ou les autres."""
     try:
-        if os.path.realpath(path) != os.path.abspath(path):
-            return False
-        if not stat.S_ISREG(os.lstat(path).st_mode):
-            return False
-        p = os.path.abspath(path)
+        ab = os.path.abspath(path)
+        real = os.path.realpath(path)
+        if real != ab:
+            return 'lien symbolique : %s -> %s' % (ab, real)
+        if not stat.S_ISREG(os.lstat(ab).st_mode):
+            return "%s n'est pas un fichier régulier" % ab
+        p = ab
         while True:
             st = os.lstat(p)
-            if st.st_uid != 0 or (st.st_mode & 0o022):
-                return False
+            if st.st_uid != 0:
+                return '%s appartient à uid=%d (root requis)' % (p, st.st_uid)
+            if st.st_mode & 0o022:
+                return '%s mode=%o (inscriptible par le groupe ou les autres)' % (p, stat.S_IMODE(st.st_mode))
             if p == '/':
-                return True
+                return None
             p = os.path.dirname(p)
-    except OSError:
-        return False
+    except OSError as e:
+        return 'stat impossible sur %s : %s' % (path, e.strerror)
+
+
+def trusted(path):
+    return trusted_why(path) is None
 
 
 TEST_MODE = os.environ.get('OC_DONE_TEST_MODE') == '1'
@@ -115,8 +127,10 @@ def cli_command():
             raise VerdictCliError('absent : %s' % f)
     if not os.access(PROD_BUN, os.X_OK):
         raise VerdictCliError('bun non exécutable')
-    if not all(trusted(f) for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG)):
-        raise VerdictCliError('cli, bun ou bunfig non root / inscriptible / lien')
+    for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG):
+        why = trusted_why(f)
+        if why:
+            raise VerdictCliError(why)
     return [PROD_BUN, '--config=' + PROD_BUNFIG, PROD_CLI], os.path.dirname(PROD_CLI)
 
 
@@ -133,7 +147,7 @@ def verdict_of(out):
     try:
         r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=clean)
     except Exception as e:
-        raise VerdictCliError('cli: %s' % type(e).__name__)
+        raise VerdictCliError('cli: %s %s' % (type(e).__name__, str(e)[:200]))
     said = r.stdout.strip()
     if (r.returncode, said) == (0, 'pass'):
         return 'pass'
@@ -141,7 +155,7 @@ def verdict_of(out):
         return 'fail'
     if (r.returncode, said) == (3, 'unknown'):
         return None
-    raise VerdictCliError('cli rc=%s' % r.returncode)
+    raise VerdictCliError('cli rc=%s stdout=%r stderr=%r' % (r.returncode, said[:80], (r.stderr or '').strip()[:300]))
 
 
 def parse(d):
@@ -233,7 +247,8 @@ def check(max_agent):
             continue
         try:
             v = verdict_of(str(st.get('output') or ''))
-        except VerdictCliError:
+        except VerdictCliError as e:
+            print('diag verdict-cli: %s' % e, file=sys.stderr)  # raison précise ; stdout reste le verdict
             # Panne d'infrastructure : refus immédiat et global, même si une autre tâche de l'agent passerait.
             return 'verdict-cli'
         if v is None:
@@ -302,7 +317,7 @@ if [ -n "$ISA" ]; then
   isa="$ISA"
   case "$isa" in /*) ;; *) isa="$REPO/$isa" ;; esac
   [ -f "$isa" ] || ko d:isa-absente
-  if grep -qE '^phase:[[:space:]]*complete[[:space:]]*$' "$isa"; then ko d:isa-complete; fi
+  if [ "${OC_DONE_VALIDATE_ONLY:-}" != 1 ] && grep -qE '^phase:[[:space:]]*complete[[:space:]]*$' "$isa"; then ko d:isa-complete; fi
 fi
 
 ok

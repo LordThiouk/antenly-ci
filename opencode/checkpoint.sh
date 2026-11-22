@@ -182,7 +182,10 @@ case "$cmd" in
       else DC="$HERE/done_check.sh"; fi
     fi
     [ -f "$DC" ] || die 3 "validateur indépendant introuvable"
-    out=$(env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT OC_DONE_AGENTS="$AGENT" OC_DONE_ONLY=verdict OC_DONE_REPO="$REPO" bash "$DC" 2>/dev/null | head -n1)
+    if [ -f /opt/fullrun-tools/done-check-call.sh ]; then DC_CALL_LIB=/opt/fullrun-tools/done-check-call.sh; else DC_CALL_LIB="$HERE/done-check-call.sh"; fi
+    # shellcheck source=done-check-call.sh
+    . "$DC_CALL_LIB"
+    out=$(OC_DONE_AGENTS="$AGENT" OC_DONE_ONLY=verdict OC_DONE_REPO="$REPO" fullrun_done_check "$DC" 2>/dev/null | head -n1)
     [ "$out" = "done_check=ok" ] || die 3 "verdict $AGENT non vérifiable dans le stockage opencode (${out:-aucune sortie}) : refusé"
     cp_py verdict-add
     ;;
