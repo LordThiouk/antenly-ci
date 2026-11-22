@@ -627,6 +627,39 @@ jobs:
           fi
           echo "Prompt prêt ($(wc -l < "$OC_WORK/prompt.md") lignes), base $(git rev-parse --short HEAD)"
 
+      # Préflight du lien (lecture seule) : AVANT opencode, dire où la porte démarrera et si l'agent imposé par le
+      # chaînage y sera accepté. start_step est une DEMANDE : sans verdict build signé dans le carry, la porte
+      # redescend au build et rejette un agent de verify (incident 22 nov. 2026 : deux runs de ~95 min sans revue, un troisième bloqué).
+      # Rien n'est ouvert, rien n'est écrit (ni GITHUB_ENV, ni ISA, ni carry) et aucun secret n'entre ici ; seul un
+      # CONFLIT détecté (code 2) arrête le job. CLI absent (lifeos_ref ancien) ou entrée invalide = avertissement.
+      - name: Préflight du lien (porte de départ, périmètre gelé, agent imposé)
+        id: preflight
+        if: env.OC_START_STEP != '' && env.OC_ISA_PATH != ''
+        shell: bash
+        run: |
+          pf="$HOME/.claude/LIFEOS/TOOLS/FullRunPreflight.ts"
+          if [ ! -f "$pf" ]; then
+            echo "::warning::préflight indisponible (lifeos_ref sans FullRunPreflight.ts) : la porte de départ n'est pas prédite"
+            exit 0
+          fi
+          args=(--isa "$ANTENLY_DIR/$OC_ISA_PATH" --start-step "$OC_START_STEP")
+          if [ "${IN_CHAIN_ENABLED:-}" = true ]; then
+            args+=(--chain-phase "$IN_CHAIN_PHASE")
+            [ -z "${IN_NEXT:-}" ] || args+=(--next "$IN_NEXT")
+          fi
+          rc=0
+          OC_DONE_AGENTS="${IN_DONE_AGENTS:-}" bun "$pf" "${args[@]}" >"$RUNNER_TEMP/preflight.json" 2>"$RUNNER_TEMP/preflight.err" || rc=$?
+          # stderr : lignes [preflight] sans secret (ids de claims, noms d'étapes, raisons). Copie dans le résumé du job.
+          { echo "### Préflight du lien"; echo '```'; cat "$RUNNER_TEMP/preflight.err"; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+          case "$rc" in
+            0) cat "$RUNNER_TEMP/preflight.err" ;;
+            2) cat "$RUNNER_TEMP/preflight.err"
+               echo "::error::préflight : la porte ne démarrera pas là où le chaînage le suppose ; relancer avec les paramètres de la ligne « relance conseillée » (aucun minute opencode dépensée)"
+               exit 1 ;;
+            *) cat "$RUNNER_TEMP/preflight.err"
+               echo "::warning::préflight non évalué (code $rc) : le lien continue, la porte jugera seule" ;;
+          esac
+
       # Corpus HF privé facultatif (hf_corpus) : téléchargé AVANT opencode, dans $RUNNER_TEMP.
       # Le jeton HF ne vit que dans l'environnement de cette étape : jamais dans $GITHUB_ENV,
       # jamais dans un fichier, jamais dans l'environnement d'opencode. Les logs sont publics :
