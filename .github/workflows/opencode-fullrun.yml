@@ -108,11 +108,6 @@ on:
         description: "Interne au chaînage : cible imposée au lien suivant — ID de tâche en phase build, nom d'agent en phase verify (calculé par unit --isa, jamais à la main)."
         type: string
         default: ""
-      validate_only:
-        description: "Clôture déjà faite (ISA phase: complete) : relance seulement la validation des verdicts ; saute uniquement le contrôle d:isa-complete du validateur de fin"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -755,6 +750,11 @@ jobs:
           curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $f" | sha256sum -c --quiet
           mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$f" -C "$RUNNER_TEMP/gl" gitleaks
+          # /opt est en 0777 sur les runners hébergés (vu dans le log CI de galass-ci#14) : l'agent, qui tourne sous le même
+          # UID que ce step, pourrait renommer /opt/fullrun-tools et y mettre sa propre copie. On retire l'écriture
+          # groupe/autres ET on échoue en dur si elle subsiste (done_check.sh exige la même chose de chaque ancêtre).
+          sudo chmod go-w /opt
+          [ -z "$(find /opt -maxdepth 0 -perm /022)" ] || { echo "::error::/opt reste inscriptible par le groupe ou les autres"; exit 1; }
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
@@ -950,7 +950,6 @@ jobs:
           OC_REPORT: ${{ runner.temp }}/oc/REPORT.md
           OC_LOG: ${{ runner.temp }}/oc/opencode.log
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
-          OC_DONE_VALIDATE_ONLY: ${{ inputs.validate_only == true && '1' || '' }}
           # Repli rapide : une erreur agent (timeout/empty/provider) sans activité pendant 240 s
           # coupe la passe et tente le modèle suivant. Le silence normal et le 429 sont inchangés.
           # Valeur identique en chaîné et hors chaîné : un seul comportement, pas de cas divergente.
@@ -1062,7 +1061,6 @@ jobs:
           OC_OUTCOME: ${{ steps.oc.outcome }}
           OC_STOP: ${{ steps.oc.outputs.stop }}
           OC_IDLE_MIN: ${{ inputs.idle_minutes }}
-          OC_DONE_VALIDATE_ONLY: ${{ inputs.validate_only == true && '1' || '' }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Valeurs du step > $GITHUB_ENV : opencode ne peut ni changer la branche, ni la base,
@@ -1346,8 +1344,7 @@ jobs:
             echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
           } >"$vf"
           dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
-                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" \
-                   OC_DONE_VALIDATE_ONLY="${OC_DONE_VALIDATE_ONLY:-}" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
+                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
           rm -f "$vf"
           case "$dc_out" in
             "done_check=ok")

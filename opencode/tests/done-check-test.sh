@@ -380,7 +380,7 @@ else
   if [ -e "$MARK" ]; then MARK_SAVED="$T/mark-saved"; $SU mv "$MARK" "$MARK_SAVED"; fi
   restore_pt() { $SU rm -rf "$PT"; $SU chmod "$OPT_MODE" /opt; $SU rm -f "$MARK"; [ -n "$MARK_SAVED" ] && $SU mv "$MARK_SAVED" "$MARK"; true; }
   trap 'restore_pt; rm -rf "$T"' EXIT
-  install_pt() { $SU rm -rf "$PT"; $SU chmod "$OPT_MODE" /opt; $SU install -d -o root -g root -m 0755 "$PT"
+  install_pt() { $SU rm -rf "$PT"; $SU chmod 0755 /opt; $SU install -d -o root -g root -m 0755 "$PT"
     $SU install -o root -g root -m 0644 "$BUNDLE" "$PT/FullRunVerdict.js"; $SU install -o root -g root -m 0755 "$BUNBIN" "$PT/bun"
     printf '# bunfig vide (root) : rien ne se précharge\n' >"$T/bunfig.toml"; $SU install -o root -g root -m 0644 "$T/bunfig.toml" "$PT/bunfig.toml"; }
   # Production : aucun env d'override, aucun mode test.
@@ -431,7 +431,7 @@ else
   install_pt; $SU mv "$PT/FullRunVerdict.js" "$PT/real.js"; $SU ln -s "$PT/real.js" "$PT/FullRunVerdict.js"
   out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14p "bundle = lien symbolique (même vers un fichier root) : a:verdict-cli" || ko "14p [$out]"
   install_pt; $SU chmod 0775 /opt; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14q "ancêtre (/opt) inscriptible par le groupe : a:verdict-cli" || ko "14q [$out]"
-  $SU chmod "$OPT_MODE" /opt; $SU chown 65534:65534 /opt; out=$(callp "$T/s14a"); $SU chown root:root /opt
+  $SU chmod 0755 /opt; $SU chown 65534:65534 /opt; out=$(callp "$T/s14a"); $SU chown root:root /opt
   [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14r "ancêtre (/opt) non root : a:verdict-cli" || ko "14r [$out]"
   install_pt; out=$(callp "$T/s14a"); [ "$out" = "done_check=ok" ] && ok 14s "après restauration des droits : pass de nouveau" || ko "14s [$out]"
   restore_pt; trap 'rm -rf "$T"' EXIT
@@ -478,6 +478,21 @@ for form in 'bash "$DC" 2>/dev/null' 'bash "$DONE_CHECK_BIN" | grep x' 'x=$(OC_A
 done
 printf '%s\n' 'x=$(OC_A=1 fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1)' '# bash "$DC"' >"$DT/opencode/x.sh"
 [ "$nm" -eq 0 ] && [ -z "$(direct_calls "$DT")" ] && ok 15g3 "détecteur : 5 formes d'appel direct vues, appel centralisé et commentaire acceptés" || ko "15g3 détecteur ($nd vues, $nm manquées)"
+# GitHub refuse tout workflow_dispatch de plus de 25 inputs (le workflow entier devient invalide, run « failure » sans job).
+python3 - "$ROOT/.github/workflows/opencode-fullrun.yml" <<'CAP' && ok 15i "opencode-fullrun.yml : au plus 25 inputs workflow_dispatch" || ko "15i trop d'inputs workflow_dispatch (limite GitHub : 25)"
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)  # pas de PyYAML : contrôle sauté
+d = yaml.safe_load(open(sys.argv[1]))
+n = len(((d.get(True) or d.get('on') or {}).get('workflow_dispatch') or {}).get('inputs') or {})
+sys.exit(0 if n <= 25 else 1)
+CAP
+# /opt inscriptible (0777 sur les runners hébergés) : l'étape de gel du workflow doit le fermer et échouer sinon.
+if grep -q 'sudo chmod go-w /opt' "$ROOT/.github/workflows/opencode-fullrun.yml" && awk '/sudo chmod go-w \/opt/{c=NR} /sudo install -d -o root -g root -m 0755 "\$T"/{d=NR} END{exit !(c && d && c<d)}' "$ROOT/.github/workflows/opencode-fullrun.yml" \
+   && grep -q 'find /opt -maxdepth 0 -perm /022' "$ROOT/.github/workflows/opencode-fullrun.yml"; then
+  ok 15j "étape de gel : chmod go-w /opt AVANT de créer /opt/fullrun-tools, échec dur si /opt reste inscriptible"; else ko "15j /opt non fermé avant le gel"; fi
 # M5 : README — la phrase du verdict est complète (parenthèses et backticks équilibrés, finit par « jamais PASS. »).
 RL=$(grep -F "Le verdict est lu par le CLI lifeos" "$ROOT/README.md" | head -1)
 python3 - "$RL" <<'PY' && ok 15h "README : phrase du verdict complète (parenthèses/backticks équilibrés)" || ko "15h README : phrase tronquée ou déséquilibrée"
