@@ -386,9 +386,26 @@ Un lien lancé avec `start_step=verify`, `chain_phase=verify` et `next=code-revi
 
 Le step **Préflight du lien** (`id: preflight`, avant le gel des outils et avant opencode) appelle `LIFEOS/TOOLS/FullRunPreflight.ts` de LifeOS quand `start_step` et `isa_path` sont donnés. Il est en lecture seule : il n'ouvre aucune porte, n'écrit ni `GITHUB_ENV`, ni ISA, ni carry, et ne reçoit aucun secret.
 
-- **Conflit** (la porte démarrera avant l'étape que `chain_phase` suppose) : le job échoue en quelques secondes, avec la ligne `relance conseillée : start_step=… chain_phase=… next=(vide)`.
-- **LifeOS sans `FullRunPreflight.ts`** (`lifeos_ref` ancien) ou entrée invalide : simple avertissement, la porte jugera seule.
-- Le résumé du job liste le périmètre tel qu'il serait figé : claims **hors périmètre build** (`[scope:human|phase-2|deferred — raison]`), claims **ouvertes que le build devra cocher avec preuve**, et marqueurs inopérants (raison manquante).
+**Table des codes de sortie** (une seule table, celle du CLI lifeos ; le step la traduit) :
+
+| Code | Sens | Effet sur le job |
+|------|------|------------------|
+| `0` | cohérent : la porte s'ouvre où `start_step` le demande | passe |
+| `2` | la porte ne s'ouvre pas où `start_step` le demande (redescente) ; **échoue seul**, même sans chaînage ou avec `chain_phase=build` ; ligne `relance conseillée : start_step=… chain_phase=… next=(vide)` | échec avant opencode |
+| `3` | agent imposé par le chaînage (`next`, phase verify) inconnu ou refusé par la porte à l'étape de départ (ex. `Max` en verify, faute de frappe) | échec avant opencode |
+| `4` | claims **ouvertes hors périmètre gelé** alors que la porte s'ouvre à verify ou après | échec avant opencode |
+| `5` | `chain_phase` incohérent avec l'étape où la porte s'ouvre (ex. `close` alors qu'elle s'ouvre à `max`) | échec avant opencode |
+| `64` | entrée invalide (ISA absente, `start_step` ou `chain_phase` invalide, option inconnue) | échec avant opencode |
+| `70` | crash interne du CLI (tout autre code inattendu est traité de même) : le contrôle **n'a pas eu lieu** | annotation d'**erreur** `PRÉFLIGHT EN PANNE` et bandeau du résumé ; le run continue, la porte juge seule |
+
+Plusieurs échecs peuvent coexister (le JSON liste tous les codes) ; le code de sortie est le plus prioritaire (2, 4, 3, 5).
+
+Décision sur le périmètre : à verify ou après, **toute claim ouverte hors du périmètre gelé fait échouer (code 4)**. Le build devait la cocher avec preuve, ou elle devait porter un marqueur valide avant le lancement. Au build, ces claims sont le travail du run : pas d'échec.
+
+Le préflight lit **le même état que `initPipeline`** : un état de run restauré (`prev_run_id`) est repris tel quel et `start_step` est alors ignoré, donc pas de faux conflit quand le carry est absent mais l'état est à verify. Sans état, il rejoue la preuve du carry. `phase: complete` : `start_step` ignoré.
+
+- **LifeOS sans `FullRunPreflight.ts`** (`lifeos_ref` ancien) : annotation d'**erreur** `PRÉFLIGHT NON ÉVALUÉ` (jamais silencieux), la porte jugera seule.
+- Sortie publique (journal et résumé du job, publics) : **compteurs et codes seulement** ; aucun identifiant de claim, aucun chemin. Les identifiants ne sortent qu'avec `--details`, en local.
 
 Périmètre : le gel a lieu à l'ouverture du run, dès l'étape 4. Un marqueur `[scope:…]` posé **pendant** le build ne sert qu'au run suivant. Le marquage doit donc être dans l'ISA, sur la branche, **avant** le lancement ; il est écrit par l'auteur de l'ISA, jamais par l'outil. Une claim qui reste dans le périmètre (comme ISC-35 dans l'incident) doit être cochée par le vérificateur avec preuve : le préflight ne coche rien et n'élargit rien.
 

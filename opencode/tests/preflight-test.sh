@@ -74,18 +74,32 @@ H="$T/h1"; mkhome "$H" 0 "x"
 run_pre "$H" false ""; rc=$?
 if [ "$rc" = 0 ] && ! rg -q -- "--chain-phase|--next" "$H/argv"; then ok "chaînage inactif : ni chain_phase ni next transmis (aucun conflit inventé)"; else ko "chaînage inactif : arguments inattendus ($(tr '\n' ' ' <"$H/argv"))"; fi
 
-H="$T/h2"; mkhome "$H" 2 "[preflight] CONFLIT : chain_phase=verify suppose une porte ouverte à verify mais le run démarrera à build ; [preflight] relance conseillée : start_step=build chain_phase=build next=(vide)"
+H="$T/h2"; mkhome "$H" 2 "[preflight] code=2 la porte ne s'ouvre pas où start_step le demande
+[preflight] relance conseillée : start_step=build chain_phase=build next=(vide)"
 run_pre "$H" true code-reviewer; rc=$?
-[ "$rc" != 0 ] && ok "conflit (CLI code 2) : le step échoue avant opencode" || ko "conflit non bloquant (rc=$rc)"
-rg -q "::error::" "$H/out" && rg -q "start_step=build chain_phase=build" "$H/out" && ok "le message d'échec contient les paramètres exacts de relance" || ko "message de conflit sans paramètres de relance : $(tail -4 "$H/out" | tr '\n' ' ')"
+[ "$rc" != 0 ] && ok "porte ≠ start_step (CLI code 2) : le step échoue avant opencode" || ko "code 2 non bloquant (rc=$rc)"
+rg -q "::error::préflight code 2" "$H/out" && rg -q "start_step=build chain_phase=build" "$H/out" && ok "le message d'échec contient le code et les paramètres exacts de relance" || ko "message code 2 sans relance : $(tail -4 "$H/out" | tr '\n' ' ')"
+rg -q "Préflight du lien \(code 2\)" "$H/summary" && ok "le résumé du job porte le code" || ko "résumé sans code"
 
-H="$T/h3"; mkhome "$H" 1 "[preflight] entrée invalide : ISA introuvable"
-run_pre "$H" true code-reviewer; rc=$?
-[ "$rc" = 0 ] && rg -q "::warning::" "$H/out" && ok "entrée invalide (CLI code 1) : avertissement, pas d'échec (le préflight n'est pas une porte)" || ko "CLI code 1 : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+for code in 3 4 5; do
+  H="$T/h$code"; mkhome "$H" "$code" "[preflight] code=$code x"
+  run_pre "$H" true code-reviewer; rc=$?
+  [ "$rc" != 0 ] && rg -q "::error::préflight code $code" "$H/out" && ok "CLI code $code : échec avant opencode, annotation d'erreur avec le code" || ko "CLI code $code : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+done
 
-H="$T/h4"; mkhome "$H" 0 "x"; rm -f "$H/.claude/LIFEOS/TOOLS/FullRunPreflight.ts"
+H="$T/h64"; mkhome "$H" 64 "[preflight] code=64 entrée invalide"
 run_pre "$H" true code-reviewer; rc=$?
-[ "$rc" = 0 ] && rg -q "::warning::.*(lifeos_ref|indisponible)" "$H/out" && ok "lifeos sans FullRunPreflight.ts : avertissement nommant lifeos_ref, le run n'est pas bloqué" || ko "CLI absent : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+[ "$rc" != 0 ] && rg -q "::error::préflight code 64" "$H/out" && ok "entrée invalide (CLI code 64) : échec, distinct d'un crash" || ko "CLI code 64 : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+
+for code in 70 1 139; do
+  H="$T/h$code"; mkhome "$H" "$code" "[preflight] code=$code crash"
+  run_pre "$H" true code-reviewer; rc=$?
+  [ "$rc" = 0 ] && rg -q "::error::PRÉFLIGHT EN PANNE \(code $code\)" "$H/out" && rg -q "EN PANNE \(code $code\)" "$H/summary" && ok "CLI code $code (crash) : annotation d'ERREUR et bandeau du résumé, le contrôle n'est jamais désactivé en silence" || ko "CLI code $code : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+done
+
+H="$T/h4x"; mkhome "$H" 0 "x"; rm -f "$H/.claude/LIFEOS/TOOLS/FullRunPreflight.ts"
+run_pre "$H" true code-reviewer; rc=$?
+[ "$rc" = 0 ] && rg -q "::error::PRÉFLIGHT NON ÉVALUÉ.*lifeos_ref" "$H/out" && ok "lifeos sans FullRunPreflight.ts : erreur d'annotation nommant lifeos_ref, le run n'est pas bloqué" || ko "CLI absent : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
 
 # --- 2b. Le README dit la cause, la règle du périmètre et les paramètres de relance ----------------------
 R="$HERE/../../README.md"
@@ -93,7 +107,11 @@ rg -q "Préflight du lien" "$R" && rg -q "pas de verdict signé" "$R" && rg -q "
 rg -q "pose \*\*pendant\*\* le build|posé \*\*pendant\*\* le build" "$R" && rg -q "avant\*\* le lancement" "$R" && ok "README : un marqueur de périmètre doit être dans l'ISA avant le lancement (gel dès l'étape 4)" || ko "README : règle du périmètre absente"
 rg -q 'start_step=build`, `chain_phase=build`' "$R" && rg -q 'start_step=verify`, `chain_phase=verify`, `next=<agent>`' "$R" && ok "README : paramètres exacts du prochain lien (build puis verify)" || ko "README : paramètres de relance absents"
 
-# --- 3. Bout en bout avec le vrai CLI lifeos, s'il est présent (sinon SKIP, dit tel quel) ------------------
+miss=""
+for c in 0 2 3 4 5 64 70; do rg -q "^\| \`$c\` \|" "$R" || miss="$miss $c"; done
+if rg -q "Table des codes de sortie" "$R" && [ -z "$miss" ]; then ok "README : table des codes de sortie complète (0, 2, 3, 4, 5, 64, 70)"; else ko "README : table des codes incomplète (manque :$miss)"; fi
+
+# --- 3. Bout en bout avec le vrai CLI lifeos (OC_REQUIRE_PREFLIGHT_E2E=1 : son absence est un échec, jamais un SKIP) ---
 CLI=""
 for c in "${LIFEOS_DIR:-/nonexistent}/LIFEOS/TOOLS/FullRunPreflight.ts" "$HOME/.claude/LIFEOS/TOOLS/FullRunPreflight.ts"; do
   [ -f "$c" ] && { CLI="$c"; break; }
@@ -104,11 +122,20 @@ if [ -n "$CLI" ] && command -v bun >/dev/null 2>&1; then
   printf -- '---\ntask: x\nphase: climbing\n---\n# ISA\n## Criteria\n- [ ] ISC-1: x\n' >"$H/ant/MEMORY/WORK/x/ISA.md"
   ln -s "$(dirname "$CLI")"/* "$H/.claude/LIFEOS/TOOLS/" 2>/dev/null
   ln -s "$(dirname "$(dirname "$CLI")")/../hooks" "$H/.claude/hooks" 2>/dev/null
-  run_real() { env -i PATH="$(dirname "$(command -v bun)"):/usr/bin:/bin" HOME="$H" RUNNER_TEMP="$H" GITHUB_STEP_SUMMARY="$H/summary" \
-      ANTENLY_DIR="$H/ant" OC_ISA_PATH="MEMORY/WORK/x/ISA.md" OC_START_STEP=verify IN_CHAIN_ENABLED=true IN_CHAIN_PHASE=verify \
+  run_real() { # $1 = start_step, $2 = chemin ISA relatif
+    : >"$H/summary"
+    env -i PATH="$(dirname "$(command -v bun)"):/usr/bin:/bin" HOME="$H" RUNNER_TEMP="$H" GITHUB_STEP_SUMMARY="$H/summary" \
+      ANTENLY_DIR="$H/ant" OC_ISA_PATH="$2" OC_START_STEP="$1" IN_CHAIN_ENABLED=true IN_CHAIN_PHASE=verify \
       IN_NEXT=code-reviewer IN_DONE_AGENTS=Max bash "$T/pre.sh" >"$H/out" 2>&1; }
-  run_real; rc=$?
-  if [ "$rc" != 0 ] && rg -q "code-reviewer" "$H/out" && rg -q "relance conseillée" "$H/out"; then ok "vrai CLI lifeos : start_step=verify sans verdict signé + code-reviewer imposé → échec avec relance"; else ko "vrai CLI lifeos : rc=$rc $(tail -5 "$H/out" | tr '\n' ' ')"; fi
+  run_real verify MEMORY/WORK/x/ISA.md; rc=$?
+  if [ "$rc" != 0 ] && rg -q "code=2" "$H/out" && rg -q "relance conseillée" "$H/out"; then ok "vrai CLI lifeos : start_step=verify sans verdict signé → échec code 2 avec relance"; else ko "vrai CLI lifeos code 2 : rc=$rc $(tail -5 "$H/out" | tr '\n' ' ')"; fi
+  if ! rg -q "ISC-1|ANTI-" "$H/out" "$H/summary" && ! rg -qF "$H/ant" "$H/out" "$H/summary"; then ok "sortie publique (journal et résumé) : aucun identifiant de claim, aucun chemin"; else ko "la sortie publique fuit un identifiant ou un chemin"; fi
+  run_real deploy MEMORY/WORK/x/ISA.md; rc=$?
+  [ "$rc" != 0 ] && rg -q "code 64" "$H/out" && ok "vrai CLI lifeos : start_step=deploy → code 64 (entrée invalide)" || ko "vrai CLI lifeos code 64 : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+  run_real verify MEMORY/WORK/x; rc=$?
+  [ "$rc" = 0 ] && rg -q "::error::PRÉFLIGHT EN PANNE \(code 70\)" "$H/out" && ok "vrai CLI lifeos : ISA illisible → code 70, signalé comme panne (pas d'échec silencieux)" || ko "vrai CLI lifeos code 70 : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
+elif [ "${OC_REQUIRE_PREFLIGHT_E2E:-}" = 1 ]; then
+  ko "vrai CLI lifeos absent alors que OC_REQUIRE_PREFLIGHT_E2E=1 (lifeos_ref/LIFEOS_DIR sans FullRunPreflight.ts) : le bout en bout ne peut pas être sauté"
 else
   printf 'SKIP vrai CLI lifeos absent (lifeos_ref sans FullRunPreflight.ts) : couvert par les tests de lifeos\n'
 fi

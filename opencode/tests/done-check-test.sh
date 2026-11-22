@@ -444,8 +444,8 @@ FREEZE=$(awk '/CLI de verdict lifeos/{f=1} /fin du CLI de verdict/{f=0} f' "$ROO
 if [ -n "$FREEZE" ] && ! printf '%s' "$FREEZE" | grep -q '::warning::' && printf '%s' "$FREEZE" | grep -q 'exit 1' \
    && printf '%s' "$FREEZE" | grep -q '\$T/bun' && printf '%s' "$FREEZE" | grep -q 'bunfig.toml'; then
   ok 15b "étape de gel : échec en dur sans bundle (exit 1, pas de ::warning::), bun et bunfig root copiés"; else ko "15b étape de gel du bundle"; fi
-if grep -q "ref: 109e42353e52a518d91c8ea680bc982482c38f12" "$ROOT/.github/workflows/ci.yml" && ! grep -q "ref: main" "$ROOT/.github/workflows/ci.yml"; then
-  ok 15c "ci.yml épingle lifeos au merge de lifeos#23 (109e423)"; else ko "15c pin lifeos dans ci.yml"; fi
+if grep -q "ref: 03ee70d5c619edf5ae6a02e99aaf3257c1de2280" "$ROOT/.github/workflows/ci.yml" && grep -q "ref: 03ee70d5c619edf5ae6a02e99aaf3257c1de2280" "$ROOT/.github/workflows/ci-scripts.yml" && ! grep -q "ref: main" "$ROOT/.github/workflows/ci.yml"; then
+  ok 15c "ci.yml et ci-scripts.yml épinglent lifeos au même SHA (03ee70d, lifeos#24 : CLI de verdict de #23 + préflight)"; else ko "15c pin lifeos dans ci.yml"; fi
 if grep -q 'OC_REQUIRE_PROD_TESTS: "1"' "$ROOT/.github/workflows/ci.yml"; then ok 15d "ci.yml exige les tests de chemin de production"; else ko "15d OC_REQUIRE_PROD_TESTS"; fi
 # M2 : le dossier de gel ($T) du workflow, la constante de done_check.sh et les tests sont la MÊME valeur.
 FT=$(awk '/^ *T=\/opt\/fullrun-tools/{t=$1} /CLI de verdict lifeos/{print t; exit}' "$ROOT/.github/workflows/opencode-fullrun.yml" | sed 's/;$//')
