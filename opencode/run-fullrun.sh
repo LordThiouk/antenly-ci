@@ -442,6 +442,11 @@ if [ -z "$DONE_CHECK_BIN" ]; then
   if [ -f /opt/fullrun-tools/done_check.sh ]; then DONE_CHECK_BIN=/opt/fullrun-tools/done_check.sh
   else DONE_CHECK_BIN="$(cd "$(dirname "$0")" && pwd)/done_check.sh"; fi
 fi
+# Point d'appel unique et purgé de done_check.sh (copie figée root prioritaire, repli local en test).
+if [ -f /opt/fullrun-tools/done-check-call.sh ]; then DC_CALL_LIB=/opt/fullrun-tools/done-check-call.sh
+else DC_CALL_LIB="$(cd "$(dirname "$0")" && pwd)/done-check-call.sh"; fi
+# shellcheck source=done-check-call.sh
+. "$DC_CALL_LIB"
 DONE_OK=0
 
 # Déclenche la fin anticipée quand le validateur indépendant confirme le PASS de Max. Jamais un
@@ -453,7 +458,8 @@ done_check() {
   OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$ANTENLY_DIR" \
   OC_ISA="${OC_ISA:-${OC_ISA_PATH:-}}" OC_DONE_VERIFY="${OC_DONE_VERIFY:-}" \
   OC_MAX_SUBAGENT="${OC_MAX_SUBAGENT:-Max}" OC_DONE_AGENTS="${OC_DONE_AGENTS:-}" \
-    bash "$DONE_CHECK_BIN" 2>/dev/null | grep -qx 'done_check=ok'
+  OC_DONE_VALIDATE_ONLY="${OC_DONE_VALIDATE_ONLY:-}" \
+    fullrun_done_check "$DONE_CHECK_BIN" 2>/dev/null | grep -qx 'done_check=ok'
 }
 maybe_finish() {
   if [ "${DONE_OK:-0}" -eq 1 ] || done_check; then

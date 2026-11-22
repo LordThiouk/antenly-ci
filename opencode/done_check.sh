@@ -8,11 +8,14 @@
 #   a. stockage opencode : un `task` subagent_type=Max completed, sa session enfant a un message
 #      assistant d'un modèle `-free` avec tokens.output > 0, sa sortie CONCLUT PASS dans un verdict structuré
 #      (JSON final {"verdict":…} ou dernière ligne « VERDICT: PASS »; jamais lu dans le corps, aucun verdict
-#      structuré = inconclusif, raison a:inconclusif), et sa fin est postérieure au dernier commit de code ;
+#      structuré = inconclusif, raison a:inconclusif ; lu par le CLI lifeos FullRunVerdict.ts, CLI inutilisable =
+#      a:verdict-cli), et sa fin est postérieure au dernier commit de code ;
 #   b. hooks.log contient `SUBAGENT done subagent_type=Max ok=true` postérieur au dernier commit
 #      (un `on-agent-stop` lancé à la main en bash ne compte pas : il n'écrit pas cette ligne) ;
 #   c. OC_DONE_VERIFY (fichier ou liste `;`) : toutes les commandes rendent 0 ;
-#   d. arbre propre (hors .fullrun/logs), REPORT.md présent, ISA pas en `phase: complete`.
+#   d. arbre propre (hors .fullrun/logs), REPORT.md présent, ISA pas en `phase: complete`
+#      (OC_DONE_VALIDATE_ONLY=1, valeur exacte 1 seulement : clôture déjà faite, ce seul contrôle « ISA pas
+#      complete » est sauté ; tous les autres restent exigés).
 # Sortie : une seule ligne `done_check=ok` ou `done_check=ko raison=<a|b|c|d>:<détail>` (a:none:<Agent> = aucune tâche terminée pour cet agent de OC_DONE_AGENTS). Jamais de
 # texte du modèle, jamais de secret.
 set +x
@@ -43,98 +46,116 @@ last_commit=$(git -C "$REPO" log -1 --format=%ct -- . ':!MEMORY' ':!.fullrun' 2>
 
 # --- a. stockage opencode (SQLite 1.19+ ou arbre JSON) ---
 storage=$(python3 - "$STORE" "$AGENTS" "$last_commit" <<'PY'
-import glob, json, os, re, sqlite3, sys
+import glob, json, os, shutil, sqlite3, stat, subprocess, sys
 
 store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 agents = [a for a in agents_arg.split(',') if a]
-# Verdict lu UNIQUEMENT dans une conclusion structurée, jamais dans le corps (même règle que lifeos#14) :
-#  1. la DERNIÈRE ligne « VERDICT: … » est la conclusion. Le préfixe de ligne ne peut contenir que des espaces, de la
-#     ponctuation, des symboles ou des emoji (« ✅ VERDICT: pass — phrase »), jamais une lettre ni un chiffre
-#     (« Le VERDICT: PASS … » est du corps). Valeur lisible : PASS|FAIL|BLOCKED seul (suivi au plus d'un tiret ou
-#     d'une parenthèse puis d'une phrase) ; « pass | concerns | fail » (plusieurs termes) ou « concerns » ne sont
-#     PAS lisibles : inconclusif, et cette dernière ligne ne cède pas la place à un JSON ni à une ligne antérieure ;
-#  2. le JSON final {"verdict"} > {"status"} > {"result"} ne compte que s'il n'y a AUCUNE ligne VERDICT: ; c'est
-#     le dernier objet JSON du texte, à condition qu'il le termine. Un JSON ne contredit donc jamais une ligne VERDICT.
-# Rien de structuré, ou valeur inconnue : INCONCLUSIF — jamais PASS. Aucun motif FAIL/BLOCK sur le corps.
-LINE = re.compile(r'^(?P<pre>.*?)VERDICT[ \t]*[:\uff1a](?P<rest>.*)$', re.I)
-VALUE = re.compile(r'[\W_]*(?P<w>PASS|FAIL|BLOCKED)\b[\W_]*(?:[(\[\u2014\u2013-].*)?$', re.I)
+# Verdict : UNE seule règle, celle du pipeline lifeos (parseReviewVerdict), lue via son CLI
+# LIFEOS/TOOLS/FullRunVerdict.ts (stdin -> pass|fail|unknown, code 0/1/3). Ce script ne réimplémente
+# plus rien : l'ancien lecteur python ne déballait pas l'enveloppe opencode 1.19 (<task id … state="completed">,
+# <task_result>), d'où « pass » côté pipeline et « inconclusif » ici pour le même texte (incident 22 nov. 2026).
+#  - pass : code 0 ET sortie « pass » (les deux doivent le dire) ;
+#  - fail : code 1 ET sortie « fail » ;
+#  - unknown : code 3 ET sortie « unknown » -> INCONCLUSIF, jamais PASS ;
+#  - tout le reste (CLI introuvable, bun absent, plantage, délai dépassé, code/sortie incohérents) : panne
+#    nommée a:verdict-cli — jamais pass, jamais lue comme un verdict.
+# UN SEUL CLI en production : /opt/fullrun-tools/FullRunVerdict.js (bundle construit par le workflow), exécuté par
+# /opt/fullrun-tools/bun avec la config /opt/fullrun-tools/bunfig.toml (vide) — chaque fichier, chaque dossier
+# parent jusqu'à / : à root, ni lien symbolique, ni inscriptible par le groupe ou les autres (l'agent écrit dans
+# ~/.claude, le cwd et le PATH : rien de ce qui s'y trouve ne peut décider d'un PASS). Le CLI tourne dans son
+# propre dossier avec un environnement minimal explicite (aucune variable BUN_* / NODE_* héritée, bunfig du cwd ignoré).
+# OC_VERDICT_CLI, OC_BUN et OC_VERDICT_TIMEOUT ne sont honorés que sous OC_DONE_TEST_MODE=1, posé par les seuls
+# scripts de test, jamais par un workflow ; sous GITHUB_ACTIONS, le mode test exige en plus le marqueur root
+# /etc/fullrun-done-test-mode (posé par ci.yml pour la seule suite de tests). Aucun repli : sinon, a:verdict-cli.
+PROD_CLI = '/opt/fullrun-tools/FullRunVerdict.js'
+PROD_BUN = '/opt/fullrun-tools/bun'
+PROD_BUNFIG = '/opt/fullrun-tools/bunfig.toml'
+TEST_MARKER = '/etc/fullrun-done-test-mode'
 
 
-def word(raw):
-    if not isinstance(raw, str):
-        return None
-    w = raw.strip().lower()
-    if w in ('pass', 'approve', 'approved'):
-        return 'pass'
-    if w in ('fail', 'reject', 'rejected', 'blocked', 'block'):
-        return 'fail'
-    return None
+class VerdictCliError(Exception):
+    pass
 
 
-def final_json(text):
-    """Dernier objet JSON (accolades équilibrées, chaînes respectées) s'il termine le texte, sinon None."""
-    found, end_found, i = None, -1, 0
-    while i < len(text):
-        if text[i] != '{':
-            i += 1
-            continue
-        depth, in_str, esc, j, closed = 0, False, False, i, False
-        while j < len(text):
-            c = text[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == '\\':
-                    esc = True
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    closed = True
-                    break
-            j += 1
-        if closed:
-            try:
-                v = json.loads(text[i:j + 1])
-                if isinstance(v, dict):
-                    found, end_found = v, j + 1
-            except Exception:
-                pass
-            i = j + 1
-        else:
-            i += 1
-    if found is not None and re.fullmatch(r'[\s`]*', text[end_found:]):
-        return found
-    return None
+def trusted_why(path):
+    """None si le fichier est digne de confiance ; sinon la raison PRÉCISE (fichier, uid, mode — jamais de secret).
+    Règle : fichier régulier à root ; ni lien (nulle part dans le chemin) ; ni lui ni aucun ancêtre jusqu'à /
+    inscriptible par le groupe ou les autres."""
+    try:
+        ab = os.path.abspath(path)
+        real = os.path.realpath(path)
+        if real != ab:
+            return 'lien symbolique : %s -> %s' % (ab, real)
+        if not stat.S_ISREG(os.lstat(ab).st_mode):
+            return "%s n'est pas un fichier régulier" % ab
+        p = ab
+        while True:
+            st = os.lstat(p)
+            if st.st_uid != 0:
+                return '%s appartient à uid=%d (root requis)' % (p, st.st_uid)
+            if st.st_mode & 0o022:
+                return '%s mode=%o (inscriptible par le groupe ou les autres)' % (p, stat.S_IMODE(st.st_mode))
+            if p == '/':
+                return None
+            p = os.path.dirname(p)
+    except OSError as e:
+        return 'stat impossible sur %s : %s' % (path, e.strerror)
+
+
+def trusted(path):
+    return trusted_why(path) is None
+
+
+TEST_MODE = os.environ.get('OC_DONE_TEST_MODE') == '1'
+if TEST_MODE and os.environ.get('GITHUB_ACTIONS') and not trusted(TEST_MARKER):
+    TEST_MODE = False
+
+
+def cli_command():
+    """(argv, cwd) du CLI de verdict."""
+    if TEST_MODE:
+        cli = os.environ.get('OC_VERDICT_CLI', '')
+        # Mode test seulement : bun du PATH accepté (les machines de test n'ont pas /opt/fullrun-tools).
+        bun = os.environ.get('OC_BUN', '') or shutil.which('bun') or os.path.expanduser('~/.bun/bin/bun')
+        if not os.path.isfile(cli):
+            raise VerdictCliError('cli introuvable')
+        if not (os.path.isfile(bun) and os.access(bun, os.X_OK)):
+            raise VerdictCliError('bun introuvable')
+        return [bun, '--config=' + os.devnull, cli], os.path.dirname(os.path.abspath(cli))
+    for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG):
+        if not os.path.isfile(f):
+            raise VerdictCliError('absent : %s' % f)
+    if not os.access(PROD_BUN, os.X_OK):
+        raise VerdictCliError('bun non exécutable')
+    for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG):
+        why = trusted_why(f)
+        if why:
+            raise VerdictCliError(why)
+    return [PROD_BUN, '--config=' + PROD_BUNFIG, PROD_CLI], os.path.dirname(PROD_CLI)
 
 
 def verdict_of(out):
-    """'pass' | 'fail' | None (inconclusif : aucun verdict structuré, ou dernière ligne VERDICT illisible)."""
-    text = out.strip()
-    if not text:
+    """'pass' | 'fail' | None (inconclusif : le CLI dit unknown). VerdictCliError si le CLI est inutilisable."""
+    cmd, cwd = cli_command()
+    timeout = 30
+    if TEST_MODE:
+        try:
+            timeout = float(os.environ.get('OC_VERDICT_TIMEOUT') or 30)
+        except ValueError:
+            timeout = 30
+    clean = {'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'TMPDIR': '/nonexistent', 'LC_ALL': 'C.UTF-8'}
+    try:
+        r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=clean)
+    except Exception as e:
+        raise VerdictCliError('cli: %s %s' % (type(e).__name__, str(e)[:200]))
+    said = r.stdout.strip()
+    if (r.returncode, said) == (0, 'pass'):
+        return 'pass'
+    if (r.returncode, said) == (1, 'fail'):
+        return 'fail'
+    if (r.returncode, said) == (3, 'unknown'):
         return None
-    seen, last = False, None
-    for line in text.splitlines():
-        m = LINE.match(line)
-        if not m or any(c.isalnum() for c in m.group('pre')):
-            continue
-        seen = True
-        v = VALUE.match(m.group('rest'))
-        last = word(v.group('w')) if v else None
-    if seen:
-        return last
-    obj = final_json(text)
-    if obj is None:
-        return None
-    for key in ('verdict', 'status', 'result'):
-        if obj.get(key) is not None:
-            return word(obj[key])
-    return None
+    raise VerdictCliError('cli rc=%s stdout=%r stderr=%r' % (r.returncode, said[:80], (r.stderr or '').strip()[:300]))
 
 
 def parse(d):
@@ -224,7 +245,12 @@ def check(max_agent):
                    for m in msgs):
             reasons.add('tokens')
             continue
-        v = verdict_of(str(st.get('output') or ''))
+        try:
+            v = verdict_of(str(st.get('output') or ''))
+        except VerdictCliError as e:
+            print('diag verdict-cli: %s' % e, file=sys.stderr)  # raison précise ; stdout reste le verdict
+            # Panne d'infrastructure : refus immédiat et global, même si une autre tâche de l'agent passerait.
+            return 'verdict-cli'
         if v is None:
             reasons.add('inconclusif')
             continue
@@ -232,7 +258,7 @@ def check(max_agent):
             reasons.add('verdict')
             continue
         return None
-    for r in ('tokens', 'verdict', 'inconclusif', 'time'):
+    for r in ('verdict-cli', 'tokens', 'verdict', 'inconclusif', 'time'):
         if r in reasons:
             return r
     return 'model'
@@ -291,7 +317,7 @@ if [ -n "$ISA" ]; then
   isa="$ISA"
   case "$isa" in /*) ;; *) isa="$REPO/$isa" ;; esac
   [ -f "$isa" ] || ko d:isa-absente
-  if grep -qE '^phase:[[:space:]]*complete[[:space:]]*$' "$isa"; then ko d:isa-complete; fi
+  if [ "${OC_DONE_VALIDATE_ONLY:-}" != 1 ] && grep -qE '^phase:[[:space:]]*complete[[:space:]]*$' "$isa"; then ko d:isa-complete; fi
 fi
 
 ok

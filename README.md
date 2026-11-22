@@ -302,6 +302,7 @@ démons).
   stockage opencode (tokens d'un modèle `-free`, PASS explicite, postérieure au dernier commit de
   code) et la ligne `SUBAGENT done` du plugin. Un PASS écrit par l'agent principal (message, fichier,
   checkpoint) ne compte pas ; `checkpoint.sh verdict` refuse de l'enregistrer. Verdict manquant ≠ PASS.
+  Le verdict est lu par le CLI lifeos `LIFEOS/TOOLS/FullRunVerdict.ts` (source unique, même règle que le pipeline). En production `done_check.sh` n'exécute qu'UN couple : `/opt/fullrun-tools/FullRunVerdict.js` (bundle construit à l'étape de gel, échec dur s'il manque) par `/opt/fullrun-tools/bun` avec `/opt/fullrun-tools/bunfig.toml` (vide), dans ce dossier et avec un environnement minimal ; chaque fichier et chaque dossier parent y sont à root, sans lien symbolique ni droit d'écriture pour le groupe ou les autres. `OC_VERDICT_CLI`/`OC_BUN` ne valent que sous `OC_DONE_TEST_MODE=1` (scripts de test ; sous GITHUB_ACTIONS, seulement avec le marqueur root `/etc/fullrun-done-test-mode` posé par `ci.yml`), et chaque appelant (workflow, `run-fullrun.sh`, `checkpoint.sh`) les vide ; aucun repli `~/.claude`. Règle : `pass` = code 0 et sortie `pass`, `unknown` (code 3) = inconclusif, CLI inutilisable = `a:verdict-cli`, jamais PASS.
 
 Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
 réduit : seuil 3 s, activité 9 s).
@@ -378,6 +379,14 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 ## Clé de porte : `start_step`
 
 Input facultatif du workflow (vide par défaut). `start_step=verify` (ou `build`, `max`, `close`, `0` à `7` ; jamais `deploy`) demande au run de démarrer à cette étape. C'est une **demande**, pas un forçage : LifeOS (`FullRunCarry.proveStart`) n'ouvre la porte que si chaque étape avant a un verdict signé (HMAC `isa_stamp`) ancré sur le commit actuel ; sinon le run redescend à la première étape non prouvée et la raison est écrite dans le log et dans le mandat de l'agent. Si l'étape demandée échoue, retour au build. La valeur passe par l'environnement d'opencode (`FULLRUN_START_STEP`, posé par `run-fullrun.sh`), que l'agent ne peut pas modifier. Aucune garde n'est affaiblie : Max PASS reste obligatoire à la fin. Nécessite la version de LifeOS qui contient `start_step` (`lifeos_ref`) ; une version plus ancienne ignore simplement la variable.
+
+## Relance de validation seule : `OC_DONE_VALIDATE_ONLY` (pas d'input dans ce dépôt)
+
+Quand l'ISA est déjà close (`phase: complete`), `done_check.sh` accepte `OC_DONE_VALIDATE_ONLY=1` (valeur exacte `1`, `true` ne compte pas) et saute alors **uniquement** le contrôle `d:isa-complete` ; le PASS réel de chaque agent de `done_agents`, les hooks, les vérificateurs, l'arbre propre et le rapport restent exigés (tests 9vb à 9vd, et 13o : la variable n'affaiblit jamais un verdict FAIL). `run-fullrun.sh` la transmet. Contrairement à galass-ci, **antenly-ci n'a pas d'input `validate_only`** : `opencode-fullrun.yml` y est déjà à la limite GitHub de 25 inputs `workflow_dispatch` (un 26e rend tout le workflow invalide, vérifié sur le push b79302e). Pour l'exposer, il faut d'abord libérer un input.
+
+## Hypothèse de sécurité : l'agent n'a pas `sudo`
+
+La protection du validateur de fin (copie root dans `/opt/fullrun-tools`, CLI de verdict, `bun` et `bunfig.toml` à root, mode test refusé sous `GITHUB_ACTIONS`, variables d'override vidées à chaque appel) suppose que l'agent opencode ne peut pas devenir root. **Ce n'est pas vrai aujourd'hui** : `opencode-fullrun.yml` lance opencode sous l'UID du step (`setpriv --reuid="$(id -u)"`, dans un scope `systemd-run`), sans utilisateur dédié, et ce même UID utilise `sudo -n` sans mot de passe tout au long du workflow (installation des outils gelés, démons). Le workflow ne retire pas ce `sudo` ; il ajoute seulement des entrées `NOPASSWD` ciblées (`preannot.sh`, `emu-e2e.sh`). Les contrôles ci-dessus arrêtent donc un agent qui triche par l'environnement, le répertoire courant, `~/.claude`, un `bunfig.toml` ou un lien symbolique, mais pas un agent qui lance lui-même `sudo` pour réécrire `/opt/fullrun-tools`. Durcissement à décider (non fait ici) : retirer le `sudo` générique avant de lancer opencode et ne garder que les entrées ciblées.
 
 ### Sauvegarde automatique du travail (`opencode/autosave.sh`)
 

@@ -750,13 +750,38 @@ jobs:
           curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $f" | sha256sum -c --quiet
           mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$f" -C "$RUNNER_TEMP/gl" gitleaks
+          # /opt est en 0777 sur les runners hébergés (vu dans le log CI de galass-ci#14) : l'agent, qui tourne sous le même
+          # UID que ce step, pourrait renommer /opt/fullrun-tools et y mettre sa propre copie. On retire l'écriture
+          # groupe/autres ET on échoue en dur si elle subsiste (done_check.sh exige la même chose de chaque ancêtre).
+          sudo chmod go-w /opt
+          [ -z "$(find /opt -maxdepth 0 -perm /022)" ] || { echo "::error::/opt reste inscriptible par le groupe ou les autres"; exit 1; }
           sudo install -d -o root -g root -m 0755 "$T" "$L"
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" "$CI_DIR/opencode/redact-log.sh" \
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
-            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/checkpoint.sh" \
+            "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/done-check-call.sh" "$CI_DIR/opencode/checkpoint.sh" \
             "$CI_DIR/opencode/bench-capped" \
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
+          # CLI de verdict lifeos (source unique du verdict lu par done_check.sh) : bundle autonome construit ici,
+          # copié en root avec un bun root — l'agent ne peut remplacer ni l'un ni l'autre pour fabriquer un PASS.
+          # done_check.sh n'accepte QUE ce couple. Bundle impossible à construire = échec en dur (pas d'avertissement).
+          V="$GITHUB_WORKSPACE/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts"
+          if [ ! -f "$V" ]; then
+            echo "::error::lifeos@$IN_LIFEOS_REF sans LIFEOS/TOOLS/FullRunVerdict.ts : CLI de verdict introuvable (lifeos_ref >= 109e423 requis)"
+            exit 1
+          fi
+          BUNBIN=$(command -v bun) || { echo "::error::bun introuvable pour le CLI de verdict"; exit 1; }
+          bun build "$V" --target bun --outfile "$RUNNER_TEMP/FullRunVerdict.js" >/dev/null \
+            || { echo "::error::bun build du CLI de verdict en échec"; exit 1; }
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/FullRunVerdict.js" "$T/FullRunVerdict.js"
+          sudo install -o root -g root -m 0755 "$BUNBIN" "$T/bun"
+          printf '# bunfig vide (root) : rien ne se précharge\n' >"$RUNNER_TEMP/bunfig.toml"
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/bunfig.toml" "$T/bunfig.toml"; rm -f "$RUNNER_TEMP/bunfig.toml"
+          rm -f "$RUNNER_TEMP/FullRunVerdict.js"
+          [ "$(printf '{"status":"pass"}' | "$T/bun" --config="$T/bunfig.toml" "$T/FullRunVerdict.js")" = pass ] \
+            && [ "$(printf 'x' | "$T/bun" --config="$T/bunfig.toml" "$T/FullRunVerdict.js" || true)" = unknown ] \
+            || { echo "::error::CLI de verdict installé mais le test de fumée échoue"; exit 1; }
+          # (fin du CLI de verdict)
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
           # pouvoir être remplacé par l'agent.
@@ -1318,8 +1343,8 @@ jobs:
             echo 'if [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "$isa"; fi'
             echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
           } >"$vf"
-          dc_out=$(OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
-                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" "$T/done_check.sh" 2>/dev/null | head -n1) || true
+          dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
           rm -f "$vf"
           case "$dc_out" in
             "done_check=ok")
