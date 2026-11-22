@@ -366,7 +366,7 @@ fi
 # 15. Workflows : le mode test n'est JAMAIS posé par un workflow ; l'étape de gel échoue en dur (pas de ::warning::).
 if grep -rn "OC_DONE_TEST_MODE" "$ROOT/.github" >/dev/null 2>&1; then
   ko "15a un workflow pose OC_DONE_TEST_MODE (réservé aux scripts de test)"; else ok 15a "aucun workflow ne pose OC_DONE_TEST_MODE"; fi
-FREEZE=$(awk '/CLI de verdict lifeos/{f=1} /Visible dans le PATH/{f=0} f' "$ROOT/.github/workflows/opencode-fullrun.yml")
+FREEZE=$(awk '/CLI de verdict lifeos/{f=1} /fin du CLI de verdict/{f=0} f' "$ROOT/.github/workflows/opencode-fullrun.yml")
 if [ -n "$FREEZE" ] && ! printf '%s' "$FREEZE" | grep -q '::warning::' && printf '%s' "$FREEZE" | grep -q 'exit 1' \
    && printf '%s' "$FREEZE" | grep -q '\$T/bun'; then
   ok 15b "étape de gel : échec en dur sans bundle (exit 1, pas de ::warning::) et bun root copié"; else ko "15b étape de gel du bundle"; fi

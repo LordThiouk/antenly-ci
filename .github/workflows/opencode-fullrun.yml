@@ -774,6 +774,7 @@ jobs:
           [ "$(printf '{"status":"pass"}' | "$T/bun" "$T/FullRunVerdict.js")" = pass ] \
             && [ "$(printf 'x' | "$T/bun" "$T/FullRunVerdict.js" || true)" = unknown ] \
             || { echo "::error::CLI de verdict installé mais le test de fumée échoue"; exit 1; }
+          # (fin du CLI de verdict)
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
           # pouvoir être remplacé par l'agent.
