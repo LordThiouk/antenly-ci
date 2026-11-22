@@ -182,7 +182,7 @@ case "$cmd" in
       else DC="$HERE/done_check.sh"; fi
     fi
     [ -f "$DC" ] || die 3 "validateur indépendant introuvable"
-    out=$(OC_DONE_AGENTS="$AGENT" OC_DONE_ONLY=verdict OC_DONE_REPO="$REPO" bash "$DC" 2>/dev/null | head -n1)
+    out=$(env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT OC_DONE_AGENTS="$AGENT" OC_DONE_ONLY=verdict OC_DONE_REPO="$REPO" bash "$DC" 2>/dev/null | head -n1)
     [ "$out" = "done_check=ok" ] || die 3 "verdict $AGENT non vérifiable dans le stockage opencode (${out:-aucune sortie}) : refusé"
     cp_py verdict-add
     ;;

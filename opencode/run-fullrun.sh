@@ -448,6 +448,8 @@ DONE_OK=0
 # pass déduit d'un verdict manquant : c'est done_check.sh qui décide, pas la sortie du modèle.
 done_check() {
   [ -f "$DONE_CHECK_BIN" ] || return 1
+  # Jamais de mode test / CLI / bun hérités de l'environnement du job ($GITHUB_ENV, agent) : done_check décide seul.
+  env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT \
   OC_STORE_DIR="$OC_STORE_DIR" \
   OC_HOOKS_LOG="${OC_HOOKS_LOG:-$HOME/.local/state/opencode-lifeos/hooks.log}" \
   OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$ANTENLY_DIR" \

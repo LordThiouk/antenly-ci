@@ -151,6 +151,25 @@ else
   ko "10 rc=$rc $(tr '\n' ' ' <"$T/run.log.status" 2>/dev/null)"
 fi
 
+# 10b (B1) : run-fullrun.sh vide OC_DONE_TEST_MODE / OC_VERDICT_CLI / OC_BUN / OC_VERDICT_TIMEOUT avant d'appeler done_check
+# (espion : il note l'environnement qu'il reçoit), même quand le job les a injectés comme le ferait $GITHUB_ENV.
+cat >"$T/spy-done" <<EOS
+#!/usr/bin/env bash
+echo called >>"$T/spy.called"
+env | grep -E '^(OC_DONE_TEST_MODE|OC_VERDICT_CLI|OC_BUN|OC_VERDICT_TIMEOUT)=' >>"$T/spy.env"
+echo done_check=ok
+EOS
+chmod +x "$T/spy-done"; : >"$T/spy.env"
+env ANTENLY_DIR="$R" CI_DIR="$ROOT" OC_PROMPT_FILE="$T/prompt.md" OC_LOG="$T/run2.log" \
+    OC_LOG.status="$T/run2.log.status" OC_MODEL_MAIN="opencode/v4-flash-free" OC_MODEL_CHAIN="opencode/v4-lite-free" \
+    OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 \
+    OC_KILL_GRACE=1 OC_STORE_DIR="$T/run" OC_REPORT="$REPORT" OC_ISA="$ISA" OC_DONE_REPO="$R" \
+    OC_DONE_CHECK_BIN="$T/spy-done" OC_DONE_CHECK_SEC=1 OC_DONE_IDLE_SEC=1 \
+    OC_DONE_TEST_MODE=1 OC_VERDICT_CLI=/tmp/evil-cli.js OC_BUN=/tmp/evil-bun OC_VERDICT_TIMEOUT=99 \
+    OC_INTERNAL_LOG="$T/run/internal2.log" \
+    bash "$RUN" >"$T/run2.out" 2>&1
+if [ -s "$T/spy.called" ] && [ ! -s "$T/spy.env" ]; then ok 10b "run-fullrun.sh : variables de test injectées non transmises à done_check"; else ko "10b $(tr '\n' ' ' <"$T/spy.env")"; fi
+
 # 11. Verdict lu UNIQUEMENT dans une conclusion structurée (JSON final ou dernière ligne VERDICT:), jamais dans le corps
 ENDP=$(( (COMMIT + 60) * 1000 ))
 mkstore "$T/s11a" "opencode/v4-flash-free" 42 $'Le test a fail avant le correctif, le patch reject\u00e9 en v1, l\'ancien chemin \u00e9tait blocked, un FAIL, un BLOCK, REQUEST CHANGES au tour 1.\n\nVERDICT: PASS' "$ENDP"
@@ -291,14 +310,14 @@ out=$(call "$T/s13d"); [ "$out" = "done_check=ok" ] && ok 13d "ancienne envelopp
 # CLI (machine du principal) ne doit PAS servir de repli : on le fabrique ici pour le prouver.
 mkstore "$T/s13e" "opencode/v4-flash-free" 42 $'Revue.\n{"status":"pass"}' "$ENDP"
 FAKEHOME="$T/fakehome"; mkdir -p "$FAKEHOME/.claude/LIFEOS/TOOLS" "$FAKEHOME/.bun/bin"
-cp "$OC_VERDICT_CLI" "$FAKEHOME/.claude/LIFEOS/TOOLS/FullRunVerdict.ts"
-cp "$(dirname "$OC_VERDICT_CLI")/FullRunVerdictParse.ts" "$FAKEHOME/.claude/LIFEOS/TOOLS/"
+cp "$OC_VERDICT_CLI" "$FAKEHOME/.claude/LIFEOS/TOOLS/FullRunVerdict.ts" || ko "13e préparation : copie de FullRunVerdict.ts impossible"
+cp "$(dirname "$OC_VERDICT_CLI")/FullRunVerdictParse.ts" "$FAKEHOME/.claude/LIFEOS/TOOLS/" || ko "13e préparation : copie de FullRunVerdictParse.ts impossible"
 out=$(call "$T/s13e" HOME="$FAKEHOME" OC_VERDICT_CLI=/nonexistent/FullRunVerdict.ts); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13e "CLI introuvable (config de test, ~/.claude garni ignoré) : a:verdict-cli, jamais ok" || ko "13e [$out]"
 FAKE="$T/fakebun"; mkdir -p "$FAKE"
 printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 3\n' >"$FAKE/bun-pass-rc3"; chmod +x "$FAKE/bun-pass-rc3"
-out=$(call "$T/s13e" OC_BUN="$FAKE/bun-pass-rc3"); [ "$out" != "done_check=ok" ] && ok 13f "stdout « pass » mais code 3 : pas pass (le code ET la sortie doivent dire pass)" || ko "13f [$out]"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-pass-rc3"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13f "stdout « pass » mais code 3 : pas pass (le code ET la sortie doivent dire pass)" || ko "13f [$out]"
 printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 0\n' >"$FAKE/bun-unknown-rc0"; chmod +x "$FAKE/bun-unknown-rc0"
-out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown-rc0"); [ "$out" != "done_check=ok" ] && ok 13g "code 0 mais sortie « unknown » : pas pass" || ko "13g [$out]"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown-rc0"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13g "code 0 mais sortie « unknown » : pas pass" || ko "13g [$out]"
 printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 3\n' >"$FAKE/bun-unknown"; chmod +x "$FAKE/bun-unknown"
 out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 13h "code 3 (unknown) : inconclusif" || ko "13h [$out]"
 # 13i bun absent ; 13j délai dépassé ; 13k « pass » écrit seulement sur stderr.
@@ -325,54 +344,113 @@ PY
 printf '#!/bin/sh\nin=$(cat)\ncase "$in" in *BOOM*) exit 9;; esac\necho pass; exit 0\n' >"$FAKE/bun-boom-once"; chmod +x "$FAKE/bun-boom-once"
 out=$(call "$T/s13l" OC_BUN="$FAKE/bun-boom-once"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13l "M5 : panne CLI sur une tâche requise + autre tâche pass : a:verdict-cli (pas de continue permissif)" || ko "13l [$out]"
 
-# 14. Chemin de PRODUCTION (M1/B1) : vrai bundle construit, copié en root dans /opt/fullrun-tools avec un bun root,
+printf 'bunfig.toml\nevil-preload.js\n' >>"$R/.git/info/exclude"  # le piège ne doit pas salir l'arbre (d:arbre-sale)
+# 13m (B2) : bunfig.toml piégé dans le cwd du run, vrai bun, mode test : le CLI tourne dans son propre dossier.
+mkstore "$T/s13m" "opencode/v4-flash-free" 42 "$(env119 completed 'VERDICT: FAIL')" "$ENDP"
+printf 'console.log("pass"); process.exit(0)\n' >"$R/evil-preload.js"; printf 'preload = ["./evil-preload.js"]\n' >"$R/bunfig.toml"
+out=$(call "$T/s13m" OC_BUN=); rm -f "$R/evil-preload.js" "$R/bunfig.toml"
+[ "$out" = "done_check=ko raison=a:verdict" ] && ok 13m "bunfig.toml piégé (preload) dans le cwd du run : sans effet, FAIL => a:verdict" || ko "13m [$out]"
+# 13o : OC_DONE_VALIDATE_ONLY injecté n'affaiblit jamais le verdict (valeur 1 ou autre).
+for v in 1 true yes; do
+  out=$(call "$T/s13m" OC_DONE_VALIDATE_ONLY=$v); [ "$out" = "done_check=ko raison=a:verdict" ] && ok "13o-$v" "OC_DONE_VALIDATE_ONLY=$v injecté : un FAIL reste a:verdict" || ko "13o-$v [$out]"
+done
+
+# 14. Chemin de PRODUCTION : vrai bundle construit, copié en root dans /opt/fullrun-tools avec un bun et un bunfig root,
 # SANS OC_VERDICT_CLI ni mode test. Demande root ou `sudo -n` ; OC_REQUIRE_PROD_TESTS=1 (CI) refuse de sauter.
-PT=/opt/fullrun-tools
+# M3 : ne déplace JAMAIS un /opt/fullrun-tools existant (il est alors sauté, ou ko en CI) ; verrou flock contre les
+# exécutions concurrentes ; /opt et le marqueur de mode test sont restaurés à la sortie.
+PT=/opt/fullrun-tools; MARK=/etc/fullrun-done-test-mode
 if [ "$(id -u)" = 0 ]; then SU=""; elif sudo -n true 2>/dev/null; then SU="sudo -n"; else SU="NONE"; fi
-if [ "$SU" = NONE ]; then
-  if [ "${OC_REQUIRE_PROD_TESTS:-}" = 1 ]; then ko "14 chemin de production : ni root ni sudo -n (OC_REQUIRE_PROD_TESTS=1)"; else echo "skip 14 (ni root ni sudo -n)"; fi
+skip14() { if [ "${OC_REQUIRE_PROD_TESTS:-}" = 1 ]; then ko "14 chemin de production : $1 (OC_REQUIRE_PROD_TESTS=1)"; else echo "skip 14 ($1)"; fi; }
+exec 9>/tmp/fullrun-prod-tests.lock
+if [ "$SU" = NONE ]; then skip14 "ni root ni sudo -n"
+elif ! flock -n 9; then skip14 "exécution concurrente (verrou /tmp/fullrun-prod-tests.lock)"
+elif [ -e "$PT" ]; then skip14 "$PT existe déjà : jamais déplacé"
 else
   BUNDLE="$T/FullRunVerdict.js"
   BUNBIN=$(command -v bun || echo "$HOME/.bun/bin/bun")
   bun build "$OC_VERDICT_CLI" --target bun --outfile "$BUNDLE" >/dev/null 2>&1 || ko "14 bun build du bundle"
-  SAVED=""; if [ -e "$PT" ]; then SAVED="$T/opt-saved"; $SU mv "$PT" "$SAVED"; fi
-  restore_pt() { $SU rm -rf "$PT"; [ -n "$SAVED" ] && $SU mv "$SAVED" "$PT"; true; }
+  OPT_MODE=$(stat -c %a /opt); MARK_SAVED=""
+  if [ -e "$MARK" ]; then MARK_SAVED="$T/mark-saved"; $SU mv "$MARK" "$MARK_SAVED"; fi
+  restore_pt() { $SU rm -rf "$PT"; $SU chmod "$OPT_MODE" /opt; $SU rm -f "$MARK"; [ -n "$MARK_SAVED" ] && $SU mv "$MARK_SAVED" "$MARK"; true; }
   trap 'restore_pt; rm -rf "$T"' EXIT
-  install_pt() { $SU rm -rf "$PT"; $SU install -d -o root -g root -m 0755 "$PT"
-    $SU install -o root -g root -m 0644 "$BUNDLE" "$PT/FullRunVerdict.js"; $SU install -o root -g root -m 0755 "$BUNBIN" "$PT/bun"; }
+  install_pt() { $SU rm -rf "$PT"; $SU chmod "$OPT_MODE" /opt; $SU install -d -o root -g root -m 0755 "$PT"
+    $SU install -o root -g root -m 0644 "$BUNDLE" "$PT/FullRunVerdict.js"; $SU install -o root -g root -m 0755 "$BUNBIN" "$PT/bun"
+    printf '# bunfig vide (root) : rien ne se précharge\n' >"$T/bunfig.toml"; $SU install -o root -g root -m 0644 "$T/bunfig.toml" "$PT/bunfig.toml"; }
   # Production : aucun env d'override, aucun mode test.
   callp() { local store="$1"; shift
     env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT \
         OC_STORE_DIR="$store" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$REPORT" OC_ISA="$ISA" OC_DONE_REPO="$R" "$@" bash "$DC" 2>/dev/null; }
+  # Injection comme le ferait $GITHUB_ENV : mode test + faux CLI + faux bun « toujours pass » dans l'environnement.
+  printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 0\n' >"$FAKE/bun-always-pass"; chmod +x "$FAKE/bun-always-pass"; : >"$FAKE/fake-cli.js"
+  INJ=(OC_DONE_TEST_MODE=1 OC_VERDICT_CLI="$FAKE/fake-cli.js" OC_BUN="$FAKE/bun-always-pass")
   mkstore "$T/s14a" "opencode/v4-flash-free" 42 "$(env119 completed $'Revue terminée.\n{"status":"pass"}')" "$ENDP"
   mkstore "$T/s14b" "opencode/v4-flash-free" 42 "$(env119 completed 'VERDICT: FAIL')" "$ENDP"
   install_pt
   out=$(callp "$T/s14a"); [ "$out" = "done_check=ok" ] && ok 14a "production : bundle réel + bun root, sans OC_VERDICT_CLI ni mode test : pass" || ko "14a [$out]"
   out=$(callp "$T/s14b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14b "production : VERDICT: FAIL refusé par le vrai bundle" || ko "14b [$out]"
-  # Précédence : hors mode test, OC_VERDICT_CLI / OC_BUN (faux « pass ») sont ignorés — le CLI root décide.
-  printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 0\n' >"$FAKE/bun-always-pass"; chmod +x "$FAKE/bun-always-pass"
   out=$(callp "$T/s14b" OC_BUN="$FAKE/bun-always-pass" OC_VERDICT_CLI="$FAKE/fake-cli.js"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14c "hors mode test, OC_BUN/OC_VERDICT_CLI ignorés : le CLI root l'emporte (FAIL reste refusé)" || ko "14c [$out]"
   out=$(callp "$T/s14b" OC_DONE_TEST_MODE=0 OC_BUN="$FAKE/bun-always-pass"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14c2 "OC_DONE_TEST_MODE différent de 1 : overrides toujours ignorés" || ko "14c2 [$out]"
-  # Bundle absent / bun absent / fichiers non root ou inscriptibles : a:verdict-cli, jamais pass.
+  # B1 : mode test injecté sous GITHUB_ACTIONS sans marqueur root : refusé, le CLI root décide quand même.
+  out=$(callp "$T/s14b" GITHUB_ACTIONS=true "${INJ[@]}"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14j "GITHUB_ACTIONS + mode test/CLI/bun injectés (comme GITHUB_ENV), sans marqueur : le CLI root décide (FAIL => a:verdict)" || ko "14j [$out]"
+  $SU install -o root -g root -m 0644 /dev/null "$MARK"
+  out=$(callp "$T/s14b" GITHUB_ACTIONS=true "${INJ[@]}"); [ "$out" = "done_check=ok" ] && ok 14k "marqueur root présent (suite de tests CI) : le mode test est honoré" || ko "14k [$out]"
+  $SU chmod 0666 "$MARK"; out=$(callp "$T/s14b" GITHUB_ACTIONS=true "${INJ[@]}"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14l "marqueur inscriptible par tous : ignoré, le CLI root décide" || ko "14l [$out]"
+  $SU chown 65534:65534 "$MARK"; $SU chmod 0644 "$MARK"; out=$(callp "$T/s14b" GITHUB_ACTIONS=true "${INJ[@]}"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14l2 "marqueur non root : ignoré" || ko "14l2 [$out]"
+  $SU rm -f "$MARK"
+  # B2 : bunfig.toml piégé (preload) dans le cwd du run : le CLI tourne ailleurs, avec la config root.
+  printf 'console.log("pass"); process.exit(0)\n' >"$R/evil-preload.js"; printf 'preload = ["./evil-preload.js"]\n' >"$R/bunfig.toml"
+  out=$(callp "$T/s14b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14n "bunfig.toml piégé dans le cwd du run : sans effet (FAIL => a:verdict)" || ko "14n [$out]"
+  rm -f "$R/evil-preload.js" "$R/bunfig.toml"
+  # Env minimal : une variable BUN_* héritée n'atteint pas le CLI (BUN_OPTIONS=--preload d'un script qui écrit « pass »).
+  printf 'console.log("pass"); process.exit(0)\n' >"$T/evil-env.js"
+  out=$(callp "$T/s14b" BUN_OPTIONS="--preload $T/evil-env.js" NODE_OPTIONS="--require $T/evil-env.js"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14o "BUN_OPTIONS / NODE_OPTIONS hérités : sans effet (env minimal)" || ko "14o [$out]"
+  # Bundle absent / bun absent / bunfig absent / fichiers non root, inscriptibles, liens, ancêtre inscriptible.
   $SU rm -f "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14d "bundle absent : a:verdict-cli" || ko "14d [$out]"
   install_pt; $SU rm -f "$PT/bun"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14e "bun root absent : a:verdict-cli (pas de bun du PATH)" || ko "14e [$out]"
+  install_pt; $SU rm -f "$PT/bunfig.toml"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14e2 "bunfig root absent : a:verdict-cli" || ko "14e2 [$out]"
   install_pt; $SU chown 65534:65534 "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14f "bundle non root : a:verdict-cli" || ko "14f [$out]"
   install_pt; $SU chmod 0664 "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14g "bundle inscriptible par le groupe : a:verdict-cli" || ko "14g [$out]"
   install_pt; $SU chmod 0757 "$PT"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14h "dossier inscriptible par tous : a:verdict-cli" || ko "14h [$out]"
   install_pt; $SU chown 65534:65534 "$PT/bun"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14i "bun non root : a:verdict-cli" || ko "14i [$out]"
+  install_pt; $SU chown 65534:65534 "$PT/bunfig.toml"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14i2 "bunfig non root : a:verdict-cli" || ko "14i2 [$out]"
+  # M4 : lien symbolique (fichier) et ancêtre inscriptible (/opt) refusés.
+  install_pt; $SU mv "$PT/FullRunVerdict.js" "$PT/real.js"; $SU ln -s "$PT/real.js" "$PT/FullRunVerdict.js"
+  out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14p "bundle = lien symbolique (même vers un fichier root) : a:verdict-cli" || ko "14p [$out]"
+  install_pt; $SU chmod 0775 /opt; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14q "ancêtre (/opt) inscriptible par le groupe : a:verdict-cli" || ko "14q [$out]"
+  $SU chmod "$OPT_MODE" /opt; $SU chown 65534:65534 /opt; out=$(callp "$T/s14a"); $SU chown root:root /opt
+  [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14r "ancêtre (/opt) non root : a:verdict-cli" || ko "14r [$out]"
+  install_pt; out=$(callp "$T/s14a"); [ "$out" = "done_check=ok" ] && ok 14s "après restauration des droits : pass de nouveau" || ko "14s [$out]"
   restore_pt; trap 'rm -rf "$T"' EXIT
 fi
 
-# 15. Workflows : le mode test n'est JAMAIS posé par un workflow ; l'étape de gel échoue en dur (pas de ::warning::).
-if grep -rn "OC_DONE_TEST_MODE" "$ROOT/.github" >/dev/null 2>&1; then
+# 15. Workflows et appelants.
+if grep -rnE "OC_DONE_TEST_MODE[[:space:]]*[:=]" "$ROOT/.github" >/dev/null 2>&1; then
   ko "15a un workflow pose OC_DONE_TEST_MODE (réservé aux scripts de test)"; else ok 15a "aucun workflow ne pose OC_DONE_TEST_MODE"; fi
 FREEZE=$(awk '/CLI de verdict lifeos/{f=1} /fin du CLI de verdict/{f=0} f' "$ROOT/.github/workflows/opencode-fullrun.yml")
 if [ -n "$FREEZE" ] && ! printf '%s' "$FREEZE" | grep -q '::warning::' && printf '%s' "$FREEZE" | grep -q 'exit 1' \
-   && printf '%s' "$FREEZE" | grep -q '\$T/bun'; then
-  ok 15b "étape de gel : échec en dur sans bundle (exit 1, pas de ::warning::) et bun root copié"; else ko "15b étape de gel du bundle"; fi
+   && printf '%s' "$FREEZE" | grep -q '\$T/bun' && printf '%s' "$FREEZE" | grep -q 'bunfig.toml'; then
+  ok 15b "étape de gel : échec en dur sans bundle (exit 1, pas de ::warning::), bun et bunfig root copiés"; else ko "15b étape de gel du bundle"; fi
 if grep -q "ref: 109e42353e52a518d91c8ea680bc982482c38f12" "$ROOT/.github/workflows/ci.yml" && ! grep -q "ref: main" "$ROOT/.github/workflows/ci.yml"; then
   ok 15c "ci.yml épingle lifeos au merge de lifeos#23 (109e423)"; else ko "15c pin lifeos dans ci.yml"; fi
 if grep -q 'OC_REQUIRE_PROD_TESTS: "1"' "$ROOT/.github/workflows/ci.yml"; then ok 15d "ci.yml exige les tests de chemin de production"; else ko "15d OC_REQUIRE_PROD_TESTS"; fi
+# M2 : le dossier de gel ($T) du workflow, la constante de done_check.sh et les tests sont la MÊME valeur.
+FT=$(awk '/^ *T=\/opt\/fullrun-tools/{t=$1} /CLI de verdict lifeos/{print t; exit}' "$ROOT/.github/workflows/opencode-fullrun.yml" | sed 's/;$//')
+DCDIR=$(sed -n "s/^PROD_CLI = '\(.*\)\/FullRunVerdict.js'/\1/p" "$DC")
+[ "$FT" = "T=$PT" ] && [ "$DCDIR" = "$PT" ] && ok 15e "dossier de gel du workflow = $PT = constante de done_check.sh = constante des tests" || ko "15e gel [$FT] done_check [$DCDIR] test [$PT]"
+grep -q 'etc/fullrun-done-test-mode' "$ROOT/.github/workflows/ci.yml" && grep -q "$MARK" "$DC" && ok 15f "ci.yml pose le marqueur root du mode test ($MARK), lu par done_check.sh" || ko "15f marqueur mode test"
+# B1 : chaque appelant de done_check.sh vide explicitement les variables de test.
+PURGE='env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT'
+miss=""; for f in .github/workflows/opencode-fullrun.yml opencode/run-fullrun.sh opencode/checkpoint.sh; do
+  grep -qF "$PURGE" "$ROOT/$f" || miss="$miss $f"; done
+[ -z "$miss" ] && ok 15g "workflow, run-fullrun.sh et checkpoint.sh vident OC_DONE_TEST_MODE/OC_VERDICT_CLI/OC_BUN à chaque appel" || ko "15g sans purge :$miss"
+# M5 : README — la phrase du verdict est complète (parenthèses et backticks équilibrés, finit par « jamais PASS. »).
+RL=$(grep -F "Le verdict est lu par le CLI lifeos" "$ROOT/README.md" | head -1)
+python3 - "$RL" <<'PY' && ok 15h "README : phrase du verdict complète (parenthèses/backticks équilibrés)" || ko "15h README : phrase tronquée ou déséquilibrée"
+import sys
+l = sys.argv[1]
+assert l.count('(') == l.count(')') and l.count('`') % 2 == 0 and l.rstrip().endswith('jamais PASS.'), l
+PY
 
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

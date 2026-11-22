@@ -44,7 +44,7 @@ last_commit=$(git -C "$REPO" log -1 --format=%ct -- . ':!MEMORY' ':!.fullrun' 2>
 
 # --- a. stockage opencode (SQLite 1.19+ ou arbre JSON) ---
 storage=$(python3 - "$STORE" "$AGENTS" "$last_commit" <<'PY'
-import glob, json, os, shutil, sqlite3, subprocess, sys
+import glob, json, os, shutil, sqlite3, stat, subprocess, sys
 
 store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
 agents = [a for a in agents_arg.split(',') if a]
@@ -58,13 +58,17 @@ agents = [a for a in agents_arg.split(',') if a]
 #  - tout le reste (CLI introuvable, bun absent, plantage, délai dépassé, code/sortie incohérents) : panne
 #    nommée a:verdict-cli — jamais pass, jamais lue comme un verdict.
 # UN SEUL CLI en production : /opt/fullrun-tools/FullRunVerdict.js (bundle construit par le workflow), exécuté par
-# /opt/fullrun-tools/bun — tous deux, et leur dossier, appartenant à root et non inscriptibles par le groupe ou
-# les autres (l'agent écrit dans ~/.claude et le PATH : rien de ce qui s'y trouve ne peut décider d'un PASS).
+# /opt/fullrun-tools/bun avec la config /opt/fullrun-tools/bunfig.toml (vide) — chaque fichier, chaque dossier
+# parent jusqu'à / : à root, ni lien symbolique, ni inscriptible par le groupe ou les autres (l'agent écrit dans
+# ~/.claude, le cwd et le PATH : rien de ce qui s'y trouve ne peut décider d'un PASS). Le CLI tourne dans son
+# propre dossier avec un environnement minimal explicite (aucune variable BUN_* / NODE_* héritée, bunfig du cwd ignoré).
 # OC_VERDICT_CLI, OC_BUN et OC_VERDICT_TIMEOUT ne sont honorés que sous OC_DONE_TEST_MODE=1, posé par les seuls
-# scripts de test, jamais par un workflow. Aucun repli (~/.claude, PATH) : sinon, a:verdict-cli.
+# scripts de test, jamais par un workflow ; sous GITHUB_ACTIONS, le mode test exige en plus le marqueur root
+# /etc/fullrun-done-test-mode (posé par ci.yml pour la seule suite de tests). Aucun repli : sinon, a:verdict-cli.
 PROD_CLI = '/opt/fullrun-tools/FullRunVerdict.js'
 PROD_BUN = '/opt/fullrun-tools/bun'
-TEST_MODE = os.environ.get('OC_DONE_TEST_MODE') == '1'
+PROD_BUNFIG = '/opt/fullrun-tools/bunfig.toml'
+TEST_MARKER = '/etc/fullrun-done-test-mode'
 
 
 class VerdictCliError(Exception):
@@ -72,18 +76,31 @@ class VerdictCliError(Exception):
 
 
 def trusted(path):
-    """Fichier régulier, à root, non inscriptible par groupe/autres, dans un dossier de même nature."""
-    for p, want_dir in ((path, False), (os.path.dirname(path), True)):
-        try:
-            st = os.stat(p)
-        except OSError:
+    """Fichier régulier à root ; ni lien (nulle part dans le chemin) ; ni lui ni aucun ancêtre jusqu'à / inscriptible par g/o."""
+    try:
+        if os.path.realpath(path) != os.path.abspath(path):
             return False
-        if st.st_uid != 0 or (st.st_mode & 0o022) or (os.path.isdir(p) != want_dir):
+        if not stat.S_ISREG(os.lstat(path).st_mode):
             return False
-    return True
+        p = os.path.abspath(path)
+        while True:
+            st = os.lstat(p)
+            if st.st_uid != 0 or (st.st_mode & 0o022):
+                return False
+            if p == '/':
+                return True
+            p = os.path.dirname(p)
+    except OSError:
+        return False
+
+
+TEST_MODE = os.environ.get('OC_DONE_TEST_MODE') == '1'
+if TEST_MODE and os.environ.get('GITHUB_ACTIONS') and not trusted(TEST_MARKER):
+    TEST_MODE = False
 
 
 def cli_command():
+    """(argv, cwd) du CLI de verdict."""
     if TEST_MODE:
         cli = os.environ.get('OC_VERDICT_CLI', '')
         # Mode test seulement : bun du PATH accepté (les machines de test n'ont pas /opt/fullrun-tools).
@@ -92,27 +109,29 @@ def cli_command():
             raise VerdictCliError('cli introuvable')
         if not (os.path.isfile(bun) and os.access(bun, os.X_OK)):
             raise VerdictCliError('bun introuvable')
-        return [bun, cli]
-    if not os.path.isfile(PROD_CLI):
-        raise VerdictCliError('cli introuvable')
-    if not (os.path.isfile(PROD_BUN) and os.access(PROD_BUN, os.X_OK)):
-        raise VerdictCliError('bun introuvable')
-    if not (trusted(PROD_CLI) and trusted(PROD_BUN)):
-        raise VerdictCliError('cli ou bun non root / inscriptible')
-    return [PROD_BUN, PROD_CLI]
+        return [bun, '--config=' + os.devnull, cli], os.path.dirname(os.path.abspath(cli))
+    for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG):
+        if not os.path.isfile(f):
+            raise VerdictCliError('absent : %s' % f)
+    if not os.access(PROD_BUN, os.X_OK):
+        raise VerdictCliError('bun non exécutable')
+    if not all(trusted(f) for f in (PROD_CLI, PROD_BUN, PROD_BUNFIG)):
+        raise VerdictCliError('cli, bun ou bunfig non root / inscriptible / lien')
+    return [PROD_BUN, '--config=' + PROD_BUNFIG, PROD_CLI], os.path.dirname(PROD_CLI)
 
 
 def verdict_of(out):
     """'pass' | 'fail' | None (inconclusif : le CLI dit unknown). VerdictCliError si le CLI est inutilisable."""
-    cmd = cli_command()
+    cmd, cwd = cli_command()
     timeout = 30
     if TEST_MODE:
         try:
             timeout = float(os.environ.get('OC_VERDICT_TIMEOUT') or 30)
         except ValueError:
             timeout = 30
+    clean = {'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'TMPDIR': '/nonexistent', 'LC_ALL': 'C.UTF-8'}
     try:
-        r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=clean)
     except Exception as e:
         raise VerdictCliError('cli: %s' % type(e).__name__)
     said = r.stdout.strip()

@@ -770,9 +770,11 @@ jobs:
             || { echo "::error::bun build du CLI de verdict en échec"; exit 1; }
           sudo install -o root -g root -m 0644 "$RUNNER_TEMP/FullRunVerdict.js" "$T/FullRunVerdict.js"
           sudo install -o root -g root -m 0755 "$BUNBIN" "$T/bun"
+          printf '# bunfig vide (root) : rien ne se précharge\n' >"$RUNNER_TEMP/bunfig.toml"
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/bunfig.toml" "$T/bunfig.toml"; rm -f "$RUNNER_TEMP/bunfig.toml"
           rm -f "$RUNNER_TEMP/FullRunVerdict.js"
-          [ "$(printf '{"status":"pass"}' | "$T/bun" "$T/FullRunVerdict.js")" = pass ] \
-            && [ "$(printf 'x' | "$T/bun" "$T/FullRunVerdict.js" || true)" = unknown ] \
+          [ "$(printf '{"status":"pass"}' | "$T/bun" --config="$T/bunfig.toml" "$T/FullRunVerdict.js")" = pass ] \
+            && [ "$(printf 'x' | "$T/bun" --config="$T/bunfig.toml" "$T/FullRunVerdict.js" || true)" = unknown ] \
             || { echo "::error::CLI de verdict installé mais le test de fumée échoue"; exit 1; }
           # (fin du CLI de verdict)
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
@@ -1336,7 +1338,7 @@ jobs:
             echo 'if [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "$isa"; fi'
             echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
           } >"$vf"
-          dc_out=$(OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+          dc_out=$(env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
                    OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" "$T/done_check.sh" 2>/dev/null | head -n1) || true
           rm -f "$vf"
           case "$dc_out" in

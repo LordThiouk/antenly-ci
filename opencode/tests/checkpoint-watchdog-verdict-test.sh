@@ -137,6 +137,24 @@ PY
 dc() { env OC_STORE_DIR="$1" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$T/R.md" OC_DONE_REPO="$V" OC_DONE_AGENTS="${2:-Max}" bash "$DC" 2>/dev/null; }
 echo rapport >"$T/R.md"
 
+# 3.0 (B1) : checkpoint.sh verdict vide les variables de test avant d'appeler done_check (espion), même injectées.
+cat >"$T/spy-dc" <<EOS
+#!/usr/bin/env bash
+echo called >>"$T/spy3.called"
+env | grep -E '^(OC_DONE_TEST_MODE|OC_VERDICT_CLI|OC_BUN|OC_VERDICT_TIMEOUT)=' >>"$T/spy3.env"
+echo done_check=ko
+EOS
+chmod +x "$T/spy-dc"; : >"$T/spy3.env"
+OC_DONE_CHECK_BIN="$T/spy-dc" OC_DONE_TEST_MODE=1 OC_VERDICT_CLI=/tmp/evil-cli.js OC_BUN=/tmp/evil-bun OC_VERDICT_TIMEOUT=99 \
+  bash "$CP" verdict --job J3 --agent Max --repo "$V" >/dev/null 2>&1
+[ -s "$T/spy3.called" ] && [ ! -s "$T/spy3.env" ] && ok "3.0 checkpoint.sh verdict : variables de test injectées non transmises à done_check" || ko "3.0 $(tr '\n' ' ' <"$T/spy3.env")"
+# Le vrai done_check des tests ci-dessous est lancé via un double qui repose le mode test APRÈS la purge de l'appelant.
+cat >"$T/dc-test" <<EOS
+#!/usr/bin/env bash
+export OC_DONE_TEST_MODE=1 OC_VERDICT_CLI="$OC_VERDICT_CLI"
+exec bash "$DC"
+EOS
+chmod +x "$T/dc-test"; export OC_DONE_CHECK_BIN="$T/dc-test"
 PASS_MAIN=1 mkstore3 "$T/s3a"; mklog Max Silas
 out=$(dc "$T/s3a" Max); [ "$out" = "done_check=ko raison=a:none:Max" ] \
   && ok "3.a « Max PASS » écrit par l'agent principal (aucune tâche Max) : refusé" || ko "3.a [$out]"
