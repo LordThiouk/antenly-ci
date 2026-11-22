@@ -143,9 +143,9 @@ jobs:
     # garde au bot d'Actions, qui déclencherait n'importe quel run automatisé avec les vrais secrets.
     if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
     runs-on: ubuntu-latest
-    # Chaîné : 55 min par lien (un job court = une étape, une tâche, ou un agent de verify, chacun
-    # avec une session opencode neuve). Le step opencode est plafonné à 35 min, dont 5 de marge de
-    # push (plafond interne ≈28,3 min) : les ~20 min restantes couvrent le préambule (deux checkouts
+    # Chaîné : 120 min par lien (relevé de 55 le 2026-11-22 : les liens de 35 min plafonnaient avant la fin d'une tâche) (un job court = une étape, une tâche, ou un agent de verify, chacun
+    # avec une session opencode neuve). Le step opencode est plafonné à 100 min, dont 5 de marge de
+    # push (les ≈28,3 min d'origine valaient pour 35 min) : les ~20 min restantes couvrent le préambule (deux checkouts
     # fetch-depth 0, setup-bun/node/uv, npm -g opencode, reconstitution de ~/.claude), le push,
     # save_state/publish_state et le dispatch du lien suivant. À 45 min il ne restait que ~10 min :
     # un préambule un peu lent et le job était tué AVANT save_state/chain, ce qui reproduisait
@@ -154,7 +154,7 @@ jobs:
     # Ancre &fullrun_job_timeout_min : la valeur est reprise par l'alias *fullrun_job_timeout_min
     # dans l'env du step oc (OC_JOB_TIMEOUT_MIN), pour que le plafond interne d'opencode tienne
     # aussi compte de l'horloge du JOB — jamais deux copies qui divergent (revue 2, point 3).
-    timeout-minutes: &fullrun_job_timeout_min ${{ inputs.chain_enabled == 'true' && 55 || 350 }}
+    timeout-minutes: &fullrun_job_timeout_min ${{ inputs.chain_enabled == 'true' && 120 || 350 }}
     env:
       IN_BRANCH: ${{ inputs.branch }}
       IN_PROMPT: ${{ inputs.prompt_path }}
@@ -917,7 +917,7 @@ jobs:
         # 350, préambule ~10 min). Valeur définie UNE SEULE FOIS ici (ancre YAML
         # &oc_step_timeout_min) et reprise par OC_STEP_TIMEOUT_MIN plus bas (alias
         # *oc_step_timeout_min) : les deux ne peuvent plus diverger, qu'on édite l'un ou l'autre.
-        timeout-minutes: &oc_step_timeout_min ${{ inputs.chain_enabled == 'true' && 35 || 340 }}
+        timeout-minutes: &oc_step_timeout_min ${{ inputs.chain_enabled == 'true' && 100 || 340 }}
         env:
           OC_JOB: ${{ inputs.job_name }}
           OC_BRANCH: ${{ inputs.branch }}
