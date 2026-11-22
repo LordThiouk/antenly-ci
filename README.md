@@ -302,7 +302,7 @@ démons).
   stockage opencode (tokens d'un modèle `-free`, PASS explicite, postérieure au dernier commit de
   code) et la ligne `SUBAGENT done` du plugin. Un PASS écrit par l'agent principal (message, fichier,
   checkpoint) ne compte pas ; `checkpoint.sh verdict` refuse de l'enregistrer. Verdict manquant ≠ PASS.
-  Le verdict est lu par le CLI lifeos `LIFEOS/TOOLS/FullRunVerdict.ts` (source unique, même règle que le pipeline ; copie figée `/opt/fullrun-tools/FullRunVerdict.js`) : `pass` = code 0 et sortie `pass`, `unknown` (code 3) = inconclusif, CLI inutilisable = `a:verdict-cli`, jamais PASS.
+  Le verdict est lu par le CLI lifeos `LIFEOS/TOOLS/FullRunVerdict.ts` (source unique, même règle que le pipeline). En production `done_check.sh` n'exécute qu'UN couple : `/opt/fullrun-tools/FullRunVerdict.js` (bundle construit à l'étape de gel, échec dur s'il manque) par `/opt/fullrun-tools/bun`, tous deux à root et non inscriptibles ; `OC_VERDICT_CLI`/`OC_BUN` ne valent que sous `OC_DONE_TEST_MODE=1` (scripts de test, jamais un workflow) ; aucun repli `~/.claude` : `pass` = code 0 et sortie `pass`, `unknown` (code 3) = inconclusif, CLI inutilisable = `a:verdict-cli`, jamais PASS.
 
 Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
 réduit : seuil 3 s, activité 9 s).

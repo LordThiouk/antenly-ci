@@ -758,16 +758,22 @@ jobs:
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
           # CLI de verdict lifeos (source unique du verdict lu par done_check.sh) : bundle autonome construit ici,
-          # copié en root — l'agent ne peut pas le remplacer pour fabriquer un PASS. Absent (lifeos_ref ancien) :
-          # done_check.sh refuse nommément (a:verdict-cli), jamais de PASS par défaut.
+          # copié en root avec un bun root — l'agent ne peut remplacer ni l'un ni l'autre pour fabriquer un PASS.
+          # done_check.sh n'accepte QUE ce couple. Bundle impossible à construire = échec en dur (pas d'avertissement).
           V="$GITHUB_WORKSPACE/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts"
-          if [ -f "$V" ]; then
-            bun build "$V" --target bun --outfile "$RUNNER_TEMP/FullRunVerdict.js" >/dev/null
-            sudo install -o root -g root -m 0644 "$RUNNER_TEMP/FullRunVerdict.js" "$T/FullRunVerdict.js"
-            rm -f "$RUNNER_TEMP/FullRunVerdict.js"
-          else
-            echo "::warning::lifeos@$IN_LIFEOS_REF sans LIFEOS/TOOLS/FullRunVerdict.ts : verdicts d'agent non vérifiables (a:verdict-cli)"
+          if [ ! -f "$V" ]; then
+            echo "::error::lifeos@$IN_LIFEOS_REF sans LIFEOS/TOOLS/FullRunVerdict.ts : CLI de verdict introuvable (lifeos_ref >= 109e423 requis)"
+            exit 1
           fi
+          BUNBIN=$(command -v bun) || { echo "::error::bun introuvable pour le CLI de verdict"; exit 1; }
+          bun build "$V" --target bun --outfile "$RUNNER_TEMP/FullRunVerdict.js" >/dev/null \
+            || { echo "::error::bun build du CLI de verdict en échec"; exit 1; }
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/FullRunVerdict.js" "$T/FullRunVerdict.js"
+          sudo install -o root -g root -m 0755 "$BUNBIN" "$T/bun"
+          rm -f "$RUNNER_TEMP/FullRunVerdict.js"
+          [ "$(printf '{"status":"pass"}' | "$T/bun" "$T/FullRunVerdict.js")" = pass ] \
+            && [ "$(printf 'x' | "$T/bun" "$T/FullRunVerdict.js" || true)" = unknown ] \
+            || { echo "::error::CLI de verdict installé mais le test de fumée échoue"; exit 1; }
           # Visible dans le PATH d'opencode (préambule : `bench-capped` sans chemin). Copie root,
           # pas un lien : /opt/fullrun-tools n'est pas dans le PATH, et le binaire ne doit pas
           # pouvoir être remplacé par l'agent.

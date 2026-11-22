@@ -1,0 +1,18 @@
+# shellcheck shell=bash
+# Sourcé (jamais exécuté) par les tests qui font tourner le vrai done_check.sh : localise le CLI de verdict
+# lifeos (LIFEOS/TOOLS/FullRunVerdict.ts, source unique du verdict), l'exporte en OC_VERDICT_CLI et pose
+# OC_DONE_TEST_MODE=1 — le SEUL endroit qui le fait, jamais un workflow. Sans ce flag, done_check.sh ignore
+# OC_VERDICT_CLI et OC_BUN (il n'utilise que /opt/fullrun-tools). Jamais ~/.claude : l'agent peut y écrire.
+find_verdict_cli() {
+  local c root; root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  for c in "${OC_VERDICT_CLI:-}" "$root/../lifeos/LIFEOS/TOOLS/FullRunVerdict.ts" \
+           "$root/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts" \
+           "${GITHUB_WORKSPACE:-/nonexistent}/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts"; do
+    [ -n "$c" ] && [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+command -v bun >/dev/null 2>&1 || [ -x "$HOME/.bun/bin/bun" ] || { echo "ko bun introuvable (requis par done_check.sh)"; exit 1; }
+OC_VERDICT_CLI=$(find_verdict_cli) || { echo "ko FullRunVerdict.ts introuvable : pose OC_VERDICT_CLI ou clone lifeos à côté (checkout du ref épinglé)"; exit 1; }
+export OC_VERDICT_CLI
+export OC_DONE_TEST_MODE=1

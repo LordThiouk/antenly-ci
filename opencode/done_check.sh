@@ -57,31 +57,62 @@ agents = [a for a in agents_arg.split(',') if a]
 #  - unknown : code 3 ET sortie « unknown » -> INCONCLUSIF, jamais PASS ;
 #  - tout le reste (CLI introuvable, bun absent, plantage, délai dépassé, code/sortie incohérents) : panne
 #    nommée a:verdict-cli — jamais pass, jamais lue comme un verdict.
-# Le CLI est cherché dans OC_VERDICT_CLI, puis /opt/fullrun-tools/FullRunVerdict.js (copie figée root, hors de
-# portée de l'agent, comme ce script), puis ~/.claude/LIFEOS/TOOLS/FullRunVerdict.ts (repli, modifiable).
+# UN SEUL CLI en production : /opt/fullrun-tools/FullRunVerdict.js (bundle construit par le workflow), exécuté par
+# /opt/fullrun-tools/bun — tous deux, et leur dossier, appartenant à root et non inscriptibles par le groupe ou
+# les autres (l'agent écrit dans ~/.claude et le PATH : rien de ce qui s'y trouve ne peut décider d'un PASS).
+# OC_VERDICT_CLI, OC_BUN et OC_VERDICT_TIMEOUT ne sont honorés que sous OC_DONE_TEST_MODE=1, posé par les seuls
+# scripts de test, jamais par un workflow. Aucun repli (~/.claude, PATH) : sinon, a:verdict-cli.
+PROD_CLI = '/opt/fullrun-tools/FullRunVerdict.js'
+PROD_BUN = '/opt/fullrun-tools/bun'
+TEST_MODE = os.environ.get('OC_DONE_TEST_MODE') == '1'
 
 
 class VerdictCliError(Exception):
     pass
 
 
+def trusted(path):
+    """Fichier régulier, à root, non inscriptible par groupe/autres, dans un dossier de même nature."""
+    for p, want_dir in ((path, False), (os.path.dirname(path), True)):
+        try:
+            st = os.stat(p)
+        except OSError:
+            return False
+        if st.st_uid != 0 or (st.st_mode & 0o022) or (os.path.isdir(p) != want_dir):
+            return False
+    return True
+
+
 def cli_command():
-    cands = [os.environ.get('OC_VERDICT_CLI', ''), '/opt/fullrun-tools/FullRunVerdict.js',
-             os.path.expanduser('~/.claude/LIFEOS/TOOLS/FullRunVerdict.ts')]
-    cli = next((c for c in cands if c and os.path.isfile(c)), None)
-    if cli is None:
+    if TEST_MODE:
+        cli = os.environ.get('OC_VERDICT_CLI', '')
+        # Mode test seulement : bun du PATH accepté (les machines de test n'ont pas /opt/fullrun-tools).
+        bun = os.environ.get('OC_BUN', '') or shutil.which('bun') or os.path.expanduser('~/.bun/bin/bun')
+        if not os.path.isfile(cli):
+            raise VerdictCliError('cli introuvable')
+        if not (os.path.isfile(bun) and os.access(bun, os.X_OK)):
+            raise VerdictCliError('bun introuvable')
+        return [bun, cli]
+    if not os.path.isfile(PROD_CLI):
         raise VerdictCliError('cli introuvable')
-    bun = os.environ.get('OC_BUN') or shutil.which('bun') or os.path.expanduser('~/.bun/bin/bun')
-    if not (os.path.isfile(bun) and os.access(bun, os.X_OK)):
+    if not (os.path.isfile(PROD_BUN) and os.access(PROD_BUN, os.X_OK)):
         raise VerdictCliError('bun introuvable')
-    return [bun, cli]
+    if not (trusted(PROD_CLI) and trusted(PROD_BUN)):
+        raise VerdictCliError('cli ou bun non root / inscriptible')
+    return [PROD_BUN, PROD_CLI]
 
 
 def verdict_of(out):
     """'pass' | 'fail' | None (inconclusif : le CLI dit unknown). VerdictCliError si le CLI est inutilisable."""
     cmd = cli_command()
+    timeout = 30
+    if TEST_MODE:
+        try:
+            timeout = float(os.environ.get('OC_VERDICT_TIMEOUT') or 30)
+        except ValueError:
+            timeout = 30
     try:
-        r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, input=out, capture_output=True, text=True, timeout=timeout)
     except Exception as e:
         raise VerdictCliError('cli: %s' % type(e).__name__)
     said = r.stdout.strip()
@@ -184,8 +215,8 @@ def check(max_agent):
         try:
             v = verdict_of(str(st.get('output') or ''))
         except VerdictCliError:
-            reasons.add('verdict-cli')
-            continue
+            # Panne d'infrastructure : refus immédiat et global, même si une autre tâche de l'agent passerait.
+            return 'verdict-cli'
         if v is None:
             reasons.add('inconclusif')
             continue

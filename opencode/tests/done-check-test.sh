@@ -7,8 +7,8 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 DC="$ROOT/opencode/done_check.sh"
-# shellcheck source=verdict-cli.sh
-source "$HERE/verdict-cli.sh"
+# shellcheck source=verdict-cli.lib
+source "$HERE/verdict-cli.lib"
 RUN="$ROOT/opencode/run-fullrun.sh"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -286,8 +286,14 @@ out=$(call "$T/s13c"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 1
 mkstore "$T/s13d" "opencode/v4-flash-free" 42 $'task_id: ses_x (for resuming...)\n\n<task_result>\nVERDICT: PASS\n</task_result>' "$ENDP"
 out=$(call "$T/s13d"); [ "$out" = "done_check=ok" ] && ok 13d "ancienne enveloppe task_id/<task_result> + VERDICT: PASS : pass" || ko "13d [$out]"
 # CLI absent ou défaillant : jamais pass, panne nommée (a:verdict-cli), jamais « inconclusif » silencieux.
+# 13e (M2) : indépendant de la machine — le CLI absent est SIMULÉ par la configuration du test (mode test +
+# OC_VERDICT_CLI inexistant), jamais par l'absence de /opt ou de ~/.claude. Un ~/.claude qui contient un vrai
+# CLI (machine du principal) ne doit PAS servir de repli : on le fabrique ici pour le prouver.
 mkstore "$T/s13e" "opencode/v4-flash-free" 42 $'Revue.\n{"status":"pass"}' "$ENDP"
-out=$(call "$T/s13e" OC_VERDICT_CLI=/nonexistent/FullRunVerdict.ts); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13e "CLI introuvable : refus nommé a:verdict-cli, jamais ok" || ko "13e [$out]"
+FAKEHOME="$T/fakehome"; mkdir -p "$FAKEHOME/.claude/LIFEOS/TOOLS" "$FAKEHOME/.bun/bin"
+cp "$OC_VERDICT_CLI" "$FAKEHOME/.claude/LIFEOS/TOOLS/FullRunVerdict.ts"
+cp "$(dirname "$OC_VERDICT_CLI")/FullRunVerdictParse.ts" "$FAKEHOME/.claude/LIFEOS/TOOLS/"
+out=$(call "$T/s13e" HOME="$FAKEHOME" OC_VERDICT_CLI=/nonexistent/FullRunVerdict.ts); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13e "CLI introuvable (config de test, ~/.claude garni ignoré) : a:verdict-cli, jamais ok" || ko "13e [$out]"
 FAKE="$T/fakebun"; mkdir -p "$FAKE"
 printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 3\n' >"$FAKE/bun-pass-rc3"; chmod +x "$FAKE/bun-pass-rc3"
 out=$(call "$T/s13e" OC_BUN="$FAKE/bun-pass-rc3"); [ "$out" != "done_check=ok" ] && ok 13f "stdout « pass » mais code 3 : pas pass (le code ET la sortie doivent dire pass)" || ko "13f [$out]"
@@ -295,6 +301,78 @@ printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 0\n' >"$FAKE/bun-unknown-r
 out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown-rc0"); [ "$out" != "done_check=ok" ] && ok 13g "code 0 mais sortie « unknown » : pas pass" || ko "13g [$out]"
 printf '#!/bin/sh\ncat >/dev/null; echo unknown; exit 3\n' >"$FAKE/bun-unknown"; chmod +x "$FAKE/bun-unknown"
 out=$(call "$T/s13e" OC_BUN="$FAKE/bun-unknown"); [ "$out" = "done_check=ko raison=a:inconclusif" ] && ok 13h "code 3 (unknown) : inconclusif" || ko "13h [$out]"
+# 13i bun absent ; 13j délai dépassé ; 13k « pass » écrit seulement sur stderr.
+out=$(call "$T/s13e" OC_BUN=/nonexistent/bun); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13i "bun absent : a:verdict-cli, jamais ok" || ko "13i [$out]"
+printf '#!/bin/sh\ncat >/dev/null; sleep 6; echo pass; exit 0\n' >"$FAKE/bun-slow"; chmod +x "$FAKE/bun-slow"
+t0=$(date +%s); out=$(call "$T/s13e" OC_BUN="$FAKE/bun-slow" OC_VERDICT_TIMEOUT=1); dt=$(( $(date +%s) - t0 ))
+[ "$out" = "done_check=ko raison=a:verdict-cli" ] && [ "$dt" -lt 6 ] && ok 13j "CLI trop lent (timeout) : a:verdict-cli, jamais ok" || ko "13j [$out] ${dt}s"
+printf '#!/bin/sh\ncat >/dev/null; echo pass >&2; exit 0\n' >"$FAKE/bun-stderr"; chmod +x "$FAKE/bun-stderr"
+out=$(call "$T/s13e" OC_BUN="$FAKE/bun-stderr"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13k "« pass » seulement sur stderr (stdout vide, code 0) : a:verdict-cli, jamais ok" || ko "13k [$out]"
+# 13l (M5) : un CLI en panne sur UNE tâche requise donne a:verdict-cli même si une autre tâche du même agent passe.
+python3 - "$T/s13l" "$ENDP" <<'PY'
+import json, os, sqlite3, sys
+d, end = sys.argv[1], int(sys.argv[2]); os.makedirs(d, exist_ok=True)
+con = sqlite3.connect(os.path.join(d, "opencode.db"))
+con.execute("create table part(session_id text, data text)"); con.execute("create table message(session_id text, data text)")
+for i, out in ((1, "BOOM {\"status\":\"pass\"}"), (2, "{\"status\":\"pass\"}")):
+    part = {"type": "tool", "tool": "task", "state": {"status": "completed", "input": {"subagent_type": "Max"},
+            "metadata": {"sessionId": "child%d" % i, "model": {"modelID": "opencode/v4-flash-free"}},
+            "time": {"end": end}, "output": out}}
+    msg = {"role": "assistant", "modelID": "opencode/v4-flash-free", "tokens": {"input": 10, "output": 42}}
+    con.execute("insert into part values('s1',?)", (json.dumps(part),)); con.execute("insert into message values(?,?)", ("child%d" % i, json.dumps(msg)))
+con.commit()
+PY
+printf '#!/bin/sh\nin=$(cat)\ncase "$in" in *BOOM*) exit 9;; esac\necho pass; exit 0\n' >"$FAKE/bun-boom-once"; chmod +x "$FAKE/bun-boom-once"
+out=$(call "$T/s13l" OC_BUN="$FAKE/bun-boom-once"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 13l "M5 : panne CLI sur une tâche requise + autre tâche pass : a:verdict-cli (pas de continue permissif)" || ko "13l [$out]"
+
+# 14. Chemin de PRODUCTION (M1/B1) : vrai bundle construit, copié en root dans /opt/fullrun-tools avec un bun root,
+# SANS OC_VERDICT_CLI ni mode test. Demande root ou `sudo -n` ; OC_REQUIRE_PROD_TESTS=1 (CI) refuse de sauter.
+PT=/opt/fullrun-tools
+if [ "$(id -u)" = 0 ]; then SU=""; elif sudo -n true 2>/dev/null; then SU="sudo -n"; else SU="NONE"; fi
+if [ "$SU" = NONE ]; then
+  if [ "${OC_REQUIRE_PROD_TESTS:-}" = 1 ]; then ko "14 chemin de production : ni root ni sudo -n (OC_REQUIRE_PROD_TESTS=1)"; else echo "skip 14 (ni root ni sudo -n)"; fi
+else
+  BUNDLE="$T/FullRunVerdict.js"
+  BUNBIN=$(command -v bun || echo "$HOME/.bun/bin/bun")
+  bun build "$OC_VERDICT_CLI" --target bun --outfile "$BUNDLE" >/dev/null 2>&1 || ko "14 bun build du bundle"
+  SAVED=""; if [ -e "$PT" ]; then SAVED="$T/opt-saved"; $SU mv "$PT" "$SAVED"; fi
+  restore_pt() { $SU rm -rf "$PT"; [ -n "$SAVED" ] && $SU mv "$SAVED" "$PT"; true; }
+  trap 'restore_pt; rm -rf "$T"' EXIT
+  install_pt() { $SU rm -rf "$PT"; $SU install -d -o root -g root -m 0755 "$PT"
+    $SU install -o root -g root -m 0644 "$BUNDLE" "$PT/FullRunVerdict.js"; $SU install -o root -g root -m 0755 "$BUNBIN" "$PT/bun"; }
+  # Production : aucun env d'override, aucun mode test.
+  callp() { local store="$1"; shift
+    env -u OC_DONE_TEST_MODE -u OC_VERDICT_CLI -u OC_BUN -u OC_VERDICT_TIMEOUT \
+        OC_STORE_DIR="$store" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$REPORT" OC_ISA="$ISA" OC_DONE_REPO="$R" "$@" bash "$DC" 2>/dev/null; }
+  mkstore "$T/s14a" "opencode/v4-flash-free" 42 "$(env119 completed $'Revue terminée.\n{"status":"pass"}')" "$ENDP"
+  mkstore "$T/s14b" "opencode/v4-flash-free" 42 "$(env119 completed 'VERDICT: FAIL')" "$ENDP"
+  install_pt
+  out=$(callp "$T/s14a"); [ "$out" = "done_check=ok" ] && ok 14a "production : bundle réel + bun root, sans OC_VERDICT_CLI ni mode test : pass" || ko "14a [$out]"
+  out=$(callp "$T/s14b"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14b "production : VERDICT: FAIL refusé par le vrai bundle" || ko "14b [$out]"
+  # Précédence : hors mode test, OC_VERDICT_CLI / OC_BUN (faux « pass ») sont ignorés — le CLI root décide.
+  printf '#!/bin/sh\ncat >/dev/null; echo pass; exit 0\n' >"$FAKE/bun-always-pass"; chmod +x "$FAKE/bun-always-pass"
+  out=$(callp "$T/s14b" OC_BUN="$FAKE/bun-always-pass" OC_VERDICT_CLI="$FAKE/fake-cli.js"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14c "hors mode test, OC_BUN/OC_VERDICT_CLI ignorés : le CLI root l'emporte (FAIL reste refusé)" || ko "14c [$out]"
+  out=$(callp "$T/s14b" OC_DONE_TEST_MODE=0 OC_BUN="$FAKE/bun-always-pass"); [ "$out" = "done_check=ko raison=a:verdict" ] && ok 14c2 "OC_DONE_TEST_MODE différent de 1 : overrides toujours ignorés" || ko "14c2 [$out]"
+  # Bundle absent / bun absent / fichiers non root ou inscriptibles : a:verdict-cli, jamais pass.
+  $SU rm -f "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14d "bundle absent : a:verdict-cli" || ko "14d [$out]"
+  install_pt; $SU rm -f "$PT/bun"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14e "bun root absent : a:verdict-cli (pas de bun du PATH)" || ko "14e [$out]"
+  install_pt; $SU chown 65534:65534 "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14f "bundle non root : a:verdict-cli" || ko "14f [$out]"
+  install_pt; $SU chmod 0664 "$PT/FullRunVerdict.js"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14g "bundle inscriptible par le groupe : a:verdict-cli" || ko "14g [$out]"
+  install_pt; $SU chmod 0757 "$PT"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14h "dossier inscriptible par tous : a:verdict-cli" || ko "14h [$out]"
+  install_pt; $SU chown 65534:65534 "$PT/bun"; out=$(callp "$T/s14a"); [ "$out" = "done_check=ko raison=a:verdict-cli" ] && ok 14i "bun non root : a:verdict-cli" || ko "14i [$out]"
+  restore_pt; trap 'rm -rf "$T"' EXIT
+fi
+
+# 15. Workflows : le mode test n'est JAMAIS posé par un workflow ; l'étape de gel échoue en dur (pas de ::warning::).
+if grep -rn "OC_DONE_TEST_MODE" "$ROOT/.github" >/dev/null 2>&1; then
+  ko "15a un workflow pose OC_DONE_TEST_MODE (réservé aux scripts de test)"; else ok 15a "aucun workflow ne pose OC_DONE_TEST_MODE"; fi
+FREEZE=$(awk '/CLI de verdict lifeos/{f=1} /Visible dans le PATH/{f=0} f' "$ROOT/.github/workflows/opencode-fullrun.yml")
+if [ -n "$FREEZE" ] && ! printf '%s' "$FREEZE" | grep -q '::warning::' && printf '%s' "$FREEZE" | grep -q 'exit 1' \
+   && printf '%s' "$FREEZE" | grep -q '\$T/bun'; then
+  ok 15b "étape de gel : échec en dur sans bundle (exit 1, pas de ::warning::) et bun root copié"; else ko "15b étape de gel du bundle"; fi
+if grep -q "ref: 109e42353e52a518d91c8ea680bc982482c38f12" "$ROOT/.github/workflows/ci.yml" && ! grep -q "ref: main" "$ROOT/.github/workflows/ci.yml"; then
+  ok 15c "ci.yml épingle lifeos au merge de lifeos#23 (109e423)"; else ko "15c pin lifeos dans ci.yml"; fi
+if grep -q 'OC_REQUIRE_PROD_TESTS: "1"' "$ROOT/.github/workflows/ci.yml"; then ok 15d "ci.yml exige les tests de chemin de production"; else ko "15d OC_REQUIRE_PROD_TESTS"; fi
 
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]
