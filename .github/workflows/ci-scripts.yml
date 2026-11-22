@@ -41,8 +41,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: LordThiouk/lifeos
-          # Épinglé : merge de lifeos#23 (CLI de verdict). Un `main` mouvant changerait le verdict sous nos pieds.
-          ref: 109e42353e52a518d91c8ea680bc982482c38f12
+          # Épinglé : lifeos#24 mergée (4fac2d5 : préflight + CLI de verdict de #23). Un `main` mouvant changerait le verdict sous nos pieds.
+          ref: 4fac2d59de94bf6a5fa6c68c7f09874a2f9cd634
           token: ${{ secrets.LIFEOS_READ_TOKEN }}
           path: lifeos
           persist-credentials: false
@@ -59,6 +59,10 @@ jobs:
       - name: Tests opencode
         env:
           OC_VERDICT_CLI: ${{ github.workspace }}/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts
+          # Bout en bout du préflight avec le vrai CLI lifeos (pin ci-dessus, contient lifeos#24) : son absence
+          # fait échouer preflight-test.sh au lieu d'un SKIP.
+          LIFEOS_DIR: ${{ github.workspace }}/lifeos
+          OC_REQUIRE_PREFLIGHT_E2E: "1"
           OC_REQUIRE_PROD_TESTS: "1"
           # Échecs connus, sans rapport avec done_check.sh, vus au premier run sur runner (22 nov. 2026) : nommés ici,
           # signalés en ::warning:: à chaque run, jamais silencieux. Tout autre script qui échoue fait échouer le job.

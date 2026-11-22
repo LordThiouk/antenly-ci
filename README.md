@@ -380,6 +380,37 @@ conservée entre deux runs. Un run par branche à la fois (`concurrency`).
 
 Input facultatif du workflow (vide par défaut). `start_step=verify` (ou `build`, `max`, `close`, `0` à `7` ; jamais `deploy`) demande au run de démarrer à cette étape. C'est une **demande**, pas un forçage : LifeOS (`FullRunCarry.proveStart`) n'ouvre la porte que si chaque étape avant a un verdict signé (HMAC `isa_stamp`) ancré sur le commit actuel ; sinon le run redescend à la première étape non prouvée et la raison est écrite dans le log et dans le mandat de l'agent. Si l'étape demandée échoue, retour au build. La valeur passe par l'environnement d'opencode (`FULLRUN_START_STEP`, posé par `run-fullrun.sh`), que l'agent ne peut pas modifier. Aucune garde n'est affaiblie : Max PASS reste obligatoire à la fin. Nécessite la version de LifeOS qui contient `start_step` (`lifeos_ref`) ; une version plus ancienne ignore simplement la variable.
 
+### Préflight du lien : où la porte démarre vraiment
+
+Un lien lancé avec `start_step=verify`, `chain_phase=verify` et `next=code-reviewer` ne démarre à `verify` que si le carry contient un verdict **signé** pour le build. Tant qu'aucun run n'a passé la porte build, il n'y en a pas : la porte redescend au build (« étape 4 (build) : pas de verdict signé »), et `code-reviewer`, agent de `verify`, y est rejeté (« step build rejects agent »). Deux runs de ~95 min ont été perdus ainsi (22 nov. 2026) sans une seule revue, un troisième était bloqué de la même façon. La redescente est voulue ; ce qui manquait était de le savoir avant de dépenser le run.
+
+Le step **Préflight du lien** (`id: preflight`, avant le gel des outils et avant opencode) appelle `LIFEOS/TOOLS/FullRunPreflight.ts` de LifeOS quand `start_step` et `isa_path` sont donnés. Il est en lecture seule : il n'ouvre aucune porte, n'écrit ni `GITHUB_ENV`, ni ISA, ni carry, et ne reçoit aucun secret.
+
+**Table des codes de sortie** (une seule table, celle du CLI lifeos ; le step la traduit) :
+
+| Code | Sens | Effet sur le job |
+|------|------|------------------|
+| `0` | cohérent : la porte s'ouvre où `start_step` le demande | passe |
+| `2` | la porte ne s'ouvre pas où `start_step` le demande (redescente) ; **échoue seul**, même sans chaînage ou avec `chain_phase=build` ; ligne `relance conseillée : start_step=… chain_phase=… next=(vide)` | échec avant opencode |
+| `3` | agent imposé par le chaînage (`next`, phase verify) inconnu ou refusé par la porte à l'étape de départ (ex. `Max` en verify, faute de frappe) | échec avant opencode |
+| `4` | claims **ouvertes hors périmètre gelé** alors que la porte s'ouvre à verify ou après | échec avant opencode |
+| `5` | `chain_phase` incohérent avec l'étape où la porte s'ouvre (ex. `close` alors qu'elle s'ouvre à `max`) | échec avant opencode |
+| `64` | entrée invalide (ISA absente, `start_step` ou `chain_phase` invalide, option inconnue) | échec avant opencode |
+| `70` | crash interne du CLI (tout autre code inattendu est traité de même) : le contrôle **n'a pas eu lieu** | annotation d'**erreur** `PRÉFLIGHT EN PANNE` et bandeau du résumé ; le run continue, la porte juge seule |
+
+Plusieurs échecs peuvent coexister (le JSON liste tous les codes) ; le code de sortie est le plus prioritaire (2, 4, 3, 5).
+
+Décision sur le périmètre : à verify ou après, **toute claim ouverte hors du périmètre gelé fait échouer (code 4)**. Le build devait la cocher avec preuve, ou elle devait porter un marqueur valide avant le lancement. Au build, ces claims sont le travail du run : pas d'échec.
+
+Le préflight lit **le même état que `initPipeline`** : un état de run restauré (`prev_run_id`) est repris tel quel et `start_step` est alors ignoré, donc pas de faux conflit quand le carry est absent mais l'état est à verify. Sans état, il rejoue la preuve du carry. `phase: complete` : `start_step` ignoré.
+
+- **LifeOS sans `FullRunPreflight.ts`** (`lifeos_ref` ancien) : annotation d'**erreur** `PRÉFLIGHT NON ÉVALUÉ` (jamais silencieux), la porte jugera seule.
+- Sortie publique (journal et résumé du job, publics) : **compteurs et codes seulement** ; aucun identifiant de claim, aucun chemin. Les identifiants ne sortent qu'avec `--details`, en local.
+
+Périmètre : le gel a lieu à l'ouverture du run, dès l'étape 4. Un marqueur `[scope:…]` posé **pendant** le build ne sert qu'au run suivant. Le marquage doit donc être dans l'ISA, sur la branche, **avant** le lancement ; il est écrit par l'auteur de l'ISA, jamais par l'outil. Une claim qui reste dans le périmètre (comme ISC-35 dans l'incident) doit être cochée par le vérificateur avec preuve : le préflight ne coche rien et n'élargit rien.
+
+Paramètres du lien suivant : tant que le carry n'a pas de verdict build signé, `start_step=build`, `chain_phase=build`, `next` vide. Une fois le build passé (carry signé sur le commit courant), `start_step=verify`, `chain_phase=verify`, `next=<agent>` (ex. `code-reviewer`), `done_agents` inchangé. Les liens suivants du chaînage laissent `start_step` vide.
+
 ## Relance de validation seule : `OC_DONE_VALIDATE_ONLY` (pas d'input dans ce dépôt)
 
 Quand l'ISA est déjà close (`phase: complete`), `done_check.sh` accepte `OC_DONE_VALIDATE_ONLY=1` (valeur exacte `1`, `true` ne compte pas) et saute alors **uniquement** le contrôle `d:isa-complete` ; le PASS réel de chaque agent de `done_agents`, les hooks, les vérificateurs, l'arbre propre et le rapport restent exigés (tests 9vb à 9vd, et 13o : la variable n'affaiblit jamais un verdict FAIL). `run-fullrun.sh` la transmet. Contrairement à galass-ci, **antenly-ci n'a pas d'input `validate_only`** : `opencode-fullrun.yml` y est déjà à la limite GitHub de 25 inputs `workflow_dispatch` (un 26e rend tout le workflow invalide, vérifié sur le push b79302e). Pour l'exposer, il faut d'abord libérer un input.
