@@ -40,6 +40,7 @@ env:
 
 jobs:
   human-tick:
+    if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -81,7 +82,7 @@ jobs:
         with:
           repository: ${{ inputs.target_repo }}
           ref: ${{ inputs.branch }}
-          token: ${{ secrets.LORDTHIOUK_PUSH_TOKEN }}
+          token: ${{ secrets.ANTENLY_PUSH_TOKEN }}
           path: target
           fetch-depth: 1
           persist-credentials: false
@@ -145,7 +146,7 @@ jobs:
           IN_BRANCH: ${{ inputs.branch }}
           IN_ISA_PATH: ${{ inputs.isa_path }}
           IN_ISC_ID: ${{ inputs.isc_id }}
-          PUSH_TOKEN: ${{ secrets.LORDTHIOUK_PUSH_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.ANTENLY_PUSH_TOKEN }}
         run: |
           set -euo pipefail
           low="${IN_BRANCH,,}"
