@@ -1393,29 +1393,48 @@ jobs:
           # donc hérité par chaque sous-shell forké), mais ça fait reposer la preuve sur l'héritage
           # d'env à travers N sous-shells plutôt que sur ce script lui-même. Plus robuste : résoudre
           # OC_ISA_PATH UNE SEULE FOIS ici (ce process a le vrai env du job), avec une garde nommée
-          # si isa_path était attendue (IN_ISA_PATH_EXPECTED, calculé par GitHub, pas par ce shell)
-          # mais se résout vide — puis GRAVER cette valeur, littérale, dans chaque ligne générée. Les
-          # lignes du validateur ne dépendent plus d'AUCUNE variable d'environnement survivant aux
-          # sous-shells : elles portent leur propre chemin en dur, échappé par printf %q.
-          # BEGIN done-verify-generator (exercé tel quel par opencode/tests/done-check-test.sh via
-          # extraction entre ces deux marqueurs — ne renommer ni déplacer ni l'un ni l'autre ; a
-          # besoin de $OC_WORK, $OC_ISA_PATH et $IN_ISA_PATH_EXPECTED dans l'environnement appelant)
+          # si isa_path était attendue (IN_ISA_PATH_EXPECTED, déclaré dans l'env de CE step ci-dessus,
+          # calculé par GitHub, pas par ce shell) mais se résout vide — puis GRAVER cette valeur,
+          # littérale, dans chaque ligne générée. Les lignes du validateur ne dépendent plus
+          # d'AUCUNE variable d'environnement survivant aux sous-shells : elles portent leur propre
+          # chemin en dur, échappé par printf %q.
+          # Revue 2 (v2, M3) : la garde NE DOIT PAS faire `exit 1` ici — le contrat de ce step (cf.
+          # commentaire plus haut) dit qu'un échec du validateur ne bloque ni le rapport, ni le
+          # journal, ni le push ; seul le statut final du run doit en pâtir, via le step « Statut
+          # final » plus bas. La garde mémorise donc l'échec dans `isa_path_guard_failed` (comme
+          # `dc_out` mémorise déjà le reste) et ce step continue normalement jusqu'à son terme.
+          # BEGIN done-verify-outcome (exercé tel quel par opencode/tests/done-check-test.sh via
+          # extraction entre ces deux marqueurs — ne renommer ni déplacer ni l'un ni l'autre ; englobe
+          # la garde ET son branchement vers dc_out, pour que la revue 3 (jamais d'exit au milieu du
+          # step) soit vérifiable sur le bloc réel plutôt que sur une copie)
+          # BEGIN isa-path-guard (sous-extraction, mêmes règles ; a besoin de $OC_ISA_PATH et
+          # $IN_ISA_PATH_EXPECTED ; ne doit JAMAIS appeler exit)
           isa_path_input="${OC_ISA_PATH:-}"
+          isa_path_guard_failed=""
           if [ "${IN_ISA_PATH_EXPECTED:-}" = true ] && [ -z "$isa_path_input" ]; then
-            echo "::error::isa_path fourni en entrée (chaîné ou non) mais OC_ISA_PATH se résout vide au moment du contrôle de fin : validateur refusé plutôt que silencieux (c:verify4, revue 2)"
-            exit 1
+            isa_path_guard_failed=1
+            echo "::warning::isa_path fourni en entrée (chaîné ou non) mais OC_ISA_PATH se résout vide au moment du contrôle de fin : validateur refusé (g:isa-path, revue 2) — rapport, journal et push continuent normalement, seul le statut final du validateur en pâtit"
           fi
-          vf="$OC_WORK/done-verify.sh"
-          {
-            printf '[ -z %q ] || [ -f %q ] || exit 1\n' "$isa_path_input" "$isa_path_input"
-            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate %q; fi\n' "$isa_path_input" "$isa_path_input"
-            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts %q; fi\n' "$isa_path_input" "$isa_path_input"
-            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify %q; fi\n' "$isa_path_input" "$isa_path_input"
-          } >"$vf"
-          # END done-verify-generator
-          dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
-                   OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
-          rm -f "$vf"
+          # END isa-path-guard
+          if [ -n "$isa_path_guard_failed" ]; then
+            dc_out="done_check=ko raison=g:isa-path"
+          else
+            # BEGIN done-verify-generator (sous-extraction, mêmes règles ; a besoin de $OC_WORK et
+            # $isa_path_input dans l'environnement appelant — fourni par isa-path-guard ci-dessus quand
+            # ce bloc tourne dans le step réel, ou par le harness de test quand il est extrait seul)
+            vf="$OC_WORK/done-verify.sh"
+            {
+              printf '[ -z %q ] || [ -f %q ] || exit 1\n' "$isa_path_input" "$isa_path_input"
+              printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate %q; fi\n' "$isa_path_input" "$isa_path_input"
+              printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts %q; fi\n' "$isa_path_input" "$isa_path_input"
+              printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify %q; fi\n' "$isa_path_input" "$isa_path_input"
+            } >"$vf"
+            # END done-verify-generator
+            dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+                     OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
+            rm -f "$vf"
+          fi
+          # END done-verify-outcome
           case "$dc_out" in
             "done_check=ok")
               echo "done=ok" >>"$GITHUB_OUTPUT"
