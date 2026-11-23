@@ -502,59 +502,151 @@ assert l.count('(') == l.count(')') and l.count('`') % 2 == 0 and l.rstrip().end
 PY
 
 # 16. c:verify4 (incident annotation-build-solo3, run 45089775991) : OC_DONE_VERIFY en mode fichier
-# exécute CHAQUE ligne dans un sous-shell isolé (l.297-298 ci-dessus) — une variable locale affectée
-# sur une ligne (`isa=...`) ne survit jamais jusqu'à la ligne suivante. Le générateur du validateur de
-# fin (opencode-fullrun.yml, step « Rapport, journal privé et contrôles avant push ») affectait `isa`
-# en ligne 2 puis le relisait en lignes 3-4 : `isa` y est TOUJOURS vide (jamais exportée), donc
-# `[ -f "$isa" ] || exit 1` échoue À CHAQUE FOIS, même quand l'ISA existe réellement — indépendamment
-# de Max/ISC-43/préflight. Seule la variable d'environnement OC_ISA_PATH (posée au niveau du job)
-# traverse réellement chaque sous-shell ; une ligne qui la relit directement s'en sort.
-mkstore "$T/s16" "opencode/v4-flash-free" 42 'VERDICT: PASS' "$ENDP"; mklog Max
-ISA16="$T/isa16.md"; printf -- '---\nphase: climbing\n---\n' >"$ISA16"
-
-# 16a (RED — reproduction exacte du générateur bogué) : `isa=` affectée en ligne 2, relue en 3-4.
-VF_BUGGY="$T/vf-buggy.sh"
-{
-  echo 'set -u'
-  echo 'isa="${OC_ISA_PATH:-}"'
-  echo '[ -n "$isa" ] || exit 0'
-  echo '[ -f "$isa" ] || exit 1'
-} >"$VF_BUGGY"
-out=$(call "$T/s16" OC_ISA_PATH="$ISA16" OC_DONE_VERIFY="$VF_BUGGY")
-[ "$out" = "done_check=ko raison=c:verify4" ] \
-  && ok 16a "reproduction exacte : isa= perdue entre les lignes -> c:verify4 même si l'ISA existe" \
-  || ko "16a [$out] (attendu done_check=ko raison=c:verify4)"
-
-# 16b (GREEN — correctif « ligne autoportante ») : chaque ligne relit OC_ISA_PATH elle-même ET répète
-# sa propre garde « pas d'ISA concernée => cette ligne ne s'applique pas » — aucune ligne ne peut
-# compter sur un `exit 0` précoce d'une AUTRE ligne, puisque chaque ligne tourne dans un sous-shell
-# isolé. Toujours échec si une ISA est demandée mais absente (contrôle non affaibli), toujours ok
-# si elle existe ou si aucune ISA n'est demandée pour ce run.
-VF_FIXED="$T/vf-fixed.sh"
-{
-  echo '[ -z "${OC_ISA_PATH:-}" ] || [ -f "${OC_ISA_PATH:-}" ] || exit 1'
-} >"$VF_FIXED"
-out=$(call "$T/s16" OC_ISA_PATH="$ISA16" OC_DONE_VERIFY="$VF_FIXED")
-[ "$out" = "done_check=ok" ] \
-  && ok 16b "correctif ligne autoportante : ISA existante -> ok" \
-  || ko "16b [$out] (attendu done_check=ok)"
-out=$(call "$T/s16" OC_ISA_PATH="$T/isa16-absente.md" OC_DONE_VERIFY="$VF_FIXED")
-[ "$out" = "done_check=ko raison=c:verify1" ] \
-  && ok 16c "correctif ligne autoportante : ISA demandée mais absente -> toujours refusé (contrôle non affaibli)" \
-  || ko "16c [$out] (attendu done_check=ko raison=c:verify1)"
-out=$(call "$T/s16" OC_ISA_PATH="" OC_DONE_VERIFY="$VF_FIXED")
-[ "$out" = "done_check=ok" ] \
-  && ok 16d "correctif ligne autoportante : aucune ISA demandée pour ce run -> ok (frontière hors scope de ce validateur)" \
-  || ko "16d [$out] (attendu done_check=ok)"
-
-# 16e : le générateur réel (opencode-fullrun.yml) n'affecte plus `isa` dans une ligne séparée de son
-# usage — chaque ligne qui teste/utilise le chemin ISA relit directement ${OC_ISA_PATH:-}. Garde-fou
-# structurel pour ne jamais réintroduire ce bug au prochain changement du générateur.
+# exécute CHAQUE ligne dans un sous-shell isolé (opencode/done_check.sh:296-308) — une variable
+# locale affectée sur une ligne (`isa=...`) ne survit jamais jusqu'à la ligne suivante. Le générateur
+# bogué (opencode-fullrun.yml, step « Rapport, journal privé et contrôles avant push ») affectait
+# `isa` en ligne 2 puis le relisait en lignes 3-4 : `isa` y était TOUJOURS vide, donc
+# `[ -f "$isa" ] || exit 1` échouait À CHAQUE FOIS, même quand l'ISA existait réellement.
+# Revue 2 (PR #40) : le générateur résout désormais OC_ISA_PATH UNE SEULE FOIS dans son propre
+# process (avec garde nommée si une ISA était attendue mais se résout vide) puis GRAVE cette valeur,
+# littérale, dans chaque ligne générée — aucune ligne ne dépend plus d'un env survivant aux
+# sous-shells. Ces tests exercent le générateur RÉEL par extraction entre ses marqueurs BEGIN/END
+# (jamais une copie réécrite à la main) : une régression du fichier YAML fait échouer cette suite.
 YML="$ROOT/.github/workflows/opencode-fullrun.yml"
-if grep -qF 'isa="${OC_ISA_PATH:-}"' "$YML"; then
-  ko "16e le générateur (opencode-fullrun.yml) affecte encore 'isa' dans une ligne séparée de son usage (régression c:verify4)"
+BEGIN_N=$(grep -c '# BEGIN done-verify-generator' "$YML")
+END_N=$(grep -c '# END done-verify-generator' "$YML")
+[ "$BEGIN_N" -eq 1 ] && [ "$END_N" -eq 1 ] \
+  && ok 16a "marqueurs BEGIN/END done-verify-generator présents une seule fois chacun" \
+  || ko "16a marqueurs BEGIN=$BEGIN_N END=$END_N (attendu 1/1)"
+
+# Extrait le générateur RÉEL (texte entre les marqueurs, jamais réécrit) et l'exécute tel quel.
+GEN="$T/vf-generator.sh"
+awk '/# BEGIN done-verify-generator/{f=1; next} /# END done-verify-generator/{f=0} f' "$YML" >"$GEN"
+[ -s "$GEN" ] || ko "16a2 extraction du générateur vide (marqueurs introuvables ou mal placés)"
+run_generator() { # $1=OC_WORK $2=OC_ISA_PATH $3=IN_ISA_PATH_EXPECTED -> imprime le code de sortie ; sortie combinée (le générateur écrit ses ::error:: sur stdout, convention GitHub Actions) dans $T/gen.out
+  env OC_WORK="$1" OC_ISA_PATH="$2" IN_ISA_PATH_EXPECTED="$3" bash "$GEN" >"$T/gen.out" 2>&1
+  echo $?
+}
+
+# --- Groupe A (sans outils LIFEOS présents, dépôt principal $R/$ISA déjà utilisés par les tests 1-15) ---
+mkstore "$T/s16" "opencode/v4-flash-free" 42 'VERDICT: PASS' "$ENDP"; mklog Max
+call16a() { env OC_STORE_DIR="$T/s16" OC_HOOKS_LOG="$HOOKS" OC_REPORT="$REPORT" OC_ISA="$ISA" \
+    OC_DONE_REPO="$R" "$@" bash "$DC" 2>/dev/null; }
+
+# SC2015 (A && B || C n'est pas if/then/else : C tourne aussi si B échoue) : jamais de ternaire ici,
+# toujours un if/then/else explicite — call16a peut légitimement imprimer puis sortir non-zéro
+# (ko() de done_check.sh fait exit 1 après avoir imprimé la raison).
+out_g16b() { if [ "$1" = 0 ]; then call16a OC_DONE_VERIFY="$2"; else echo "generateur rc=$1"; fi; }
+
+mkdir -p "$T/w16b"; rc=$(run_generator "$T/w16b" "$ISA" true)
+out=$(out_g16b "$rc" "$T/w16b/done-verify.sh")
+[ "$out" = "done_check=ok" ] \
+  && ok 16b "générateur réel : ISA existante, attendue -> vf écrit, done_check=ok" \
+  || ko "16b [$out] (attendu done_check=ok, generateur rc=$rc)"
+
+mkdir -p "$T/w16c"; rc=$(run_generator "$T/w16c" "$T/isa-absente16.md" true)
+out=$(out_g16b "$rc" "$T/w16c/done-verify.sh")
+[ "$out" = "done_check=ko raison=c:verify1" ] \
+  && ok 16c "générateur réel : ISA attendue mais absente -> toujours refusé (c:verify1, contrôle non affaibli)" \
+  || ko "16c [$out] (attendu done_check=ko raison=c:verify1, generateur rc=$rc)"
+
+mkdir -p "$T/w16d"; rc=$(run_generator "$T/w16d" "" "")
+out=$(out_g16b "$rc" "$T/w16d/done-verify.sh")
+[ "$out" = "done_check=ok" ] \
+  && ok 16d "générateur réel : aucune ISA demandée pour ce run -> ok (frontière hors scope de ce validateur)" \
+  || ko "16d [$out] (attendu done_check=ok, generateur rc=$rc)"
+
+# --- M3 : garde nommée si une ISA était ATTENDUE (IN_ISA_PATH_EXPECTED=true, calculé par GitHub,
+# jamais par ce shell) mais OC_ISA_PATH se résout vide ici — jamais un passe silencieux (exit 0).
+mkdir -p "$T/w16e"; rc=$(run_generator "$T/w16e" "" true)
+if [ "$rc" = 1 ] && [ ! -e "$T/w16e/done-verify.sh" ] && grep -qF '::error::' "$T/gen.out"; then
+  ok 16e "garde M3 : isa_path attendue mais OC_ISA_PATH vide -> échec nommé (rc=1, ::error::), aucun vf écrit"
 else
-  ok 16e "générateur (opencode-fullrun.yml) : plus de variable 'isa' partagée entre lignes du validateur de fin"
+  vfstate=absent; [ -e "$T/w16e/done-verify.sh" ] && vfstate=présent
+  ko "16e rc=$rc vf=$vfstate sortie=[$(cat "$T/gen.out")] (attendu rc=1, vf absent, ::error:: présent)"
+fi
+
+# --- Groupe B (M1 : outils LIFEOS réellement présents — dépôt dédié $R2, horodatages propres,
+# jamais mêlés au dépôt $R des tests 1-15) : les lignes 2 à 4 appellent vraiment IsaFrontier,
+# CheckCompleteness puis ISATool, et un échec de l'un d'eux doit être refusé (jamais ignoré).
+R2="$T/repo16"; mkdir -p "$R2/LIFEOS/TOOLS"
+git -C "$R2" init -q; git -C "$R2" config user.email t@t; git -C "$R2" config user.name t
+printf '// stub IsaFrontier\n' >"$R2/LIFEOS/TOOLS/IsaFrontier.ts"
+printf '// stub CheckCompleteness\n' >"$R2/LIFEOS/TOOLS/CheckCompleteness.ts"
+printf '// stub ISATool\n' >"$R2/LIFEOS/TOOLS/ISATool.ts"
+(cd "$R2" && git add -A && git commit -qm init16) >/dev/null
+COMMIT16=$(git -C "$R2" log -1 --format=%ct)
+# ISA16 HORS de $R2 (comme $ISA est hors de $R pour les tests 1-15) : sinon le fichier, non commité,
+# rend l'arbre de $R2 sale (d:arbre-sale) dès sa création.
+ISA16="$T/isa16.md"; printf -- '---\nphase: climbing\n---\n' >"$ISA16"
+REPORT16="$T/report16.md"; echo rapport >"$REPORT16"
+HOOKS16="$T/hooks16.log"
+printf '%s SUBAGENT done subagent_type=Max ok=true session=s call=c\n' \
+  "$(date -u -d "@$((COMMIT16 + 5))" +%Y-%m-%dT%H:%M:%S.000Z)" >"$HOOKS16"
+mkstore "$T/store16" "opencode/v4-flash-free" 42 'VERDICT: PASS' "$(( (COMMIT16 + 10) * 1000 ))"
+# Stub `bun` : journalise chaque appel ($BUN_LOG) et échoue seulement si $1 (le .ts appelé)
+# contient $BUN_FAIL_MATCH — permet de simuler un échec précis d'IsaFrontier/CheckCompleteness/ISATool.
+BIN16="$T/bin16"; mkdir -p "$BIN16"
+cat >"$BIN16/bun" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${BUN_LOG:-/dev/null}"
+case "$1" in
+  *"${BUN_FAIL_MATCH:-__none__}"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$BIN16/bun"
+BUN_LOG16="$T/bun16.log"
+REAL_BUN=$(command -v bun) || REAL_BUN="$HOME/.bun/bin/bun"
+# OC_BUN pointe le VRAI bun pour le CLI de verdict (part a, verdict_of() le résout lui-même via
+# shutil.which si OC_BUN est vide, et verrait alors $BIN16/bun en premier sur le PATH ci-dessous) ;
+# le $BIN16/bun (stub, journalisé) ne sert donc qu'aux lignes 2-4 du validateur de fin (part c),
+# invoquées par un bare `bun` résolu via PATH dans leurs propres sous-shells.
+call16b() { env PATH="$BIN16:$PATH" BUN_LOG="$BUN_LOG16" OC_BUN="$REAL_BUN" OC_STORE_DIR="$T/store16" \
+    OC_HOOKS_LOG="$HOOKS16" OC_REPORT="$REPORT16" OC_ISA="$ISA16" OC_DONE_REPO="$R2" \
+    "$@" bash "$DC" 2>/dev/null; }
+out_g16f() { if [ "$1" = 0 ]; then call16b OC_DONE_VERIFY="$2" "${@:3}"; else echo "generateur rc=$1"; fi; }
+
+mkdir -p "$T/w16f"; rc=$(run_generator "$T/w16f" "$ISA16" true)
+: >"$BUN_LOG16"
+out=$(out_g16f "$rc" "$T/w16f/done-verify.sh")
+[ "$out" = "done_check=ok" ] \
+  && ok 16f "outils présents, tous ok -> done_check=ok" \
+  || ko "16f [$out] (attendu done_check=ok, generateur rc=$rc)"
+n_isafrontier=$(grep -c 'IsaFrontier\.ts validate' "$BUN_LOG16" 2>/dev/null || echo 0)
+n_completeness=$(grep -c 'CheckCompleteness\.ts' "$BUN_LOG16" 2>/dev/null || echo 0)
+n_isatool=$(grep -c 'ISATool\.ts verify' "$BUN_LOG16" 2>/dev/null || echo 0)
+n_total=$(wc -l <"$BUN_LOG16" 2>/dev/null || echo 0)
+if [ "$n_total" -eq 3 ] && [ "$n_isafrontier" -eq 1 ] && [ "$n_completeness" -eq 1 ] && [ "$n_isatool" -eq 1 ] \
+   && grep -qF "$ISA16" "$BUN_LOG16"; then
+  ok 16g "les 3 outils (IsaFrontier validate, CheckCompleteness, ISATool verify) sont bien appelés, avec le chemin ISA"
+else
+  ko "16g appels bun observés ($n_total au total) : $(cat "$BUN_LOG16" 2>/dev/null)"
+fi
+
+mkdir -p "$T/w16h"; rc=$(run_generator "$T/w16h" "$ISA16" true)
+out=$(out_g16f "$rc" "$T/w16h/done-verify.sh" BUN_FAIL_MATCH=IsaFrontier)
+[ "$out" = "done_check=ko raison=c:verify2" ] \
+  && ok 16h "IsaFrontier validate en échec -> refusé (c:verify2), jamais ignoré" \
+  || ko "16h [$out] (attendu done_check=ko raison=c:verify2, generateur rc=$rc)"
+
+mkdir -p "$T/w16i"; rc=$(run_generator "$T/w16i" "$ISA16" true)
+out=$(out_g16f "$rc" "$T/w16i/done-verify.sh" BUN_FAIL_MATCH=CheckCompleteness)
+[ "$out" = "done_check=ko raison=c:verify3" ] \
+  && ok 16i "CheckCompleteness en échec -> refusé (c:verify3), jamais ignoré" \
+  || ko "16i [$out] (attendu done_check=ko raison=c:verify3, generateur rc=$rc)"
+
+mkdir -p "$T/w16j"; rc=$(run_generator "$T/w16j" "$ISA16" true)
+out=$(out_g16f "$rc" "$T/w16j/done-verify.sh" BUN_FAIL_MATCH=ISATool)
+[ "$out" = "done_check=ko raison=c:verify4" ] \
+  && ok 16j "ISATool verify en échec -> refusé (c:verify4, désormais un VRAI échec d'outil, jamais un faux positif)" \
+  || ko "16j [$out] (attendu done_check=ko raison=c:verify4, generateur rc=$rc)"
+
+# --- Garde structurelle : plus jamais de variable 'isa' locale partagée entre lignes du validateur.
+if grep -qF 'isa="${OC_ISA_PATH:-}"' "$YML"; then
+  ko "16k le générateur (opencode-fullrun.yml) affecte encore 'isa' dans une ligne séparée de son usage (régression c:verify4)"
+else
+  ok 16k "générateur (opencode-fullrun.yml) : plus de variable 'isa' partagée entre lignes du validateur de fin"
 fi
 
 echo "résumé : $pass ok, $fail ko"

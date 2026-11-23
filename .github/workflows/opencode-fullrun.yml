@@ -1122,6 +1122,11 @@ jobs:
           ANTENLY_DIR: ${{ github.workspace }}/antenly
           CI_DIR: ${{ github.workspace }}/ci
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+          # Revue 2 (PR #40, M3) : vrai/faux calculé par GitHub, jamais par ce shell — sert de témoin
+          # indépendant de OC_ISA_PATH (job-level env, l.167) pour que le générateur du validateur de
+          # fin puisse refuser un contrôle silencieusement passant si isa_path a été fourni en entrée
+          # mais que OC_ISA_PATH se résout vide ici (poison $GITHUB_ENV, variable locale masquante…).
+          IN_ISA_PATH_EXPECTED: ${{ inputs.isa_path != '' }}
           BASH_ENV: ""
           ENV: ""
           LD_PRELOAD: ""
@@ -1382,19 +1387,32 @@ jobs:
           # `bash -c`) — une variable locale affectée sur une ligne (`isa=...`) ne survit JAMAIS
           # jusqu'à la ligne suivante. L'ancienne version affectait `isa` en ligne 2 puis la relisait
           # en lignes 3-4 : `isa` y était toujours vide, donc `[ -f "$isa" ] || exit 1` échouait à
-          # CHAQUE run, même quand l'ISA existait réellement. Correctif : chaque ligne est autoportante
-          # — elle relit ${OC_ISA_PATH:-} elle-même (seule variable qui traverse réellement chaque
-          # sous-shell : posée au niveau du job, donc héritée par chaque processus) et répète sa propre
-          # garde « pas d'ISA concernée => cette ligne ne s'applique pas », sans jamais compter sur un
-          # `exit 0` précoce d'une autre ligne. Toujours un échec dur si une ISA est demandée mais
-          # absente ; jamais de passe silencieux.
+          # CHAQUE run, même quand l'ISA existait réellement.
+          # Revue 2 (PR #40, M3) : un premier correctif faisait relire ${OC_ISA_PATH:-} par CHAQUE
+          # ligne au moment de son exécution — cela suffit (OC_ISA_PATH est un env du JOB, l.167,
+          # donc hérité par chaque sous-shell forké), mais ça fait reposer la preuve sur l'héritage
+          # d'env à travers N sous-shells plutôt que sur ce script lui-même. Plus robuste : résoudre
+          # OC_ISA_PATH UNE SEULE FOIS ici (ce process a le vrai env du job), avec une garde nommée
+          # si isa_path était attendue (IN_ISA_PATH_EXPECTED, calculé par GitHub, pas par ce shell)
+          # mais se résout vide — puis GRAVER cette valeur, littérale, dans chaque ligne générée. Les
+          # lignes du validateur ne dépendent plus d'AUCUNE variable d'environnement survivant aux
+          # sous-shells : elles portent leur propre chemin en dur, échappé par printf %q.
+          # BEGIN done-verify-generator (exercé tel quel par opencode/tests/done-check-test.sh via
+          # extraction entre ces deux marqueurs — ne renommer ni déplacer ni l'un ni l'autre ; a
+          # besoin de $OC_WORK, $OC_ISA_PATH et $IN_ISA_PATH_EXPECTED dans l'environnement appelant)
+          isa_path_input="${OC_ISA_PATH:-}"
+          if [ "${IN_ISA_PATH_EXPECTED:-}" = true ] && [ -z "$isa_path_input" ]; then
+            echo "::error::isa_path fourni en entrée (chaîné ou non) mais OC_ISA_PATH se résout vide au moment du contrôle de fin : validateur refusé plutôt que silencieux (c:verify4, revue 2)"
+            exit 1
+          fi
           vf="$OC_WORK/done-verify.sh"
           {
-            echo '[ -z "${OC_ISA_PATH:-}" ] || [ -f "${OC_ISA_PATH:-}" ] || exit 1'
-            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate "${OC_ISA_PATH:-}"; fi'
-            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "${OC_ISA_PATH:-}"; fi'
-            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "${OC_ISA_PATH:-}"; fi'
+            printf '[ -z %q ] || [ -f %q ] || exit 1\n' "$isa_path_input" "$isa_path_input"
+            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate %q; fi\n' "$isa_path_input" "$isa_path_input"
+            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts %q; fi\n' "$isa_path_input" "$isa_path_input"
+            printf 'if [ -n %q ] && [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify %q; fi\n' "$isa_path_input" "$isa_path_input"
           } >"$vf"
+          # END done-verify-generator
           dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
                    OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
           rm -f "$vf"
