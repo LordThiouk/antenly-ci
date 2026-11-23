@@ -276,16 +276,9 @@ jobs:
         run: |
           set +x
           if [ -z "${OC_NOTIFY_URL:-}" ] || [ -z "${OC_NOTIFY_KEY:-}" ]; then exit 0; fi
-          payload=$(python3 -c '
-          import json, os
-          msg = (
-              f"Task CI {os.environ.get(\"IN_JOB\",\"\")} ({os.environ.get(\"IN_BRANCH\",\"\")}) : "
-              f"status={os.environ.get(\"OC_STATUS\",\"?\")} model={os.environ.get(\"OC_MODEL\",\"?\")} "
-              f"pushed={os.environ.get(\"PUSHED\",\"false\")} commits={os.environ.get(\"COMMITS\",\"0\")} "
-              f"sha={os.environ.get(\"HEAD_SHA\",\"\")[:7]} — {os.environ.get(\"RUN_URL\",\"\")}"
-          )
-          print(json.dumps({"job": os.environ.get("IN_JOB",""), "status": os.environ.get("OC_STATUS",""), "message": msg}))
-          ')
+          message="Task CI ${IN_JOB:-} (antenly@${IN_BRANCH:-}) : status=${OC_STATUS:-?} model=${OC_MODEL:-?} pushed=${PUSHED:-false} commits=${COMMITS:-0} sha=${HEAD_SHA:0:7} — ${RUN_URL:-}"
+          payload=$(jq -cn --arg job "${IN_JOB:-}" --arg status "${OC_STATUS:-}" --arg message "$message" \
+            '{job: $job, status: $status, message: $message}')
           curl -sS --max-time 15 -X POST "$OC_NOTIFY_URL" \
             -H "Authorization: Bearer $OC_NOTIFY_KEY" \
             -H "X-Automation-Key: $OC_NOTIFY_KEY" \
