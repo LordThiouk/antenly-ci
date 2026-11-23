@@ -501,5 +501,61 @@ l = sys.argv[1]
 assert l.count('(') == l.count(')') and l.count('`') % 2 == 0 and l.rstrip().endswith('jamais PASS.'), l
 PY
 
+# 16. c:verify4 (incident annotation-build-solo3, run 45089775991) : OC_DONE_VERIFY en mode fichier
+# exécute CHAQUE ligne dans un sous-shell isolé (l.297-298 ci-dessus) — une variable locale affectée
+# sur une ligne (`isa=...`) ne survit jamais jusqu'à la ligne suivante. Le générateur du validateur de
+# fin (opencode-fullrun.yml, step « Rapport, journal privé et contrôles avant push ») affectait `isa`
+# en ligne 2 puis le relisait en lignes 3-4 : `isa` y est TOUJOURS vide (jamais exportée), donc
+# `[ -f "$isa" ] || exit 1` échoue À CHAQUE FOIS, même quand l'ISA existe réellement — indépendamment
+# de Max/ISC-43/préflight. Seule la variable d'environnement OC_ISA_PATH (posée au niveau du job)
+# traverse réellement chaque sous-shell ; une ligne qui la relit directement s'en sort.
+mkstore "$T/s16" "opencode/v4-flash-free" 42 'VERDICT: PASS' "$ENDP"; mklog Max
+ISA16="$T/isa16.md"; printf -- '---\nphase: climbing\n---\n' >"$ISA16"
+
+# 16a (RED — reproduction exacte du générateur bogué) : `isa=` affectée en ligne 2, relue en 3-4.
+VF_BUGGY="$T/vf-buggy.sh"
+{
+  echo 'set -u'
+  echo 'isa="${OC_ISA_PATH:-}"'
+  echo '[ -n "$isa" ] || exit 0'
+  echo '[ -f "$isa" ] || exit 1'
+} >"$VF_BUGGY"
+out=$(call "$T/s16" OC_ISA_PATH="$ISA16" OC_DONE_VERIFY="$VF_BUGGY")
+[ "$out" = "done_check=ko raison=c:verify4" ] \
+  && ok 16a "reproduction exacte : isa= perdue entre les lignes -> c:verify4 même si l'ISA existe" \
+  || ko "16a [$out] (attendu done_check=ko raison=c:verify4)"
+
+# 16b (GREEN — correctif « ligne autoportante ») : chaque ligne relit OC_ISA_PATH elle-même ET répète
+# sa propre garde « pas d'ISA concernée => cette ligne ne s'applique pas » — aucune ligne ne peut
+# compter sur un `exit 0` précoce d'une AUTRE ligne, puisque chaque ligne tourne dans un sous-shell
+# isolé. Toujours échec si une ISA est demandée mais absente (contrôle non affaibli), toujours ok
+# si elle existe ou si aucune ISA n'est demandée pour ce run.
+VF_FIXED="$T/vf-fixed.sh"
+{
+  echo '[ -z "${OC_ISA_PATH:-}" ] || [ -f "${OC_ISA_PATH:-}" ] || exit 1'
+} >"$VF_FIXED"
+out=$(call "$T/s16" OC_ISA_PATH="$ISA16" OC_DONE_VERIFY="$VF_FIXED")
+[ "$out" = "done_check=ok" ] \
+  && ok 16b "correctif ligne autoportante : ISA existante -> ok" \
+  || ko "16b [$out] (attendu done_check=ok)"
+out=$(call "$T/s16" OC_ISA_PATH="$T/isa16-absente.md" OC_DONE_VERIFY="$VF_FIXED")
+[ "$out" = "done_check=ko raison=c:verify1" ] \
+  && ok 16c "correctif ligne autoportante : ISA demandée mais absente -> toujours refusé (contrôle non affaibli)" \
+  || ko "16c [$out] (attendu done_check=ko raison=c:verify1)"
+out=$(call "$T/s16" OC_ISA_PATH="" OC_DONE_VERIFY="$VF_FIXED")
+[ "$out" = "done_check=ok" ] \
+  && ok 16d "correctif ligne autoportante : aucune ISA demandée pour ce run -> ok (frontière hors scope de ce validateur)" \
+  || ko "16d [$out] (attendu done_check=ok)"
+
+# 16e : le générateur réel (opencode-fullrun.yml) n'affecte plus `isa` dans une ligne séparée de son
+# usage — chaque ligne qui teste/utilise le chemin ISA relit directement ${OC_ISA_PATH:-}. Garde-fou
+# structurel pour ne jamais réintroduire ce bug au prochain changement du générateur.
+YML="$ROOT/.github/workflows/opencode-fullrun.yml"
+if grep -qF 'isa="${OC_ISA_PATH:-}"' "$YML"; then
+  ko "16e le générateur (opencode-fullrun.yml) affecte encore 'isa' dans une ligne séparée de son usage (régression c:verify4)"
+else
+  ok 16e "générateur (opencode-fullrun.yml) : plus de variable 'isa' partagée entre lignes du validateur de fin"
+fi
+
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

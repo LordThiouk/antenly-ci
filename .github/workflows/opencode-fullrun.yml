@@ -1377,15 +1377,23 @@ jobs:
           # Rejoue le validateur de fin depuis la copie figée : le moniteur le fait en boucle, on le
           # refait ici, hors de portée d'opencode. Un échec ne bloque ni le rapport ni le push, il
           # rend le statut final en échec (la vraie barrière du run).
+          # c:verify4 (incident annotation-build-solo3, run 45089775991, 2026-11-23) : OC_DONE_VERIFY
+          # en mode fichier fait relire done_check.sh CHAQUE ligne dans un sous-shell isolé (une par
+          # `bash -c`) — une variable locale affectée sur une ligne (`isa=...`) ne survit JAMAIS
+          # jusqu'à la ligne suivante. L'ancienne version affectait `isa` en ligne 2 puis la relisait
+          # en lignes 3-4 : `isa` y était toujours vide, donc `[ -f "$isa" ] || exit 1` échouait à
+          # CHAQUE run, même quand l'ISA existait réellement. Correctif : chaque ligne est autoportante
+          # — elle relit ${OC_ISA_PATH:-} elle-même (seule variable qui traverse réellement chaque
+          # sous-shell : posée au niveau du job, donc héritée par chaque processus) et répète sa propre
+          # garde « pas d'ISA concernée => cette ligne ne s'applique pas », sans jamais compter sur un
+          # `exit 0` précoce d'une autre ligne. Toujours un échec dur si une ISA est demandée mais
+          # absente ; jamais de passe silencieux.
           vf="$OC_WORK/done-verify.sh"
           {
-            echo 'set -u'
-            echo 'isa="${OC_ISA_PATH:-}"'
-            echo '[ -n "$isa" ] || exit 0'
-            echo '[ -f "$isa" ] || exit 1'
-            echo 'if [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate "$isa"; fi'
-            echo 'if [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "$isa"; fi'
-            echo 'if [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "$isa"; fi'
+            echo '[ -z "${OC_ISA_PATH:-}" ] || [ -f "${OC_ISA_PATH:-}" ] || exit 1'
+            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/IsaFrontier.ts ]; then bun LIFEOS/TOOLS/IsaFrontier.ts validate "${OC_ISA_PATH:-}"; fi'
+            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/CheckCompleteness.ts ]; then bun LIFEOS/TOOLS/CheckCompleteness.ts "${OC_ISA_PATH:-}"; fi'
+            echo 'if [ -n "${OC_ISA_PATH:-}" ] && [ -f LIFEOS/TOOLS/ISATool.ts ]; then bun LIFEOS/TOOLS/ISATool.ts verify "${OC_ISA_PATH:-}"; fi'
           } >"$vf"
           dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
                    OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="$IN_DONE_AGENTS" fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
