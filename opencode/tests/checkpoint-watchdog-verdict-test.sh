@@ -47,7 +47,7 @@ cat >"$T/dc1" <<S
 [ -f "$T/done1" ] && echo done_check=ok || echo done_check=ko
 S
 chmod +x "$T/dc1"; mkdir -p "$T/store1" "$T/ag1" "$T/int1"; echo p >"$T/p1"
-env ANTENLY_DIR="$A" OC_JOB=J1 OC_PROMPT_FILE="$T/p1" OC_LOG="$T/log1" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+env ANTENLY_DIR="$A" OC_JOB=J1 OC_PROMPT_FILE="$T/p1" OC_LOG="$T/log1" OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
     OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
     OC_CONTINUE_PROBE_SEC=2 OC_STORE_DIR="$T/store1" OC_BIN="$T/oc1" OC_STALL_RESUMES=2 OC_AGENT_DIR="$T/ag1" \
     OC_DONE_CHECK_BIN="$T/dc1" OC_CHECKPOINT_BIN="$CP" OC_INTERNAL_LOG="$T/log1.internal" OC_INTERNAL_LOG_DIR="$T/int1" \
@@ -91,7 +91,7 @@ S
   chmod +x "$T/dc2"
 }
 runwd() {
-  env ANTENLY_DIR="$A" OC_JOB=J1 OC_PROMPT_FILE="$T/p2" OC_LOG="$T/log2" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+  env ANTENLY_DIR="$A" OC_JOB=J1 OC_PROMPT_FILE="$T/p2" OC_LOG="$T/log2" OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
       OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
       OC_CONTINUE_PROBE_SEC=0 OC_STORE_DIR="$T/store2" OC_BIN="$T/oc2" OC_STALL_RESUMES=0 OC_AGENT_DIR="$T/ag2" \
       OC_DONE_CHECK_BIN="$T/dc2" OC_CHECKPOINT_BIN="$CP" OC_INTERNAL_LOG="$T/log2.internal" OC_INTERNAL_LOG_DIR="$T/int2" \

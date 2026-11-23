@@ -86,10 +86,10 @@ run_chain() { # variables d'environnement passées en arguments ; bun_output.jso
     ANTENLY_DIR="$T/antenly" LIFEOS_DIR="$T/lifeos" \
     IN_BRANCH=feat-x IN_JOB=job1 IN_PROMPT=prompts:p.md IN_PROMPT_BUILD=prompts:b.md \
     IN_PROMPT_VERIFY=prompts:v.md IN_PROMPT_CLOSE=prompts:c.md IN_LIFEOS_REF=main \
-    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free OC_MODEL_FALLBACK=opencode/f-free \
+    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free \
     OC_MODEL_CHAIN=opencode/f-free IN_AGENT_IDLE_MIN= IN_IDLE_MIN=20 IN_DONE_AGENTS=Max \
     IN_WIP_PUSH_MIN=30 IN_HF_CORPUS= OC_ISA_PATH="MEMORY/WORK/x/ISA.md" \
-    IN_CHAIN_PHASE=build IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 IN_PREV_RUN_ID= RUN_ID=111000 \
+    IN_CHAIN_PHASE=build IN_CHAIN_PROGRESS=0/20 IN_PREV_RUN_ID= RUN_ID=111000 \
     RESTORE_STATE_OUTCOME= RESTORE_STATE_STATUS= \
     DISPATCH_TOKEN=secrettoken123 \
     SAVE_STATE_OUTCOME=success HAS_STATE=false PUBLISH_STATE_OUTCOME=skipped \
@@ -128,12 +128,12 @@ out_eq block true && ok "M1 : OC_STOP vide ⇒ block=true (jamais un dispatch à
 [ ! -f "$T/bun_called" ] && ok "M1 : OC_STOP vide ⇒ état ISA jamais lu" || ko "M1 : bun appelé malgré OC_STOP vide"
 
 # --- hors-un chain_max : count+1 == max ⇒ bloqué (strict <, jamais <=) ------------------------------
-run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=19 IN_CHAIN_MAX=20
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_PROGRESS=19/20
 out_eq block true && ok "hors-un : chain_count+1 == chain_max ⇒ bloqué (strict <)" || ko "hors-un : $(cat "$T/out")"
 grep -q "chain_max atteint" "$T/out" 2>/dev/null && ok "hors-un : raison nommée" || ko "hors-un : raison absente : $(cat "$T/out")"
 
 # --- DISPATCH_TOKEN jamais dans l'env de bun (env -u DISPATCH_TOKEN) -------------------------------
-run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_PROGRESS=0/20
 [ -f "$T/bun_saw_dispatch_token" ] && [ -z "$(cat "$T/bun_saw_dispatch_token")" ] \
   && ok "DISPATCH_TOKEN absent de l'environnement de bun" || ko "DISPATCH_TOKEN visible par bun : $(cat "$T/bun_saw_dispatch_token" 2>/dev/null)"
 
@@ -195,14 +195,14 @@ out_eq continue true && ok "sans prev_run_id ⇒ restore_state ignoré, dispatch
   || ko "premier lien à tort bloqué : $(cat "$T/out")"
 
 # --- M3 : next (phase build, reste en build) transmis au dispatch, prev_run_id = ce run ------------
-run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 RUN_ID=999777
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_PROGRESS=0/20 RUN_ID=999777
 args=$(cat "$T/gh_dispatch_args" 2>/dev/null || echo "")
 [[ "$args" == *"-f next=t2"* ]] && ok "M3 : next=t2 transmis au dispatch (reste en build)" || ko "M3 next absent/faux : $args"
 [[ "$args" == *"-f prev_run_id=999777"* ]] && ok "B2 : prev_run_id=ce run transmis au dispatch" || ko "B2 prev_run_id absent/faux : $args"
 
 # --- M3 : changement de phase (build -> verify, next=5) : next NON imposé à la nouvelle phase ------
 printf '%s\n' '{"exit":"suite_a_faire","reason":"ok","next":"5"}' > "$T/bun_output.json"
-run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20
+run_chain OC_STOP=ok CHECK_OUTCOME=success PUSH_OUTCOME=success IN_CHAIN_PROGRESS=0/20
 args=$(cat "$T/gh_dispatch_args" 2>/dev/null || echo "")
 [[ "$args" == *"-f chain_phase=verify"* ]] && ok "M3 : changement de phase build->verify détecté" || ko "phase inattendue : $args"
 [[ "$args" == *"-f next="* && "$args" != *"-f next=5"* ]] && ok "M3 : next non imposé à la nouvelle phase (vide)" || ko "M3 : next=5 imposé à tort à verify : $args"
@@ -281,20 +281,21 @@ run_guard() {
     IN_BRANCH=feat-x IN_JOB=job1 IN_PROMPT=prompts:p.md IN_LIFEOS_REF=main IN_HF_CORPUS= \
     OC_ISA_PATH="MEMORY/WORK/x/ISA.md" IN_IDLE_MIN=20 IN_AGENT_IDLE_MIN= IN_START_STEP= \
     IN_DONE_AGENTS=Max IN_WIP_PUSH_MIN=30 IN_CHAIN_PHASE=build IN_PREV_RUN_ID= IN_NEXT= \
+    IN_STOP_AFTER_STEP= IN_TARGET_AGENT= \
     IN_PROMPT_BUILD=prompts:b.md IN_PROMPT_VERIFY=prompts:v.md IN_PROMPT_CLOSE=prompts:c.md \
-    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free OC_MODEL_FALLBACK=opencode/f-free \
+    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free \
     OC_MODEL_CHAIN= "$@" bash "$T/guard.sh" >"$T/guard_out" 2>&1
 }
 : >"$T/gout"; : >"$T/genv"
-run_guard IN_CHAIN_ENABLED=true IN_CHAIN_COUNT=19 IN_CHAIN_MAX=20
+run_guard IN_CHAIN_ENABLED=true IN_CHAIN_PROGRESS=19/20
 [ $? -eq 0 ] && ok "garde : chain_count=19 < chain_max=20 accepté" || ko "garde : 19<20 refusé : $(cat "$T/guard_out")"
-run_guard IN_CHAIN_ENABLED=true IN_CHAIN_COUNT=20 IN_CHAIN_MAX=20
+run_guard IN_CHAIN_ENABLED=true IN_CHAIN_PROGRESS=20/20
 rc=$?
 [ "$rc" -ne 0 ] && grep -q "dépasse déjà chain_max" "$T/guard_out" && ok "garde : hors-un corrigé — chain_count==chain_max refusé (strict <)" \
   || ko "garde : chain_count==chain_max accepté à tort (rc=$rc) : $(cat "$T/guard_out")"
-run_guard IN_CHAIN_ENABLED=true IN_CHAIN_COUNT=1000 IN_CHAIN_MAX=20
+run_guard IN_CHAIN_ENABLED=true IN_CHAIN_PROGRESS=1000/20
 rc=$?
-[ "$rc" -ne 0 ] && grep -q "chain_count invalide" "$T/guard_out" && ok "garde : chain_count=1000 toujours refusé (motif à 3 chiffres, sans le contrôle mort)" \
+[ "$rc" -ne 0 ] && grep -q "chain_progress invalide" "$T/guard_out" && ok "garde : chain_count=1000 toujours refusé (format rejeté, >3 chiffres)" \
   || ko "garde : chain_count=1000 : $(cat "$T/guard_out")"
 
 exit $fail

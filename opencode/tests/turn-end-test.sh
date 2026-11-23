@@ -48,7 +48,7 @@ S
 
 run() { # $1 = reprises max, $2 = sonde --continue en secondes
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
-  OC_MODEL_FALLBACK=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) \
+  OC_MODEL_CHAIN=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) \
   OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC="$2" \
   OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" OC_AGENT_DIR="$T/agents" \
   OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" \

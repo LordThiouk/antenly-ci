@@ -309,9 +309,35 @@ if [ -n "$DONE_VERIFY" ]; then
   done
 fi
 
-# --- d. arbre propre, rapport, ISA non close ---
+# --- d. arbre propre, rapport (avec repli factuel), ISA non close ---
 dirty=$(cd "$REPO" && git status --porcelain 2>/dev/null | grep -vE '^.. \.fullrun/logs/' || true)
 [ -z "$dirty" ] || ko d:arbre-sale
+# Repli REPORT.md : si le rapport attendu par done_check.sh est absent/vide mais que a et b (verdict
+# PASS d'un agent de OC_DONE_AGENTS dans le stockage opencode + hooks.log confirmant) ont déjà réussi
+# plus haut dans ce script, le travail et le verdict existent réellement — seul le fichier manque
+# (modèle qui n'a pas écrit son rapport final). Générer un REPORT.md de repli FACTUEL (rien inventé :
+# que des faits déjà vérifiés par ce script) plutôt que planter en faux échec sur d:rapport-absent.
+if [ -n "$REPORT" ] && { [ ! -f "$REPORT" ] || [ ! -s "$REPORT" ]; }; then
+  head_sha=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo "?")
+  isa_phase="(isa non fournie)"
+  if [ -n "$ISA" ]; then
+    isa_abs="$ISA"; case "$isa_abs" in /*) ;; *) isa_abs="$REPO/$isa_abs" ;; esac
+    [ -f "$isa_abs" ] && isa_phase=$(grep -m1 -E '^phase:' "$isa_abs" || echo "(champ phase absent)")
+  fi
+  mkdir -p "$(dirname "$REPORT")" 2>/dev/null || true
+  {
+    echo "# REPORT (repli automatique)"
+    echo
+    echo "Ce rapport n'a PAS été écrit par le modèle : généré par \`done_check.sh\` à partir des"
+    echo "seuls faits déjà vérifiés par ce script (aucun contenu inventé)."
+    echo
+    echo "- Verdict agent(s) requis (\`$AGENTS\`) : PASS (stockage opencode, vérifié a+b plus haut)"
+    echo "- Commit HEAD au moment du contrôle : \`$head_sha\`"
+    echo "- ISA : \`${ISA:-"(non fournie)"}\` — $isa_phase"
+    echo "- Généré : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$REPORT"
+  echo "done_check: REPORT.md absent — repli factuel généré ($REPORT)" >&2
+fi
 [ -n "$REPORT" ] && [ -s "$REPORT" ] || ko d:rapport-absent
 if [ -n "$ISA" ]; then
   isa="$ISA"

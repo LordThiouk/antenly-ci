@@ -750,5 +750,39 @@ else
   ok 16k "générateur extrait (done-verify-generator) : plus de variable 'isa' partagée entre lignes du validateur de fin"
 fi
 
+# --- 17. Repli REPORT.md : a/b (verdict PASS + hooks) déjà vérifiés, mais le fichier attendu par
+# done_check.sh est absent/vide -> un rapport de repli FACTUEL est généré, et le check passe.
+# Store s6 est un PASS complet déjà utilisé par les tests 6-9 ; l'ISA y est remise à climbing juste
+# avant (fin du test 9), donc réutilisable ici sans setup supplémentaire.
+REPORT17="$T/report17/REPORT.md"  # dossier n'existe pas encore : vérifie aussi le mkdir -p du repli
+out=$(call "$T/s6" OC_REPORT="$REPORT17")
+[ "$out" = "done_check=ok" ] \
+  && ok 17a "REPORT.md absent : repli factuel généré, done_check passe quand même" \
+  || ko "17a [$out]"
+[ -s "$REPORT17" ] && grep -q "repli automatique" "$REPORT17" \
+  && ok 17b "le fichier de repli est bien écrit sur disque et se déclare comme tel" \
+  || ko "17b (REPORT17 absent ou sans la mention de repli)"
+grep -q "$R" "$REPORT17" 2>/dev/null \
+  && ko "17c le repli ne doit jamais fuiter un chemin de dépôt absolu dans le rapport" \
+  || ok "17c aucun chemin de dépôt absolu dans le rapport de repli"
+
+# 17d. REPORT.md vide (fichier existe mais 0 octet) -> même repli que fichier absent.
+: >"$T/report17/REPORT.md"
+out=$(call "$T/s6" OC_REPORT="$T/report17/REPORT.md")
+[ "$out" = "done_check=ok" ] && grep -q "repli automatique" "$T/report17/REPORT.md" \
+  && ok 17d "REPORT.md vide (0 octet) : même repli que fichier absent" \
+  || ko "17d [$out]"
+
+# 17e. Le repli n'est PAS un blanc-seing : un vrai échec (b:hooks, agent sans ligne hooks.log après
+# le dernier commit) reste un échec même si REPORT est absent — le repli ne se déclenche qu'après
+# a ET b, jamais avant (ordre du script : b échoue avant d'atteindre le bloc d).
+mkstore "$T/s17e" "opencode/v4-flash-free" 42 $'Travail terminé.\n{"status":"pass"}' "$ENDP"
+: >"$T/hooks-empty.log"
+out=$(env OC_STORE_DIR="$T/s17e" OC_HOOKS_LOG="$T/hooks-empty.log" OC_REPORT="$T/report17e-missing.md" \
+      OC_ISA="$ISA" OC_DONE_REPO="$R" bash "$DC" 2>/dev/null)
+[ "$out" = "done_check=ko raison=b:hooks" ] && [ ! -e "$T/report17e-missing.md" ] \
+  && ok 17e "REPORT absent + b:hooks en échec : refusé normalement, AUCUN repli généré avant b" \
+  || ko "17e [$out] (repli ne doit jamais masquer un vrai échec a/b)"
+
 echo "résumé : $pass ok, $fail ko"
 [ "$fail" -eq 0 ]

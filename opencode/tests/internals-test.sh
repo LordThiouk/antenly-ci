@@ -23,7 +23,7 @@ S
 chmod +x "$T/oc"
 
 ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
-OC_MODEL_FALLBACK=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
+OC_MODEL_CHAIN=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=0 OC_STORE_DIR="$T/store" \
 OC_BIN="$T/oc" OC_STALL_RESUMES=0 OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/dc" \
 OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"; rc=$?
@@ -48,7 +48,7 @@ fi
 # Dossier absent = aucune erreur, aucune collecte.
 rm -rf "$T/internals"
 ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log2" OC_MODEL_MAIN=m \
-OC_MODEL_FALLBACK=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
+OC_MODEL_CHAIN=opencode/fb-free OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=0 OC_STORE_DIR="$T/store" \
 OC_BIN="$T/oc" OC_STALL_RESUMES=0 OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/dc" \
 OC_INTERNAL_LOG="$T/log2.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R" 2>/dev/null; rc=$?
