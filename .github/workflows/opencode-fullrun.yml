@@ -626,6 +626,12 @@ jobs:
             esac
           fi
           echo "Prompt prêt ($(wc -l < "$OC_WORK/prompt.md") lignes), base $(git rev-parse --short HEAD)"
+          # Garde-fou (lecture seule) : en solo (chain_enabled=false), done_check.sh exigera un PASS
+          # réel de CHAQUE agent de done_agents à la fin du lien — mais rien n'oblige le prompt
+          # effectif à le dispatcher. Un prompt de phase build sans Max tournerait ~30-55 min pour
+          # échouer à coup sûr sur a:none:Max (constat du 22 nov. 2026 : 3 runs). Nommé ici, avant
+          # opencode, sans toucher à done_check.sh ni affaiblir la porte elle-même.
+          bash "$CI_DIR/opencode/prompt_agent_check.sh" "$IN_CHAIN_ENABLED" "$IN_DONE_AGENTS" "$OC_WORK/prompt.md"
 
       # Préflight du lien (lecture seule) : AVANT opencode, dire où la porte démarrera et si l'agent imposé par le
       # chaînage y sera accepté. start_step est une DEMANDE : sans verdict build signé dans le carry, la porte
