@@ -288,6 +288,7 @@ jobs:
           ')
           curl -sS --max-time 15 -X POST "$OC_NOTIFY_URL" \
             -H "Authorization: Bearer $OC_NOTIFY_KEY" \
+            -H "X-Automation-Key: $OC_NOTIFY_KEY" \
             -H "Content-Type: application/json" \
             -d "$payload" >/dev/null || true
 
