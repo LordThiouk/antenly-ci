@@ -1,0 +1,299 @@
+name: opencode Task (hors FullRun)
+run-name: Task ${{ inputs.job_name }} → antenly@${{ inputs.branch }}
+
+# Tâches ciblées opencode HORS FullRun pour le dépôt privé LordThiouk/antenly.
+# Dépôt PUBLIC : la sortie d'opencode reste sur le runner (jamais affichée ni publiée).
+# Aucun plugin/porte FullRun : opencode travaille directement, committe localement,
+# puis le workflow vérifie gitleaks et pousse en fast-forward sur la branche dédiée.
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branche de fonctionnalité d'antenly, déjà poussée (jamais main/master)"
+        required: true
+        type: string
+      prompt_path:
+        description: "Prompt : prompts:<chemin sur fullrun-prompts> ou antenly:<chemin sur la branche>"
+        required: true
+        type: string
+      job_name:
+        description: "Nom court du job (lettres, chiffres, - _ .)"
+        required: true
+        type: string
+      model_main:
+        description: "Modèle principal (gratuit opencode/*-free uniquement)"
+        type: string
+        default: opencode/deepseek-v4.1-flash-free
+      model_chain:
+        description: "Chaîne de secours (opencode/*-free séparés par des virgules)"
+        type: string
+        default: opencode/mimo-v2.6-flash-free,opencode/iceman-free,opencode/nemotron-3.5-lightning-free,opencode/beam-free,opencode/hy4-flash-free
+      timeout_minutes:
+        description: "Durée max d'exécution opencode en minutes (10 à 90)"
+        type: string
+        default: "45"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-task-${{ inputs.branch }}
+  cancel-in-progress: false
+
+env:
+  OPENCODE_VERSION: "1.19.4"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  task:
+    if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    env:
+      IN_BRANCH: ${{ inputs.branch }}
+      IN_PROMPT: ${{ inputs.prompt_path }}
+      IN_JOB: ${{ inputs.job_name }}
+      OC_MODEL_MAIN: ${{ inputs.model_main }}
+      OC_MODEL_CHAIN: ${{ inputs.model_chain }}
+      IN_TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+
+    steps:
+      - name: Validation des entrées
+        id: guard
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$IN_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "branche invalide"
+          [[ "$IN_BRANCH" != "main" && "$IN_BRANCH" != "master" ]] || fail "main/master interdit"
+          [[ "$IN_BRANCH" != fullrun-logs/* && "$IN_BRANCH" != refs/* && "$IN_BRANCH" != *..* ]] || fail "branche réservée"
+          [[ "$IN_JOB" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "job_name invalide"
+          [[ "$IN_PROMPT" =~ ^(prompts|antenly):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide"
+          [[ "$OC_MODEL_MAIN" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "seuls les modèles opencode/*-free sont admis"
+          if [ -n "$OC_MODEL_CHAIN" ]; then
+            IFS=',' read -ra ms <<< "$OC_MODEL_CHAIN"
+            for m in "${ms[@]}"; do
+              m="${m// /}"
+              [ -z "$m" ] && continue
+              [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle de secours refusé : $m"
+            done
+          fi
+          [[ "$IN_TIMEOUT_MIN" =~ ^[0-9]+$ ]] && [ "$IN_TIMEOUT_MIN" -ge 10 ] && [ "$IN_TIMEOUT_MIN" -le 90 ] || fail "timeout_minutes doit être entre 10 et 90"
+          echo "t0=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout antenly (branche cible)
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/antenly
+          ref: ${{ inputs.branch }}
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.ANTENLY_TOKEN }}
+
+      - name: Préparer prompt et SHA de départ
+        id: prep
+        env:
+          ANTENLY_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/oc"
+          BASE_SHA=$(git -C target rev-parse HEAD)
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+          scheme="${IN_PROMPT%%:*}"
+          rel="${IN_PROMPT#*:}"
+          raw="$RUNNER_TEMP/oc/raw_prompt.md"
+          if [ "$scheme" = "prompts" ]; then
+            GH_TOKEN="$ANTENLY_TOKEN" gh api \
+              "repos/LordThiouk/antenly/contents/${rel}?ref=fullrun-prompts" \
+              -H "Accept: application/vnd.github.raw+json" > "$raw"
+          else
+            [ -f "target/$rel" ] || { echo "::error::prompt introuvable : $rel"; exit 1; }
+            cp "target/$rel" "$raw"
+          fi
+
+          cat <<'PRE' > "$RUNNER_TEMP/oc/prompt.md"
+          # Tâche opencode (mode direct, hors FullRun)
+          - Tu travailles dans le répertoire courant (dépôt `LordThiouk/antenly`, branche de fonctionnalité déjà active).
+          - Jamais de push, jamais de `git merge`, jamais de force-push, jamais de secret ni de fausse clé en dur.
+          - Committe tout travail validé sur la branche courante : le workflow vérifie `gitleaks` et pousse pour toi après ta fin.
+          - Exclue `node_modules`, `.git`, `dist`, `build`, `.venv` de tes recherches.
+          - Avant de terminer, écris un court résumé factuel (SHA, tests, résultats) dans `/tmp/task_done.md`.
+
+          ---
+          PRE
+          cat "$raw" >> "$RUNNER_TEMP/oc/prompt.md"
+
+      - name: Installer Node, Python/uv, opencode et gitleaks
+        run: |
+          npm install -g --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}" >/dev/null 2>&1
+          v=$(opencode --version | awk '{print $NF}')
+          [ "$v" = "$OPENCODE_VERSION" ] || { echo "::error::opencode $v au lieu de $OPENCODE_VERSION"; exit 1; }
+
+          curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          if [ -d target/api ]; then
+            (cd target/api && uv sync --frozen --dev >/dev/null 2>&1 || uv sync --dev >/dev/null 2>&1)
+          fi
+
+          f="$RUNNER_TEMP/gitleaks.tgz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${f}" | sha256sum -c - >/dev/null
+          mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$f" -C "$RUNNER_TEMP/gl" gitleaks
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Configurer opencode (sans FullRun ni secrets)
+        run: |
+          cat <<'CFG' > "$RUNNER_TEMP/oc/opencode.json"
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "autoupdate": false,
+            "share": "disabled",
+            "mcp": {},
+            "permission": {
+              "doom_loop": "deny",
+              "read": { "*": "allow" },
+              "edit": { "*": "allow" },
+              "external_directory": { "*": "allow", "{env:HOME}/.ssh/*": "deny" },
+              "bash": {
+                "*": "allow",
+                "git push*": "deny",
+                "git merge*": "deny",
+                "gh *": "deny",
+                "ssh *": "deny",
+                "scp *": "deny",
+                "*git remote*": "deny",
+                "*http.extraheader*": "deny"
+              }
+            }
+          }
+          CFG
+          git -C target config user.name "Papa Diop"
+          git -C target config user.email "76528706+LordThiouk@users.noreply.github.com"
+
+      - name: Exécuter la tâche opencode
+        id: oc
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          export OPENCODE_CONFIG="$RUNNER_TEMP/oc/opencode.json"
+          unset LIFEOS_FULLRUN
+
+          models=("$OC_MODEL_MAIN")
+          if [ -n "$OC_MODEL_CHAIN" ]; then
+            IFS=',' read -ra extras <<< "$OC_MODEL_CHAIN"
+            for m in "${extras[@]}"; do
+              m="${m// /}"
+              [ -z "$m" ] && continue
+              [ "$m" = "$OC_MODEL_MAIN" ] && continue
+              models+=("$m")
+            done
+          fi
+
+          secs=$(( IN_TIMEOUT_MIN * 60 ))
+          status="erreur"
+          used_model=""
+          for m in "${models[@]}"; do
+            used_model="$m"
+            log="$RUNNER_TEMP/oc/run-${m##*/}.log"
+            set +e
+            (cd target && timeout "$secs" opencode run --model "$m" "Lis $RUNNER_TEMP/oc/prompt.md et exécute-le complètement.") > "$log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 124 ]; then
+              status="timeout"
+              break
+            fi
+            if grep -qiE "Free usage limit reached|AI_APICallError" "$log"; then
+              status="limit"
+              continue
+            fi
+            new_commits=$(git -C target rev-list --count "${{ steps.prep.outputs.base_sha }}..HEAD")
+            if [ "$rc" -eq 0 ] && { [ "$new_commits" -gt 0 ] || [ -f /tmp/task_done.md ]; }; then
+              status="ok"
+              break
+            fi
+            if [ ! -s "$log" ]; then
+              status="vide"
+              continue
+            fi
+            status="erreur"
+          done
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "model=$used_model" >> "$GITHUB_OUTPUT"
+          echo "Tâche opencode terminée : status=$status model=$used_model"
+
+      - name: Contrôle gitleaks et push fast-forward
+        id: push
+        if: always() && steps.prep.outputs.base_sha != ''
+        env:
+          ANTENLY_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+          BASE_SHA: ${{ steps.prep.outputs.base_sha }}
+        run: |
+          set +x
+          HEAD_SHA=$(git -C target rev-parse HEAD)
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          COUNT=$(git -C target rev-list --count "${BASE_SHA}..${HEAD_SHA}")
+          echo "commits=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            echo "Aucun nouveau commit à pousser."
+            exit 0
+          fi
+
+          gitleaks detect --source target --log-opts="${BASE_SHA}..${HEAD_SHA}" --no-banner
+
+          ASKPASS="$RUNNER_TEMP/askpass.sh"
+          cat <<'AP' > "$ASKPASS"
+          #!/bin/sh
+          echo "$ANTENLY_TOKEN"
+          AP
+          chmod 700 "$ASKPASS"
+          GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" \
+            git -C target push "https://x-access-token@github.com/LordThiouk/antenly.git" "HEAD:refs/heads/${IN_BRANCH}"
+          rm -f "$ASKPASS"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          echo "Poussé ${HEAD_SHA:0:7} ($COUNT commit(s)) sur ${IN_BRANCH}."
+
+      - name: Notification de fin (opencode-notify)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          OC_NOTIFY_URL: ${{ secrets.OC_NOTIFY_URL }}
+          OC_NOTIFY_KEY: ${{ secrets.OC_NOTIFY_KEY }}
+          OC_STATUS: ${{ steps.oc.outputs.status }}
+          OC_MODEL: ${{ steps.oc.outputs.model }}
+          PUSHED: ${{ steps.push.outputs.pushed }}
+          HEAD_SHA: ${{ steps.push.outputs.head }}
+          COMMITS: ${{ steps.push.outputs.commits }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +x
+          if [ -z "${OC_NOTIFY_URL:-}" ] || [ -z "${OC_NOTIFY_KEY:-}" ]; then exit 0; fi
+          payload=$(python3 -c '
+          import json, os
+          msg = (
+              f"Task CI {os.environ.get(\"IN_JOB\",\"\")} ({os.environ.get(\"IN_BRANCH\",\"\")}) : "
+              f"status={os.environ.get(\"OC_STATUS\",\"?\")} model={os.environ.get(\"OC_MODEL\",\"?\")} "
+              f"pushed={os.environ.get(\"PUSHED\",\"false\")} commits={os.environ.get(\"COMMITS\",\"0\")} "
+              f"sha={os.environ.get(\"HEAD_SHA\",\"\")[:7]} — {os.environ.get(\"RUN_URL\",\"\")}"
+          )
+          print(json.dumps({"job": os.environ.get("IN_JOB",""), "status": os.environ.get("OC_STATUS",""), "message": msg}))
+          ')
+          curl -sS --max-time 15 -X POST "$OC_NOTIFY_URL" \
+            -H "Authorization: Bearer $OC_NOTIFY_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$payload" >/dev/null || true
+
+      - name: Statut final
+        run: |
+          if [ "${{ steps.oc.outputs.status }}" != "ok" ]; then
+            echo "::error::Tâche opencode non terminée : ${{ steps.oc.outputs.status }}"
+            exit 1
+          fi
