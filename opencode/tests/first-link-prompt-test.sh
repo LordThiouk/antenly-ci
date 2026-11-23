@@ -31,9 +31,9 @@ run_guard() { # $1 = chain_enabled, $2 = chain_phase
     OC_ISA_PATH="MEMORY/WORK/x/ISA.md" IN_IDLE_MIN=20 IN_AGENT_IDLE_MIN= IN_START_STEP= \
     IN_DONE_AGENTS=Max IN_WIP_PUSH_MIN=30 IN_PREV_RUN_ID= IN_NEXT= \
     IN_PROMPT_BUILD=prompts:b.md IN_PROMPT_VERIFY=prompts:v.md IN_PROMPT_CLOSE=prompts:c.md \
-    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free OC_MODEL_FALLBACK=opencode/f-free \
+    OC_MODEL_MAIN=opencode/m-free OC_MODEL_MAX=opencode/x-free \
     OC_MODEL_CHAIN=opencode/f-free IN_CHAIN_ENABLED="$1" IN_CHAIN_PHASE="$2" \
-    IN_CHAIN_COUNT=0 IN_CHAIN_MAX=20 \
+    IN_CHAIN_PROGRESS=0/20 IN_STOP_AFTER_STEP= IN_TARGET_AGENT= \
     bash "$T/guard.sh" >"$T/gout.stdout" 2>"$T/gerr"
 }
 eff() { rg "^IN_PROMPT_EFFECTIVE=" "$T/genv" 2>/dev/null | cut -d= -f2- || true; }

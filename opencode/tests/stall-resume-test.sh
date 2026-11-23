@@ -90,7 +90,7 @@ S
 }
 
 run() { # $1 = reprises max, $2 = sonde --continue en secondes
-  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
   OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
@@ -109,7 +109,7 @@ run_chain() { # $1 = chaîne, $2 = reprises (vide = défaut), $3 = sonde
 # Variante : OC_SUBAGENT_IDLE_SEC court, OC_IDLE_SEC long, pour prouver que le seuil sous-agent
 # est bien le plus court des deux et qu'il est étiqueté (subagent_timeout=1).
 run_sub() { # $1 = reprises max, $2 = sonde, $3 = seuil sous-agent
-  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+  ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC=30 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC="$2" OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" \
   OC_SUBAGENT_IDLE_SEC="$3" OC_AGENT_DIR="$T/agents" OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
@@ -124,11 +124,13 @@ run_err() { # $1 = reprises max, $2 = OC_ERROR_IDLE_SEC, $3 = OC_IDLE_SEC (silen
   OC_DONE_CHECK_BIN="$T/done_check" OC_INTERNAL_LOG="$T/log.internal" OC_INTERNAL_LOG_DIR="$T/internals" bash "$R"
 }
 
-# Variante MODE SIMPLE : OC_MODEL_FALLBACK seul (pas de OC_MODEL_CHAIN), pour prouver que le repli
-# rapide sur erreur agent reste actif hors chaînage. Mêmes délais courts que run_err.
+# Variante chaîne à un seul élément (OC_MODEL_CHAIN="opencode/fb-free", le cas le plus simple —
+# OC_MODEL_FALLBACK seul, sans OC_MODEL_CHAIN, n'est plus un chemin pris en charge : retiré pour
+# libérer un input workflow_dispatch), pour prouver que le repli rapide sur erreur agent reste
+# actif même avec une chaîne d'un seul modèle. Mêmes délais courts que run_err.
 run_err_simple() { # $1 = reprises max, $2 = OC_ERROR_IDLE_SEC, $3 = OC_IDLE_SEC (silence normal)
   ANTENLY_DIR="$T/a" OC_PROMPT_FILE="$T/p" OC_LOG="$T/log" OC_MODEL_MAIN=m \
-  OC_MODEL_FALLBACK=opencode/fb-free \
+  OC_MODEL_CHAIN=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 OC_IDLE_SEC="$3" \
   OC_ERROR_IDLE_SEC="$2" OC_POLL_SEC=1 OC_KILL_GRACE=1 OC_CONTINUE_PROBE_SEC=2 \
   OC_STORE_DIR="$T/store" OC_BIN="$T/oc" OC_STALL_RESUMES="$1" OC_AGENT_DIR="$T/agents" \
@@ -406,15 +408,15 @@ else
   echo "FAIL 23 rc=$rc"; calls; fail=1
 fi
 
-# 24. OC_ERROR_IDLE_SEC reste actif en MODE SIMPLE (OC_MODEL_FALLBACK seul, aucun OC_MODEL_CHAIN) :
-#     le repli rapide sert aussi au mode non chaîné, comme décidé.
+# 24. OC_ERROR_IDLE_SEC reste actif avec une chaîne à un seul élément (OC_MODEL_FALLBACK seul,
+#     sans OC_MODEL_CHAIN, retiré) : le repli rapide sert aussi hors chaîne à plusieurs modèles.
 mk error-idle
 t0=$(date +%s); run_err_simple 2 2 10; rc=$?; dt=$(( $(date +%s) - t0 ))
 if [ "$rc" -eq 0 ] && [ "$dt" -ge 2 ] && [ "$dt" -lt 9 ] \
     && grep -q '^call 2: run --continue --model opencode/fb-free' "$T/calls" \
     && grep -q '^fallback=opencode/fb-free' "$T/log.status" \
     && grep -q '^error=timeout' "$T/log.status"; then
-  echo "ok 24 OC_ERROR_IDLE_SEC actif en mode simple (fallback unique) (${dt}s)"
+  echo "ok 24 OC_ERROR_IDLE_SEC actif avec une chaîne à un seul élément (${dt}s)"
 else
   echo "FAIL 24 rc=$rc dt=${dt}s"; calls; tail -n 10 "$T/log.status"; fail=1
 fi
@@ -424,7 +426,7 @@ fi
 yml="$HERE/../../.github/workflows/opencode-fullrun.yml"
 if [ "$(grep -c 'OC_ERROR_IDLE_SEC:' "$yml")" -eq 1 ] \
     && grep -Eq '^[[:space:]]+OC_ERROR_IDLE_SEC: "240"[[:space:]]*$' "$yml"; then
-  echo "ok 25 OC_ERROR_IDLE_SEC=240 sans condition dans le workflow (mode simple et chaîné)"
+  echo "ok 25 OC_ERROR_IDLE_SEC=240 sans condition dans le workflow (chaîne courte ou longue)"
 else
   echo "FAIL 25 câblage workflow absent ou conditionné"; fail=1
 fi

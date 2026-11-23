@@ -1,0 +1,164 @@
+name: ISA human-tick
+run-name: human-tick ${{ inputs.isc_id }} → ${{ inputs.target_repo }}@${{ inputs.branch }}
+
+# Micro-workflow manuel : coche une exigence [scope:human] d'un dépôt cible avec
+# ISATool.ts human-tick (LordThiouk/lifeos, main), signée ISA_STAMP_KEY, vérifiée avec
+# human-verify, puis commit+push sur la branche ciblée (jamais main/master). ~20-30 s :
+# pas de session opencode, pas de bun test — juste checkout, tick, vérif, gitleaks, push.
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Dépôt GitHub ciblé, « owner/repo » (ex. LordThiouk/antenly-ci)"
+        required: true
+        type: string
+      branch:
+        description: "Branche du dépôt ciblé à modifier (jamais main/master)"
+        required: true
+        type: string
+      isa_path:
+        description: "Chemin de l'ISA dans le dépôt ciblé (ex. MEMORY/WORK/mon-slug/ISA.md)"
+        required: true
+        type: string
+      isc_id:
+        description: "ID de la claim ISC à cocher (doit être taguée [scope:human] dans l'ISA)"
+        required: true
+        type: string
+      evidence:
+        description: "Preuve / justification humaine (une ligne, sans saut de ligne)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: isa-human-tick-${{ inputs.target_repo }}-${{ inputs.branch }}
+
+env:
+  BUN_VERSION: "1.2"
+
+jobs:
+  human-tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Entrées
+        id: in
+        env:
+          IN_TARGET_REPO: ${{ inputs.target_repo }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_ISA_PATH: ${{ inputs.isa_path }}
+          IN_ISC_ID: ${{ inputs.isc_id }}
+          IN_EVIDENCE: ${{ inputs.evidence }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1" >&2; exit 64; }
+          # Jamais main/master, quel que soit le dépôt ciblé : human-tick modifie un fichier de
+          # suivi (ISA), pas du code — mais toujours sur une branche de travail dédiée, jamais
+          # directement sur la branche par défaut.
+          low="${IN_BRANCH,,}"
+          [[ "$low" != "main" && "$low" != "master" ]] \
+            || fail "branch refusée : jamais main/master (human-tick doit cibler une branche de travail)"
+          [[ "$IN_TARGET_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+            || fail "target_repo invalide (attendu : owner/repo)"
+          [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ && "$IN_BRANCH" != *..* ]] \
+            || fail "branch invalide"
+          [[ "$IN_ISA_PATH" =~ ^[A-Za-z0-9._/-]+\.md$ && "$IN_ISA_PATH" != /* && "$IN_ISA_PATH" != *..* ]] \
+            || fail "isa_path invalide (chemin relatif .md, sans ..)"
+          [[ "$IN_ISC_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+            || fail "isc_id invalide"
+          # evidence : une ligne, charset large mais pas de guillemet ni de retour à la ligne
+          # (ISATool.ts human-tick la refuse de toute façon côté outil — contrôle redondant ici
+          # pour échouer vite, avant tout checkout).
+          [[ "$IN_EVIDENCE" != *$'\n'* && "$IN_EVIDENCE" != *'"'* ]] \
+            || fail "evidence invalide (une seule ligne, sans guillemet double)"
+          echo "target=$IN_TARGET_REPO" >> "$GITHUB_OUTPUT"
+          echo "Entrées valides : $IN_TARGET_REPO@$IN_BRANCH, isa=$IN_ISA_PATH, isc=$IN_ISC_ID"
+
+      - name: Checkout dépôt ciblé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          ref: ${{ inputs.branch }}
+          token: ${{ secrets.LORDTHIOUK_PUSH_TOKEN }}
+          path: target
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout LifeOS (lecture seule, ISATool.ts)
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/lifeos
+          ref: main
+          token: ${{ secrets.LIFEOS_READ_TOKEN }}
+          path: lifeos
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: human-tick
+        env:
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+          IN_ISA_PATH: ${{ inputs.isa_path }}
+          IN_ISC_ID: ${{ inputs.isc_id }}
+          IN_EVIDENCE: ${{ inputs.evidence }}
+        run: |
+          set -euo pipefail
+          [ -n "${ISA_STAMP_KEY:-}" ] || { echo "::error::secret ISA_STAMP_KEY absent (acte Papa requis)"; exit 1; }
+          echo "::add-mask::$ISA_STAMP_KEY"
+          ABS="$GITHUB_WORKSPACE/target/$IN_ISA_PATH"
+          [ -f "$ABS" ] || { echo "::error::ISA introuvable : $IN_ISA_PATH"; exit 1; }
+          export PATH="$HOME/.bun/bin:$PATH"
+          # ISATool.ts : chemin de l'ISA en 2e positionnel (après la sous-commande), jamais --isa.
+          bun "$GITHUB_WORKSPACE/lifeos/LIFEOS/TOOLS/ISATool.ts" human-tick "$ABS" \
+            --isc "$IN_ISC_ID" --evidence "$IN_EVIDENCE" --by "Papa Diop (human-tick CI)"
+          echo "human-tick : exit 0 (claim $IN_ISC_ID cochée)"
+
+      - name: human-verify
+        env:
+          ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
+          IN_ISA_PATH: ${{ inputs.isa_path }}
+          IN_ISC_ID: ${{ inputs.isc_id }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.bun/bin:$PATH"
+          ABS="$GITHUB_WORKSPACE/target/$IN_ISA_PATH"
+          bun "$GITHUB_WORKSPACE/lifeos/LIFEOS/TOOLS/ISATool.ts" human-verify "$ABS" --isc "$IN_ISC_ID"
+          echo "human-verify : signature valide"
+
+      - name: gitleaks (diff de ce tick uniquement)
+        working-directory: target
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_8.21.2_linux_x64.tar.gz" \
+            || { echo "::warning::téléchargement gitleaks impossible, scan sauté (pas un bloqueur réseau pour ce tick ISA — pas de secret attendu dans un .md)"; exit 0; }
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --no-banner --redact || { echo "::error::gitleaks a trouvé un secret dans le diff human-tick"; exit 1; }
+
+      - name: Commit + push (branche ciblée, jamais main/master)
+        working-directory: target
+        env:
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_ISA_PATH: ${{ inputs.isa_path }}
+          IN_ISC_ID: ${{ inputs.isc_id }}
+          PUSH_TOKEN: ${{ secrets.LORDTHIOUK_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          low="${IN_BRANCH,,}"
+          [[ "$low" != "main" && "$low" != "master" ]] \
+            || { echo "::error::refus de pousser sur main/master (garde redondante, défense en profondeur)"; exit 1; }
+          if git diff --quiet -- "$IN_ISA_PATH"; then
+            echo "Rien à committer (ISA inchangée) — human-tick a peut-être déjà été appliqué."
+            exit 0
+          fi
+          git config user.name "isa-human-tick-bot"
+          git config user.email "isa-human-tick-bot@users.noreply.github.com"
+          git add "$IN_ISA_PATH"
+          git commit -m "chore(isa): human-tick ${IN_ISC_ID} [skip ci]"
+          echo "::add-mask::$PUSH_TOKEN"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${{ inputs.target_repo }}.git" "HEAD:refs/heads/${IN_BRANCH}"
+          echo "Poussé sur ${{ inputs.target_repo }}@${IN_BRANCH}"

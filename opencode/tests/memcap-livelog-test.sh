@@ -23,7 +23,7 @@ mkdir -p "$tmp/a" "$tmp/store" "$tmp/agents" "$tmp/internals"
 echo p >"$tmp/p"
 
 ANTENLY_DIR="$tmp/a" OC_PROMPT_FILE="$tmp/p" OC_LOG="$tmp/log" \
-  OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+  OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
   OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC=0 OC_STORE_DIR="$tmp/store" \
@@ -47,7 +47,7 @@ ok "stderr contient la même ligne [memcap]"
 # Limite dérivée de MEMCAP_BYTES (défaut 10G déjà couvert).
 rm -f "$tmp/log" "$tmp/log.status"
 MEMCAP_BYTES=2147483648 ANTENLY_DIR="$tmp/a" OC_PROMPT_FILE="$tmp/p" OC_LOG="$tmp/log" \
-  OC_MODEL_MAIN=m OC_MODEL_FALLBACK=opencode/fb-free \
+  OC_MODEL_MAIN=m OC_MODEL_CHAIN=opencode/fb-free \
   OC_DEADLINE_EPOCH=$(( $(date +%s) + 3600 )) OC_IDLE_MIN=20 \
   OC_IDLE_SEC=3 OC_POLL_SEC=1 OC_KILL_GRACE=1 \
   OC_CONTINUE_PROBE_SEC=0 OC_STORE_DIR="$tmp/store" \

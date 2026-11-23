@@ -15,8 +15,8 @@
 #  - un `--continue` n'est plus cru sur parole : on sonde la session OC_CONTINUE_PROBE_SEC
 #    secondes (3 min par défaut). Si aucun token utile n'en sort, la piste est abandonnée et une
 #    session NEUVE (sans --continue) reprend avec un message qui rappelle l'état ISA / FullRun ;
-#  - le secours est une CHAÎNE (OC_MODEL_CHAIN, séparée par des virgules ; compat OC_MODEL_FALLBACK
-#    seul). À la reprise n° i, m = chaîne[(i-1) % longueur], passé en `--model` ET en OC_MODEL_MAIN,
+#  - le secours est une CHAÎNE (OC_MODEL_CHAIN, séparée par des virgules, renseignée par le garde du
+#    workflow). À la reprise n° i, m = chaîne[(i-1) % longueur], passé en `--model` ET en OC_MODEL_MAIN,
 #    puis réécrit dans $OC_AGENT_DIR/*.md pour que les sous-agents changent aussi ; chaque élément
 #    doit être `opencode/...-free` et différer du principal (sinon code 90) ;
 #  - sous-agent muet : le seuil de base est OC_IDLE_MIN*60 (le plafond OC_SUBAGENT_IDLE_SEC, ex. 480 s,
@@ -43,7 +43,7 @@
 # Variables obligatoires : ANTENLY_DIR, OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
 # OC_IDLE_MIN. Optionnelles : OC_BIN, OC_POLL_SEC, OC_KILL_GRACE, OC_IDLE_SEC (tests),
 # OC_ERROR_IDLE_SEC, OC_SUBAGENT_IDLE_SEC, OC_STALL_RESUMES, OC_CONTINUE_PROBE_SEC, OC_MODEL_CHAIN,
-# OC_MODEL_FALLBACK (compat), OC_STORE_DIR, OC_AGENT_DIR, OC_INTERNAL_LOG,
+# OC_STORE_DIR, OC_AGENT_DIR, OC_INTERNAL_LOG,
 # OC_INTERNAL_LOG_DIR, OC_HOOKS_LOG, OC_DONE_VERIFY, OC_ISA/OC_ISA_PATH, OC_REPORT,
 # OC_DONE_CHECK_SEC, OC_DONE_IDLE_SEC, OC_DONE_CHECK_BIN, OC_IDLE_CPU.
 # Statut ($OC_LOG.status) : main_rc, stall_resume, fallback=<modèle>, stall_rc, new_session,
@@ -80,6 +80,20 @@ if [ -n "${OC_START_STEP:-}" ]; then
     || { echo "OC_START_STEP invalide" >&2; exit 90; }
   export FULLRUN_START_STEP="$OC_START_STEP"
 fi
+# Même convention que start_step ci-dessus, pour un seul step (et un seul agent sur verify) à la
+# fois : la skill FullRunWorkflow (LordThiouk/lifeos) lit ces deux variables et les passe à
+# `FullRunPipeline.ts unit` via --stop-after-step/--agent. Vide = rien n'est exporté (run complet).
+unset FULLRUN_STOP_AFTER_STEP FULLRUN_TARGET_AGENT
+if [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
+  [[ "$OC_STOP_AFTER_STEP" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
+    || { echo "OC_STOP_AFTER_STEP invalide" >&2; exit 90; }
+  export FULLRUN_STOP_AFTER_STEP="$OC_STOP_AFTER_STEP"
+fi
+if [ -n "${OC_TARGET_AGENT:-}" ]; then
+  [[ "$OC_TARGET_AGENT" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}$ ]] \
+    || { echo "OC_TARGET_AGENT invalide" >&2; exit 90; }
+  export FULLRUN_TARGET_AGENT="$OC_TARGET_AGENT"
+fi
 [[ "$POLL" =~ ^[0-9]{1,3}$ && "$POLL" -ge 1 ]] || POLL=30
 [[ "$GRACE" =~ ^[0-9]{1,3}$ ]] || GRACE=60
 # OC_STALL_RESUMES : nombre de reprises après un arrêt (défaut min(chaîne, 6)).
@@ -87,10 +101,11 @@ fi
 PROBE_SEC="${OC_CONTINUE_PROBE_SEC:-180}"
 [[ "$PROBE_SEC" =~ ^[0-9]{1,4}$ ]] || PROBE_SEC=180
 # OC_MODEL_CHAIN : liste ordonnée de modèles de secours (« opencode/...-free », séparés par des
-# virgules). Compat : OC_MODEL_FALLBACK seul forme une chaîne d'un élément. Chaque élément doit
-# être gratuit et différent du principal ; une chaîne vide après filtrage est une erreur
-# d'environnement (90). À la reprise n° i (1-based), m = chaîne[(i-1) % longueur].
-MODEL_CHAIN_RAW="${OC_MODEL_CHAIN:-${OC_MODEL_FALLBACK:-}}"
+# virgules) ; renseignée par le garde du workflow (défaut vert : mimo/iceman/nemotron/beam/hy4 si
+# l'input model_chain est vide — model_fallback, l'ancien input de repli, a été retiré). Chaque
+# élément doit être gratuit et différent du principal ; une chaîne vide après filtrage est une
+# erreur d'environnement (90). À la reprise n° i (1-based), m = chaîne[(i-1) % longueur].
+MODEL_CHAIN_RAW="${OC_MODEL_CHAIN:-}"
 CHAIN=()
 if [ -n "$MODEL_CHAIN_RAW" ]; then
   IFS=',' read -r -a _chain_raw <<<"$MODEL_CHAIN_RAW"

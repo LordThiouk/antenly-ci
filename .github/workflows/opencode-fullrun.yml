@@ -27,14 +27,18 @@ on:
         description: "Modèle de Max (gratuit opencode uniquement)"
         type: string
         default: opencode/mimo-v2.6-flash-free
-      model_fallback:
-        description: "Repli (compat) quand model_chain est vide : un seul modèle de secours"
-        type: string
-        default: opencode/glm-5.3-flash-free
       model_chain:
-        description: "Chaîne de secours ordonnée (gratuits opencode/*-free, séparés par des virgules ; le principal est retiré)"
+        description: "Chaîne de secours ordonnée (gratuits opencode/*-free, séparés par des virgules ; le principal est retiré) ; vide = chaîne verte par défaut (deepseek-v4.1-flash-free en principal, repli mimo/iceman/nemotron/beam/hy4)"
         type: string
-        default: opencode/glm-5.3-flash-free,opencode/minimax-m3.1-flash-free,opencode/mimo-v2.6-flash-free,opencode/longcat-2.5-free,opencode/iceman-free,opencode/flint-40b-free,opencode/nemotron-3.5-lightning-free,opencode/beam-free,opencode/inkling-2-small-free
+        default: opencode/mimo-v2.6-flash-free,opencode/iceman-free,opencode/nemotron-3.5-lightning-free,opencode/beam-free,opencode/hy4-flash-free
+      stop_after_step:
+        description: "S'arrête après cette étape sans dispatcher la suite (scaffold, completeness_pre, vera, serena, build, verify, max, close ou 0-7) ; vide = enchaînement normal. Passé à FullRunPipeline.ts unit via --stop-after-step."
+        type: string
+        default: ""
+      target_agent:
+        description: "Limite ce job à un seul agent de l'étape visée (ex. Silas en verify) ; vide = tous les agents requis de l'étape. Passé à FullRunPipeline.ts unit via --agent."
+        type: string
+        default: ""
       lifeos_ref:
         description: "Branche de LordThiouk/lifeos (skills, agents, config opencode privée)"
         type: string
@@ -80,14 +84,10 @@ on:
         type: choice
         options: [plan, build, verify, close]
         default: plan
-      chain_count:
-        description: "Interne au chaînage : nombre de liens déjà enchaînés. Ne pas renseigner à la main (0 au premier dispatch)."
+      chain_progress:
+        description: "Interne au chaînage : « <liens déjà enchaînés>/<plafond 1-100> », ex. 0/20 au premier dispatch. Ne pas renseigner à la main sauf pour reprendre une chaîne coupée en gardant sa progression."
         type: string
-        default: "0"
-      chain_max:
-        description: "Plafond d'enchaînements pour une même chaîne (1 à 100) : au-delà, le dernier lien se signale bloqué plutôt que de redispatcher indéfiniment."
-        type: string
-        default: "20"
+        default: "0/20"
       prompt_path_build:
         description: "chain_enabled=true seulement : prompt de la phase build (étape 4, une tâche par job — même format que prompt_path). Requis dès le premier dispatch, même si ce lien démarre en phase plan."
         type: string
@@ -161,8 +161,9 @@ jobs:
       IN_JOB: ${{ inputs.job_name }}
       OC_MODEL_MAIN: ${{ inputs.model_main }}
       OC_MODEL_MAX: ${{ inputs.model_max }}
-      OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
       OC_MODEL_CHAIN: ${{ inputs.model_chain }}
+      IN_STOP_AFTER_STEP: ${{ inputs.stop_after_step }}
+      IN_TARGET_AGENT: ${{ inputs.target_agent }}
       IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
       OC_ISA_PATH: ${{ inputs.isa_path }}
       IN_START_STEP: ${{ inputs.start_step }}
@@ -173,8 +174,7 @@ jobs:
       IN_HF_CORPUS: ${{ inputs.hf_corpus }}
       IN_CHAIN_ENABLED: ${{ inputs.chain_enabled }}
       IN_CHAIN_PHASE: ${{ inputs.chain_phase }}
-      IN_CHAIN_COUNT: ${{ inputs.chain_count }}
-      IN_CHAIN_MAX: ${{ inputs.chain_max }}
+      IN_CHAIN_PROGRESS: ${{ inputs.chain_progress }}
       IN_PROMPT_BUILD: ${{ inputs.prompt_path_build }}
       IN_PROMPT_VERIFY: ${{ inputs.prompt_path_verify }}
       IN_PROMPT_CLOSE: ${{ inputs.prompt_path_close }}
@@ -245,11 +245,28 @@ jobs:
           [[ "$IN_CHAIN_ENABLED" == "true" || "$IN_CHAIN_ENABLED" == "false" ]] \
             || fail "chain_enabled invalide (true ou false)"
           case "$IN_CHAIN_PHASE" in plan|build|verify|close) ;; *) fail "chain_phase invalide (plan, build, verify ou close)" ;; esac
-          # Le motif ^[0-9]{1,3}$ plafonne déjà à 999 : pas de second contrôle numérique (mort, -gt 999
-          # inatteignable).
-          [[ "$IN_CHAIN_COUNT" =~ ^[0-9]{1,3}$ ]] || fail "chain_count invalide (entier de 0 à 999)"
-          if ! [[ "$IN_CHAIN_MAX" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$IN_CHAIN_MAX))" -lt 1 ] || [ "$((10#$IN_CHAIN_MAX))" -gt 100 ]; then
-            fail "chain_max invalide (entier de 1 à 100)"
+          # chain_progress = "<count>/<max>" (ex. 0/20) : un seul input interne pour les deux bornes
+          # du chaînage (fusion de chain_count+chain_max, pour libérer un input workflow_dispatch —
+          # GitHub plafonne ce workflow à 25).
+          [[ "$IN_CHAIN_PROGRESS" =~ ^([0-9]{1,3})/([0-9]{1,3})$ ]] || fail "chain_progress invalide (format <count>/<max>, ex. 0/20)"
+          IN_CHAIN_COUNT="${BASH_REMATCH[1]}"
+          IN_CHAIN_MAX="${BASH_REMATCH[2]}"
+          if [ "$((10#$IN_CHAIN_MAX))" -lt 1 ] || [ "$((10#$IN_CHAIN_MAX))" -gt 100 ]; then
+            fail "chain_progress invalide : plafond (seconde moitié) hors plage (1 à 100)"
+          fi
+          echo "IN_CHAIN_COUNT=$IN_CHAIN_COUNT" >> "$GITHUB_ENV"
+          echo "IN_CHAIN_MAX=$IN_CHAIN_MAX" >> "$GITHUB_ENV"
+          # stop_after_step / target_agent (facultatifs) : même charset que start_step ci-dessus,
+          # pour un seul step/agent à la fois (1 agent par job, chacun son tour).
+          if [ -n "$IN_STOP_AFTER_STEP" ]; then
+            stop_step="${IN_STOP_AFTER_STEP,,}"
+            [[ "$stop_step" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
+              || fail "stop_after_step invalide (scaffold, completeness_pre, vera, serena, build, verify, max, close ou 0-7)"
+            echo "OC_STOP_AFTER_STEP=$stop_step" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$IN_TARGET_AGENT" ]; then
+            [[ "$IN_TARGET_AGENT" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}$ ]] || fail "target_agent invalide (nom d'agent, ex. Silas)"
+            echo "OC_TARGET_AGENT=$IN_TARGET_AGENT" >> "$GITHUB_ENV"
           fi
           if [ "$IN_CHAIN_ENABLED" = true ]; then
             # Strict < (jamais <=) : count == max est déjà le dernier lien autorisé par le plafond,
@@ -291,13 +308,17 @@ jobs:
           if [ -n "$IN_NEXT" ]; then
             [[ "$IN_NEXT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || fail "next invalide (ID de tâche ou nom d'agent, 128 caractères max)"
           fi
-          for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX" "$OC_MODEL_FALLBACK"; do
+          for m in "$OC_MODEL_MAIN" "$OC_MODEL_MAX"; do
             [[ "$m" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "modèle refusé : seuls les modèles opencode/*-free sont admis"
           done
-          # Chaîne de secours : model_chain, sinon model_fallback (compat). Chaque élément doit
-          # être gratuit et différent du principal ; la chaîne ne peut pas être vide.
+          # Chaîne de secours : model_chain ; si laissé vide explicitement, la chaîne verte par
+          # défaut (6 modèles vérifiés : deepseek-v4.1-flash-free en principal, repli ci-dessous).
+          # model_fallback (input séparé, compat) a été retiré pour libérer un slot workflow_dispatch
+          # (plafond GitHub 25 déjà atteint) : son seul rôle — un filet pour model_chain vide — est
+          # repris par cette constante.
+          DEFAULT_MODEL_CHAIN="opencode/mimo-v2.6-flash-free,opencode/iceman-free,opencode/nemotron-3.5-lightning-free,opencode/beam-free,opencode/hy4-flash-free"
           chain="${OC_MODEL_CHAIN:-}"
-          [ -n "$chain" ] || chain="$OC_MODEL_FALLBACK"
+          [ -n "$chain" ] || chain="$DEFAULT_MODEL_CHAIN"
           n=0
           IFS=',' read -r -a cms <<<"$chain"
           for m in "${cms[@]}"; do
@@ -639,7 +660,9 @@ jobs:
       # reste dans $RUNNER_TEMP.
       - name: Préflight du lien (porte de départ, périmètre gelé, agent imposé)
         id: preflight
-        if: env.OC_START_STEP != '' && env.OC_ISA_PATH != ''
+        # Couvre aussi un job borné à une étape (stop_after_step/target_agent, sans start_step) :
+        # ~30 s pour détecter un blocage de porte ou d'agent avant les ~20 min d'un run opencode.
+        if: (env.OC_START_STEP != '' || env.OC_STOP_AFTER_STEP != '') && env.OC_ISA_PATH != ''
         shell: bash
         run: |
           pf="$HOME/.claude/LIFEOS/TOOLS/FullRunPreflight.ts"
@@ -648,10 +671,17 @@ jobs:
             { echo "### Préflight du lien"; echo "**NON ÉVALUÉ** : lifeos_ref sans FullRunPreflight.ts."; } >> "$GITHUB_STEP_SUMMARY" || true
             exit 0
           fi
-          args=(--isa "$ANTENLY_DIR/$OC_ISA_PATH" --start-step "$OC_START_STEP")
+          # Étape prédite : start_step si fourni, sinon stop_after_step (un job borné à UNE étape
+          # vise d'abord à l'ouvrir, avant d'y rester).
+          eff_step="${OC_START_STEP:-$OC_STOP_AFTER_STEP}"
+          args=(--isa "$ANTENLY_DIR/$OC_ISA_PATH" --start-step "$eff_step")
           if [ "${IN_CHAIN_ENABLED:-}" = true ]; then
             args+=(--chain-phase "$IN_CHAIN_PHASE")
             [ -z "${IN_NEXT:-}" ] || args+=(--next "$IN_NEXT")
+          elif [ -n "${OC_TARGET_AGENT:-}" ]; then
+            # target_agent sans chaînage : même rôle que --next en phase verify (agent imposé au
+            # lien), pour que le code 3 (agent imposé refusé) puisse se déclencher ici.
+            args+=(--next "$OC_TARGET_AGENT")
           fi
           rc=0
           OC_DONE_AGENTS="${IN_DONE_AGENTS:-}" bun "$pf" "${args[@]}" >"$RUNNER_TEMP/preflight.json" 2>"$RUNNER_TEMP/preflight.err" || rc=$?
@@ -1709,8 +1739,7 @@ jobs:
           # ANTENLY_CI_DISPATCH_TOKEN. Toute variable utilisée par le dispatch ci-dessous vient d'ici.
           IN_CHAIN_ENABLED: ${{ inputs.chain_enabled }}
           IN_CHAIN_PHASE: ${{ inputs.chain_phase }}
-          IN_CHAIN_COUNT: ${{ inputs.chain_count }}
-          IN_CHAIN_MAX: ${{ inputs.chain_max }}
+          IN_CHAIN_PROGRESS: ${{ inputs.chain_progress }}
           OC_ISA_PATH: ${{ inputs.isa_path }}
           IN_PROMPT: ${{ inputs.prompt_path }}
           IN_PROMPT_BUILD: ${{ inputs.prompt_path_build }}
@@ -1727,8 +1756,7 @@ jobs:
           IN_PREV_RUN_ID: ${{ inputs.prev_run_id }}
           OC_MODEL_MAIN: ${{ inputs.model_main }}
           OC_MODEL_MAX: ${{ inputs.model_max }}
-          OC_MODEL_FALLBACK: ${{ inputs.model_fallback }}
-          OC_MODEL_CHAIN: ${{ inputs.model_chain != '' && inputs.model_chain || inputs.model_fallback }}
+          OC_MODEL_CHAIN: ${{ inputs.model_chain }}
         run: |
           set +x
           # PATH minimal — jamais le PATH hérité, que le step oc (l'IA) a pu empoisonner via
@@ -1741,6 +1769,9 @@ jobs:
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
           stop_chain() { out block true; out continue false; out reason "$1"; echo "::error::chaînage arrêté : $1"; exit 0; }
           finish_chain() { out block false; out continue false; out reason "$1"; echo "chaîne terminée : $1"; exit 0; }
+          # chain_progress = "<count>/<max>" — repinné depuis l'input (voir garde plus haut dans ce
+          # fichier) : ce step vit dans un job séparé, il n'hérite pas des variables shell du garde.
+          IFS='/' read -r IN_CHAIN_COUNT IN_CHAIN_MAX <<<"$IN_CHAIN_PROGRESS"
 
           # Nettoie la sortie brute avant de la journaliser : masque les motifs de jeton connus,
           # replie les sauts de ligne (une ligne « ::… » injectée deviendrait une workflow command),
@@ -1865,13 +1896,13 @@ jobs:
                --repo LordThiouk/antenly-ci --ref "${GITHUB_REF_NAME}" \
                -f branch="$IN_BRANCH" -f prompt_path="$IN_PROMPT" -f job_name="$IN_JOB" \
                -f model_main="$OC_MODEL_MAIN" -f model_max="$OC_MODEL_MAX" \
-               -f model_fallback="$OC_MODEL_FALLBACK" -f model_chain="$OC_MODEL_CHAIN" \
+               -f model_chain="$OC_MODEL_CHAIN" \
                -f lifeos_ref="$IN_LIFEOS_REF" -f isa_path="$OC_ISA_PATH" -f start_step="" \
                -f base_branch="${IN_BASE:-}" -f hf_corpus="$IN_HF_CORPUS" \
                -f agent_idle_minutes="$IN_AGENT_IDLE_MIN" -f idle_minutes="$IN_IDLE_MIN" \
                -f done_agents="$IN_DONE_AGENTS" -f wip_push_minutes="$IN_WIP_PUSH_MIN" \
-               -f chain_enabled=true -f chain_phase="$next_phase" -f chain_count="$new_count" \
-               -f chain_max="$IN_CHAIN_MAX" -f prompt_path_build="$IN_PROMPT_BUILD" \
+               -f chain_enabled=true -f chain_phase="$next_phase" \
+               -f chain_progress="${new_count}/${IN_CHAIN_MAX}" -f prompt_path_build="$IN_PROMPT_BUILD" \
                -f prompt_path_verify="$IN_PROMPT_VERIFY" -f prompt_path_close="$IN_PROMPT_CLOSE" \
                -f prev_run_id="$RUN_ID" -f next="$new_next" \
                >/dev/null 2>&1; then
