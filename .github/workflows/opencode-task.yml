@@ -120,6 +120,7 @@ jobs:
         id: prep
         env:
           ANTENLY_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/oc"
           BASE_SHA=$(git -C target rev-parse HEAD)
@@ -275,6 +276,7 @@ jobs:
         if: always() && steps.prep.outputs.base_sha != ''
         env:
           ANTENLY_TOKEN: ${{ secrets.ANTENLY_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ steps.prep.outputs.base_sha }}
         run: |
           set +x
