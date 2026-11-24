@@ -1,6 +1,6 @@
 # Tâche : permettre aux tâches opencode de lire acr-senegal (lecture seule)
 
-Dépôt : LordThiouk/antenly-ci, branche `feat/opencode-task-read-acr-2026-11-24` (déjà poussée). Fichier à modifier : `.github/workflows/opencode-task.yml` (et son README/doc si une table d'entrées existe).
+Dépôt : LordThiouk/antenly-ci, branche `feat/opencode-task-read-acr-2026-11-24` (déjà poussée). Fichier visé : `.github/workflows/opencode-task.yml`. IMPORTANT : le jeton de ce job ne peut PAS pousser un fichier sous `.github/workflows/`. Ne commite donc AUCUN fichier sous `.github/`. Fais la modification localement, vérifie-la, puis exporte-la en patch `git diff` dans `docs/patches/opencode-task-read-acr-2026-11-24.patch` (appliquable avec `git apply` depuis la racine sur main), remets `.github/` dans son état d'origine, et commite seulement le patch + le rapport. Nix appliquera le patch tel quel.
 
 ## But
 Les tâches opencode qui ciblent `antenly` doivent pouvoir LIRE le dépôt privé `LordThiouk/acr-senegal` (pour comparer les moteurs d'empreinte). Aujourd'hui le checkout utilise `persist-credentials: false` et aucun jeton n'arrive à opencode, donc impossible.
@@ -15,7 +15,7 @@ Les tâches opencode qui ciblent `antenly` doivent pouvoir LIRE le dépôt priv�
 ## Preuve
 - `actionlint` (ou `yamllint` à défaut) passe sur le fichier.
 - Rapport court `docs/reports/opencode-task-read-acr-2026-11-24.md` : ce qui a changé, pourquoi, comment l'utiliser dans un prompt.
-- Ouvrir une PR vers `main` (titre clair, corps en français simple). NE PAS merger.
+- Vérifier `git apply --check docs/patches/opencode-task-read-acr-2026-11-24.patch` sur un arbre propre. Pas de PR (Nix l'ouvrira). NE PAS merger.
 
 ## Règles
 - Modèles gratuits uniquement. Durée < 20 min.
