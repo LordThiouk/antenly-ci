@@ -2040,6 +2040,13 @@ jobs:
               echo "::error::chaîne bloquée : ${CHAIN_REASON:-raison inconnue}"
               exit 1
             fi
+            # Job borné (stop_after_step) MÊME en mode chaîné : le step chain ne dispatche aucun
+            # lien suivant, mais le job ne doit jamais finir vert sans le PASS de l'agent de
+            # l'étape (revue r3, point 2). Le verdict DONE vient du validateur de fin.
+            if [ -n "${IN_STOP_AFTER_STEP:-}" ] && [ "${DONE:-}" != ok ]; then
+              echo "::error::job borné (stop_after_step=${IN_STOP_AFTER_STEP}) : PASS requis non vérifié (${DONE_REASON:-done_check})"
+              exit 1
+            fi
             exit 0
           fi
           # Non chaîné (comportement historique, inchangé) : « terminé » exige le PASS de Max.
