@@ -9,6 +9,7 @@ avec le secret `ANTENLY_TOKEN` (jeton fine-grained limité à `antenly`).
 - `inventory-probe.yml` : passe 1 (cron lundi 04:00 UTC, ou à la main).
 - `inventory-pass2.yml` : passe 2 1 h plus tard (cron lundi 05:00 UTC), rapport, gates, PR `inventory/auto-update` sur `antenly`.
 - `opencode-fullrun.yml` : longs jobs opencode (FullRun LifeOS) sur une branche de fonctionnalité d'`antenly`, à la main uniquement (voir plus bas).
+- `opencode-task.yml` : tâches opencode courtes hors FullRun, à la main uniquement, sur une branche de fonctionnalité d'`antenly` (défaut) ou d'`antenly-ci` (input `target_repo`).
 
 Les logs et artifacts de ce dépôt sont publics. Aucun push direct sur une branche de base d'`antenly` ; le merge reste manuel.
 
@@ -75,6 +76,38 @@ run complet. Les dépendances sont épinglées dans
 `scripts/corpus/language-requirements.txt` (torch CPU 2.5.1, installé à part
 depuis `download.pytorch.org/whl/cpu` dans un venv Python 3.12 : cette roue
 n'existe pas pour Python 3.14, défaut actuel de `ubuntu-latest`).
+
+## Tâches opencode hors FullRun (`opencode-task.yml`)
+
+Pour une tâche simple (récupérer des écrans, corriger un setup, un fix court) : pas un FullRun.
+Seul `LordThiouk` peut lancer. Onglet Actions → `opencode Task (hors FullRun)` → `Run workflow` :
+
+- `target_repo` : `antenly` (défaut) ou `antenly-ci` seulement ;
+- `branch` : branche de fonctionnalité déjà poussée, jamais `main`/`master` ;
+- `prompt_path` : `prompts:<chemin>` (fichier sur la branche `fullrun-prompts` du dépôt
+  cible, jamais fusionnée dans `main`), ou `antenly:<chemin>` / `antenly-ci:<chemin>`
+  sur la branche de travail, selon la cible ;
+- `job_name`, `model_main` / `model_chain` (uniquement `opencode/*-free`),
+  `timeout_minutes` (10 à 90, défaut 45).
+
+**Cible `antenly`.** Comportement inchangé : checkout et push avec `ANTENLY_TOKEN`
+(limité à `antenly`). Toute modification de `.github/workflows` est refusée avant le
+push.
+
+**Cible `antenly-ci`.** Checkout et push avec le `GITHUB_TOKEN` du workflow
+(`contents: write`, `pull-requests: write`). La modification de `.github/workflows`
+est autorisée pour cette cible uniquement. Les prompts `prompts:<chemin>` sont lus
+sur `antenly-ci@fullrun-prompts` (branche dédiée, jamais fusionnée dans `main`).
+
+Gardes communes : acteur `LordThiouk`, jamais `main`/`master`, modèles
+`opencode/*-free`, timeout 10–90 min, gitleaks avant tout push, avance rapide
+seulement, `gh` refusé à opencode. La sortie d'opencode reste sur le runner
+(dépôt public).
+
+```bash
+gh workflow run opencode-task.yml -R LordThiouk/antenly-ci \
+  -f target_repo=antenly-ci -f branch=… -f prompt_path=prompts:… -f job_name=…
+```
 
 ## FullRun opencode (`opencode-fullrun.yml`)
 

@@ -1,19 +1,32 @@
 name: opencode Task (hors FullRun)
-run-name: Task ${{ inputs.job_name }} → antenly@${{ inputs.branch }}
+run-name: Task ${{ inputs.job_name }} → ${{ inputs.target_repo }}@${{ inputs.branch }}
 
-# Tâches ciblées opencode HORS FullRun pour le dépôt privé LordThiouk/antenly.
+# Tâches ciblées opencode HORS FullRun pour LordThiouk/antenly (défaut)
+# ou LordThiouk/antenly-ci (input target_repo, choix unique hors antenly).
+# Cible antenly : jeton ANTENLY_TOKEN, modification de .github/workflows refusée.
+# Cible antenly-ci : GITHUB_TOKEN du workflow (contents: write, pull-requests: write),
+# modification de .github/workflows autorisée pour cette cible uniquement.
+# Prompts prompts:<chemin> lus sur la branche fullrun-prompts du dépôt cible.
 # Dépôt PUBLIC : la sortie d'opencode reste sur le runner (jamais affichée ni publiée).
 # Aucun plugin/porte FullRun : opencode travaille directement, committe localement,
 # puis le workflow vérifie gitleaks et pousse en fast-forward sur la branche dédiée.
 on:
   workflow_dispatch:
     inputs:
+      target_repo:
+        description: "Dépôt cible (antenly par défaut, ou antenly-ci seulement)"
+        type: choice
+        required: true
+        default: antenly
+        options:
+          - antenly
+          - antenly-ci
       branch:
-        description: "Branche de fonctionnalité d'antenly, déjà poussée (jamais main/master)"
+        description: "Branche de fonctionnalité du dépôt cible, déjà poussée (jamais main/master)"
         required: true
         type: string
       prompt_path:
-        description: "Prompt : prompts:<chemin sur fullrun-prompts> ou antenly:<chemin sur la branche>"
+        description: "Prompt : prompts:<chemin sur fullrun-prompts du dépôt cible>, ou antenly:<chemin> / antenly-ci:<chemin> sur la branche"
         required: true
         type: string
       job_name:
@@ -37,7 +50,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: opencode-task-${{ inputs.branch }}
+  group: opencode-task-${{ inputs.target_repo }}-${{ inputs.branch }}
   cancel-in-progress: false
 
 env:
@@ -54,6 +67,9 @@ jobs:
     if: github.actor == 'LordThiouk' && github.triggering_actor == 'LordThiouk'
     runs-on: ubuntu-latest
     timeout-minutes: 110
+    permissions:
+      contents: write
+      pull-requests: write
     env:
       IN_BRANCH: ${{ inputs.branch }}
       IN_PROMPT: ${{ inputs.prompt_path }}
@@ -61,6 +77,7 @@ jobs:
       OC_MODEL_MAIN: ${{ inputs.model_main }}
       OC_MODEL_CHAIN: ${{ inputs.model_chain }}
       IN_TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+      TARGET_REPO: ${{ inputs.target_repo }}
 
     steps:
       - name: Validation des entrées
@@ -70,8 +87,13 @@ jobs:
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "branche invalide"
           [[ "$IN_BRANCH" != "main" && "$IN_BRANCH" != "master" ]] || fail "main/master interdit"
           [[ "$IN_BRANCH" != fullrun-logs/* && "$IN_BRANCH" != refs/* && "$IN_BRANCH" != *..* ]] || fail "branche réservée"
+          [[ "$TARGET_REPO" == "antenly" || "$TARGET_REPO" == "antenly-ci" ]] || fail "target_repo invalide"
           [[ "$IN_JOB" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "job_name invalide"
-          [[ "$IN_PROMPT" =~ ^(prompts|antenly):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide"
+          [[ "$IN_PROMPT" =~ ^(prompts|antenly|antenly-ci):[A-Za-z0-9._/-]+$ && "$IN_PROMPT" != *..* ]] || fail "prompt_path invalide"
+          scheme="${IN_PROMPT%%:*}"
+          if [ "$scheme" != "prompts" ] && [ "$scheme" != "$TARGET_REPO" ]; then
+            fail "schéma de prompt ($scheme) incohérent avec target_repo ($TARGET_REPO)"
+          fi
           [[ "$OC_MODEL_MAIN" =~ ^opencode/[a-z0-9.-]+-free$ ]] || fail "seuls les modèles opencode/*-free sont admis"
           if [ -n "$OC_MODEL_CHAIN" ]; then
             IFS=',' read -ra ms <<< "$OC_MODEL_CHAIN"
@@ -84,15 +106,15 @@ jobs:
           [[ "$IN_TIMEOUT_MIN" =~ ^[0-9]+$ ]] && [ "$IN_TIMEOUT_MIN" -ge 10 ] && [ "$IN_TIMEOUT_MIN" -le 90 ] || fail "timeout_minutes doit être entre 10 et 90"
           echo "t0=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout antenly (branche cible)
+      - name: Checkout du dépôt cible (branche)
         uses: actions/checkout@v4
         with:
-          repository: LordThiouk/antenly
+          repository: LordThiouk/${{ inputs.target_repo }}
           ref: ${{ inputs.branch }}
           path: target
           fetch-depth: 0
           persist-credentials: false
-          token: ${{ secrets.ANTENLY_TOKEN }}
+          token: ${{ inputs.target_repo == 'antenly-ci' && github.token || secrets.ANTENLY_TOKEN }}
 
       - name: Préparer prompt et SHA de départ
         id: prep
@@ -107,15 +129,34 @@ jobs:
           rel="${IN_PROMPT#*:}"
           raw="$RUNNER_TEMP/oc/raw_prompt.md"
           if [ "$scheme" = "prompts" ]; then
-            GH_TOKEN="$ANTENLY_TOKEN" gh api \
-              "repos/LordThiouk/antenly/contents/${rel}?ref=fullrun-prompts" \
-              -H "Accept: application/vnd.github.raw+json" > "$raw"
+            if [ "$TARGET_REPO" = "antenly-ci" ]; then
+              GH_TOKEN="${GITHUB_TOKEN}" gh api \
+                "repos/LordThiouk/antenly-ci/contents/${rel}?ref=fullrun-prompts" \
+                -H "Accept: application/vnd.github.raw+json" > "$raw"
+            else
+              GH_TOKEN="$ANTENLY_TOKEN" gh api \
+                "repos/LordThiouk/antenly/contents/${rel}?ref=fullrun-prompts" \
+                -H "Accept: application/vnd.github.raw+json" > "$raw"
+            fi
           else
             [ -f "target/$rel" ] || { echo "::error::prompt introuvable : $rel"; exit 1; }
             cp "target/$rel" "$raw"
           fi
 
-          cat <<'PRE' > "$RUNNER_TEMP/oc/prompt.md"
+          if [ "$TARGET_REPO" = "antenly-ci" ]; then
+            cat <<'PRE' > "$RUNNER_TEMP/oc/prompt.md"
+          # Tâche opencode (mode direct, hors FullRun)
+          - Tu travailles dans le répertoire courant (dépôt `LordThiouk/antenly-ci`, branche de fonctionnalité déjà active).
+          - Jamais de push, jamais de `git merge`, jamais de force-push, jamais de secret ni de fausse clé en dur.
+          - Committe tout travail validé sur la branche courante : le workflow vérifie `gitleaks` et pousse pour toi après ta fin.
+          - La modification de `.github/workflows` est autorisée pour cette cible uniquement.
+          - Exclue `node_modules`, `.git`, `dist`, `build`, `.venv` de tes recherches.
+          - Avant de terminer, écris un court résumé factuel (SHA, tests, résultats) dans `/tmp/task_done.md`.
+
+          ---
+          PRE
+          else
+            cat <<'PRE' > "$RUNNER_TEMP/oc/prompt.md"
           # Tâche opencode (mode direct, hors FullRun)
           - Tu travailles dans le répertoire courant (dépôt `LordThiouk/antenly`, branche de fonctionnalité déjà active).
           - Jamais de push, jamais de `git merge`, jamais de force-push, jamais de secret ni de fausse clé en dur.
@@ -125,6 +166,7 @@ jobs:
 
           ---
           PRE
+          fi
           cat "$raw" >> "$RUNNER_TEMP/oc/prompt.md"
 
       - name: Installer Node, Python/uv, opencode et gitleaks
@@ -246,16 +288,33 @@ jobs:
             exit 0
           fi
 
+          if [ "$TARGET_REPO" != "antenly-ci" ]; then
+            if [ -n "$(git -C target diff --name-only "${BASE_SHA}..${HEAD_SHA}" -- .github/workflows)" ]; then
+              echo "::error::modification de .github/workflows : push refusé"
+              exit 1
+            fi
+          fi
+
           gitleaks detect --source target --log-opts="${BASE_SHA}..${HEAD_SHA}" --no-banner
 
           ASKPASS="$RUNNER_TEMP/askpass.sh"
-          cat <<'AP' > "$ASKPASS"
+          if [ "$TARGET_REPO" = "antenly-ci" ]; then
+            cat <<'AP' > "$ASKPASS"
+          #!/bin/sh
+          echo "$GITHUB_TOKEN"
+          AP
+            chmod 700 "$ASKPASS"
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" \
+              git -C target push "https://x-access-token@github.com/LordThiouk/antenly-ci.git" "HEAD:refs/heads/${IN_BRANCH}"
+          else
+            cat <<'AP' > "$ASKPASS"
           #!/bin/sh
           echo "$ANTENLY_TOKEN"
           AP
-          chmod 700 "$ASKPASS"
-          GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" \
-            git -C target push "https://x-access-token@github.com/LordThiouk/antenly.git" "HEAD:refs/heads/${IN_BRANCH}"
+            chmod 700 "$ASKPASS"
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$ASKPASS" \
+              git -C target push "https://x-access-token@github.com/LordThiouk/antenly.git" "HEAD:refs/heads/${IN_BRANCH}"
+          fi
           rm -f "$ASKPASS"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
           echo "Poussé ${HEAD_SHA:0:7} ($COUNT commit(s)) sur ${IN_BRANCH}."
@@ -276,7 +335,7 @@ jobs:
         run: |
           set +x
           if [ -z "${OC_NOTIFY_URL:-}" ] || [ -z "${OC_NOTIFY_KEY:-}" ]; then exit 0; fi
-          message="Task CI ${IN_JOB:-} (antenly@${IN_BRANCH:-}) : status=${OC_STATUS:-?} model=${OC_MODEL:-?} pushed=${PUSHED:-false} commits=${COMMITS:-0} sha=${HEAD_SHA:0:7} — ${RUN_URL:-}"
+          message="Task CI ${IN_JOB:-} (${TARGET_REPO:-}@${IN_BRANCH:-}) : status=${OC_STATUS:-?} model=${OC_MODEL:-?} pushed=${PUSHED:-false} commits=${COMMITS:-0} sha=${HEAD_SHA:0:7} — ${RUN_URL:-}"
           payload=$(jq -cn --arg job "${IN_JOB:-}" --arg status "${OC_STATUS:-}" --arg message "$message" \
             '{job: $job, status: $status, message: $message}')
           curl -sS --max-time 15 -X POST "$OC_NOTIFY_URL" \
