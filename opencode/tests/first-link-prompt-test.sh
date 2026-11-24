@@ -36,7 +36,7 @@ run_guard() { # $1 = chain_enabled, $2 = chain_phase
     IN_CHAIN_PROGRESS=0/20 IN_STOP_AFTER_STEP= IN_TARGET_AGENT= \
     bash "$T/guard.sh" >"$T/gout.stdout" 2>"$T/gerr"
 }
-eff() { rg "^IN_PROMPT_EFFECTIVE=" "$T/genv" 2>/dev/null | cut -d= -f2- || true; }
+eff() { grep -E "^IN_PROMPT_EFFECTIVE=" "$T/genv" 2>/dev/null | cut -d= -f2- || true; }
 
 for pair in "plan:prompts:p.md" "build:prompts:b.md" "verify:prompts:v.md" "close:prompts:c.md"; do
   phase="${pair%%:*}"; want="${pair#*:}"
@@ -87,9 +87,9 @@ run_prep() { # $1 = prompt_path brut, $2 = prompt effectif, $3 = chain_enabled, 
   # prep consomme la référence distante (usage unique, supprimée en fin d'étape) : la recréer.
   ( cd "$T/antenly" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       git update-ref refs/remotes/origin/fullrun-prompts refs/heads/fullrun-prompts )
-  : >"$T/gout"
-  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" GITHUB_OUTPUT="$T/gout" RUNNER_TEMP="$T" \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  : >"$T/gout"; : >"$T/genv"
+  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" GITHUB_OUTPUT="$T/gout" GITHUB_ENV="$T/genv" \
+    RUNNER_TEMP="$T" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     ANTENLY_DIR="$T/antenly" CI_DIR="$T/ci" OC_WORK="$T/oc" \
     IN_BRANCH=feat/x IN_JOB=job1 IN_PROMPT="$1" IN_PROMPT_EFFECTIVE="$2" \
     IN_CHAIN_ENABLED="$3" IN_CHAIN_PHASE="$4" IN_NEXT= \
@@ -97,48 +97,48 @@ run_prep() { # $1 = prompt_path brut, $2 = prompt effectif, $3 = chain_enabled, 
     OC_REPORT="$T/oc/REPORT.md" OC_BRANCH=feat/x \
     bash "$T/prep.sh" >"$T/prep.out" 2>"$T/prep.err"
 }
-run_prep prompts:p.md prompts:b.md true build
-if rg -q '^PROMPT-BUILD$' "$T/oc/prompt.md" && ! rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
+run_prep prompts:p.md prompts:b.md true build; rc=$?
+if [ "$rc" -eq 0 ] && grep -Eq '^PROMPT-BUILD$' "$T/oc/prompt.md" && ! grep -Eq '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
   ok "prep chaîné (build) : le prompt du job est prompt_path_build, pas le gros prompt plan"
 else
-  ko "prep chaîné : mauvais prompt — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null) prompt=$(tail -n 3 "$T/oc/prompt.md" 2>/dev/null)"
+  ko "prep chaîné (rc=$rc) : mauvais prompt ou échec de prep — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null) prompt=$(tail -n 3 "$T/oc/prompt.md" 2>/dev/null)"
 fi
-run_prep prompts:p.md prompts:p.md false plan
-if rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
+run_prep prompts:p.md prompts:p.md false plan; rc=$?
+if [ "$rc" -eq 0 ] && grep -Eq '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
   ok "prep hors chaîne : prompt_path inchangé"
 else
-  ko "prep hors chaîne : prompt absent — $(cat "$T/prep.err")"
+  ko "prep hors chaîne (rc=$rc) : prompt absent — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null)"
 fi
 
 # --- 3. Un seul endroit qui décide : prep lit l'effectif, chain ne recalcule plus de prompt ----------
-if rg -q 'IN_PROMPT_EFFECTIVE' "$T/prep.sh"; then
+if grep -Eq 'IN_PROMPT_EFFECTIVE' "$T/prep.sh"; then
   ok "prep : lit IN_PROMPT_EFFECTIVE"
 else
   ko "prep : n'utilise pas IN_PROMPT_EFFECTIVE"
 fi
-if ! rg -q 'src="\$\{IN_PROMPT%%:\*\}"' "$T/prep.sh"; then
+if ! grep -Eq 'src="\$\{IN_PROMPT%%:\*\}"' "$T/prep.sh"; then
   ok "prep : plus de lecture directe de IN_PROMPT"
 else
   ko "prep : lit encore IN_PROMPT directement"
 fi
-if rg -q 'IN_PROMPT_EFFECTIVE' "$T/guard.sh"; then
+if grep -Eq 'IN_PROMPT_EFFECTIVE' "$T/guard.sh"; then
   ok "garde : calcule IN_PROMPT_EFFECTIVE"
 else
   ko "garde : ne calcule pas l'effectif"
 fi
-if ! rg -q 'next_prompt' "$T/chain.sh"; then
+if ! grep -Eq 'next_prompt' "$T/chain.sh"; then
   ok "chain : aucun second calcul du prompt (prompt_path transmis inchangé)"
 else
   ko "chain : recalcule encore next_prompt (deux endroits qui décident)"
 fi
-if rg -q 'prompt_path="\$IN_PROMPT"' "$T/chain.sh"; then
+if grep -Eq 'prompt_path="\$IN_PROMPT"' "$T/chain.sh"; then
   ok "chain : prompt_path=IN_PROMPT inchangé au dispatch"
 else
   ko "chain : prompt_path modifié au dispatch"
 fi
 
 # --- 4. Garde de non-régression sur la chaîne de secours (défaut 2, simple présence) -----------------
-if rg -q 'OC_ERROR_IDLE_SEC:-240' "$R"; then
+if grep -Eq 'OC_ERROR_IDLE_SEC:-240' "$R"; then
   ok "run-fullrun.sh : OC_ERROR_IDLE_SEC a un défaut de 240 s"
 else
   ko "run-fullrun.sh : OC_ERROR_IDLE_SEC absent ou sans défaut"

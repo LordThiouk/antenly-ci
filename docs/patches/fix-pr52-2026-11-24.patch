@@ -1,0 +1,88 @@
+diff --git a/.github/workflows/opencode-fullrun.yml b/.github/workflows/opencode-fullrun.yml
+index 80b19d1..913b790 100644
+--- a/.github/workflows/opencode-fullrun.yml
++++ b/.github/workflows/opencode-fullrun.yml
+@@ -68,7 +68,7 @@ on:
+         type: string
+         default: "20"
+       done_agents:
+-        description: "Agents dont un VRAI verdict PASS (réponse du sous-agent dans le stockage opencode) est exigé pour conclure : liste séparée par des virgules, ex. Max,Silas. Vide = l'agent de l'étape stop_after_step (ou target_agent), sinon Max"
++        description: "Agents dont un VRAI verdict PASS (réponse du sous-agent dans le stockage opencode) est exigé pour conclure : liste séparée par des virgules, ex. Max,Silas (CHAQUE agent est exigé). Vide = target_agent s'il est fourni, sinon tout agent autorisé de l'étape stop_after_step (un seul PASS suffit), sinon Max"
+         type: string
+         default: ""
+       wip_push_minutes:
+@@ -649,34 +649,46 @@ jobs:
+             esac
+           fi
+           # BEGIN stop-after-effective (exercé par opencode/tests/stop-after-step-test.sh : ne pas
+-          # renommer les marqueurs). Un job borné à une étape exige le PASS de l'agent de CETTE
+-          # étape. Un done_agents explicite reste maître ; vide = l'agent de stop_after_step,
+-          # sinon target_agent, sinon Max (comportement historique hors job borné).
++          # renommer les marqueurs). Un job borné à une étape exige le PASS de l'agent RÉELLEMENT
++          # dispatché : target_agent d'abord, sinon tout agent autorisé pour l'étape (liste
++          # séparée par des virgules, un seul PASS suffit). Un done_agents explicite reste maître ;
++          # hors job borné, Max (comportement historique).
+           eff_done="${IN_DONE_AGENTS:-}"
++          eff_any=""
+           if [ -z "$eff_done" ]; then
+-            if [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
+-              eff_done=$(bash "$CI_DIR/opencode/step-agents.sh" "$OC_STOP_AFTER_STEP") \
+-                || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
+-            elif [ -n "${OC_TARGET_AGENT:-}" ]; then
++            if [ -n "${OC_TARGET_AGENT:-}" ]; then
+               eff_done="$OC_TARGET_AGENT"
++            elif [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
++              eff_done=$(bash "$CI_DIR/opencode/step-agents.sh" --list "$OC_STOP_AFTER_STEP") \
++                || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
++              eff_any=1
+             else
+               eff_done=Max
+             fi
+           fi
+           echo "OC_DONE_AGENTS_EFFECTIVE=$eff_done" >> "$GITHUB_ENV"
++          echo "OC_DONE_AGENTS_ANY=$eff_any" >> "$GITHUB_ENV"
+           # END stop-after-effective
+           # BEGIN stop-after-prompt (mêmes règles d'extraction). Consigne EXPLICITE donnée à
+           # opencode : la variable FULLRUN_STOP_AFTER_STEP seule ne suffisait pas, le modèle
+           # pouvait dérouler les étapes suivantes (run 45328234540 : code écrit après vera).
+           if [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
+-            stop_agent=$(bash "$CI_DIR/opencode/step-agents.sh" "$OC_STOP_AFTER_STEP") \
+-              || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
++            if [ -n "${OC_TARGET_AGENT:-}" ]; then
++              stop_agent="$OC_TARGET_AGENT"
++              agent_line="L'agent à dispatcher et validateur de cette étape est \`$stop_agent\` ; n'en dispatche aucun autre."
++              pass_line="que \`$stop_agent\` a rendu un verdict PASS"
++            else
++              stop_agent=$(bash "$CI_DIR/opencode/step-agents.sh" --list "$OC_STOP_AFTER_STEP") \
++                || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
++              agent_line="Agents validateurs autorisés pour cette étape : \`$stop_agent\` (un seul PASS suffit, celui de l'agent dispatché)."
++              pass_line="qu'un agent validateur autorisé (\`$stop_agent\`) a rendu un verdict PASS"
++            fi
+             {
+               echo
+               echo "## Étape finale imposée : \`$OC_STOP_AFTER_STEP\`"
+-              echo "Ce job est borné à UNE seule étape. L'agent validateur de cette étape est \`$stop_agent\`."
+-              [ -z "${OC_TARGET_AGENT:-}" ] || echo "L'agent à dispatcher est \`$OC_TARGET_AGENT\` ; n'en dispatche aucun autre."
+-              echo "Dès que l'étape \`$OC_STOP_AFTER_STEP\` est terminée et que \`$stop_agent\` a rendu un verdict PASS :"
++              echo "Ce job est borné à UNE seule étape."
++              echo "$agent_line"
++              echo "Dès que l'étape \`$OC_STOP_AFTER_STEP\` est terminée et $pass_line :"
+               echo "- écris le rapport final \`$OC_REPORT\` ;"
+               echo "- ne lance AUCUNE étape suivante et ne dispatche AUCUN agent des étapes suivantes ;"
+               echo "- n'enchaîne pas le pipeline : arrête-toi après cette étape."
+@@ -1097,6 +1109,7 @@ jobs:
+           # Agent(s) validateur(s) : l'étape bornée (stop_after_step) impose celui de l'étape,
+           # calculé par le step prep ; un done_agents explicite reste maître (OC_DONE_AGENTS_EFFECTIVE).
+           OC_DONE_AGENTS="${OC_DONE_AGENTS_EFFECTIVE:-${OC_DONE_AGENTS:-Max}}"; export OC_DONE_AGENTS
++          OC_DONE_AGENTS_ANY="${OC_DONE_AGENTS_ANY:-}"; export OC_DONE_AGENTS_ANY
+           # Entrée vide = défaut du wrapper (Forge=40) : une variable vide signifierait « aucune entrée ».
+           if [ -n "${OC_AGENT_IDLE_MIN:-}" ]; then export OC_AGENT_IDLE_MIN; else unset OC_AGENT_IDLE_MIN; fi
+           # OC_STEP_TIMEOUT_MIN est le timeout-minutes de CE step (imposé par GitHub depuis le début
+@@ -1504,6 +1517,7 @@ jobs:
+             # END done-verify-generator
+             dc_out=$(. "$T/done-check-call.sh"; OC_DONE_VERIFY="$vf" OC_DONE_REPO="$ANTENLY_DIR" OC_ISA="${OC_ISA_PATH:-}" \
+                      OC_MAX_SUBAGENT=Max OC_DONE_AGENTS="${OC_DONE_AGENTS_EFFECTIVE:-${IN_DONE_AGENTS:-Max}}" \
++                     OC_DONE_AGENTS_ANY="${OC_DONE_AGENTS_ANY:-}" \
+                      fullrun_done_check "$T/done_check.sh" 2>/dev/null | head -n1) || true
+             rm -f "$vf"
+           fi

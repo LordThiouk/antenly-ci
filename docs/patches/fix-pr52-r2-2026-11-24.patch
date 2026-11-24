@@ -1,0 +1,66 @@
+diff --git a/.github/workflows/opencode-fullrun.yml b/.github/workflows/opencode-fullrun.yml
+index 913b790..f074434 100644
+--- a/.github/workflows/opencode-fullrun.yml
++++ b/.github/workflows/opencode-fullrun.yml
+@@ -68,7 +68,7 @@ on:
+         type: string
+         default: "20"
+       done_agents:
+-        description: "Agents dont un VRAI verdict PASS (réponse du sous-agent dans le stockage opencode) est exigé pour conclure : liste séparée par des virgules, ex. Max,Silas (CHAQUE agent est exigé). Vide = target_agent s'il est fourni, sinon tout agent autorisé de l'étape stop_after_step (un seul PASS suffit), sinon Max"
++        description: "Agents dont un VRAI verdict PASS (réponse du sous-agent dans le stockage opencode) est exigé pour conclure : liste séparée par des virgules, ex. Max,Silas (CHAQUE agent est exigé). Vide = target_agent s'il est fourni AVEC stop_after_step, sinon tout agent autorisé de l'étape stop_after_step (un seul PASS suffit), sinon Max"
+         type: string
+         default: ""
+       wip_push_minutes:
+@@ -650,18 +650,21 @@ jobs:
+           fi
+           # BEGIN stop-after-effective (exercé par opencode/tests/stop-after-step-test.sh : ne pas
+           # renommer les marqueurs). Un job borné à une étape exige le PASS de l'agent RÉELLEMENT
+-          # dispatché : target_agent d'abord, sinon tout agent autorisé pour l'étape (liste
+-          # séparée par des virgules, un seul PASS suffit). Un done_agents explicite reste maître ;
+-          # hors job borné, Max (comportement historique).
++          # dispatché : dans ce seul cas, target_agent d'abord, sinon tout agent autorisé pour
++          # l'étape (liste séparée par des virgules, un seul PASS suffit). Un done_agents explicite
++          # reste maître ; HORS job borné (pas de stop_after_step), Max : le chaînage manuel
++          # (chain_enabled=false) garde son comportement historique même si target_agent est fourni.
+           eff_done="${IN_DONE_AGENTS:-}"
+           eff_any=""
+           if [ -z "$eff_done" ]; then
+-            if [ -n "${OC_TARGET_AGENT:-}" ]; then
+-              eff_done="$OC_TARGET_AGENT"
+-            elif [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
+-              eff_done=$(bash "$CI_DIR/opencode/step-agents.sh" --list "$OC_STOP_AFTER_STEP") \
+-                || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
+-              eff_any=1
++            if [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
++              if [ -n "${OC_TARGET_AGENT:-}" ]; then
++                eff_done="$OC_TARGET_AGENT"
++              else
++                eff_done=$(bash "$CI_DIR/opencode/step-agents.sh" --list "$OC_STOP_AFTER_STEP") \
++                  || { echo "::error::étape stop_after_step inconnue : $OC_STOP_AFTER_STEP"; exit 1; }
++                eff_any=1
++              fi
+             else
+               eff_done=Max
+             fi
+@@ -1809,6 +1812,7 @@ jobs:
+           IN_IDLE_MIN: ${{ inputs.idle_minutes }}
+           IN_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
+           IN_DONE_AGENTS: ${{ inputs.done_agents }}
++          IN_STOP_AFTER_STEP: ${{ inputs.stop_after_step }}
+           IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
+           IN_PREV_RUN_ID: ${{ inputs.prev_run_id }}
+           OC_MODEL_MAIN: ${{ inputs.model_main }}
+@@ -1830,6 +1834,13 @@ jobs:
+           # fichier) : ce step vit dans un job séparé, il n'hérite pas des variables shell du garde.
+           IFS='/' read -r IN_CHAIN_COUNT IN_CHAIN_MAX <<<"$IN_CHAIN_PROGRESS"
+ 
++          # stop_after_step est EXCLUSIF avec le chaînage : un job borné s'arrête après son étape et
++          # ne dispatche JAMAIS le lien suivant, même si chain_enabled=true a été fourni par erreur.
++          # Décidé avant toute lecture d'état (bun/unit) et avant le moindre gh workflow run.
++          if [ -n "${IN_STOP_AFTER_STEP:-}" ]; then
++            finish_chain "stop_after_step=${IN_STOP_AFTER_STEP} : job borné, aucun lien suivant dispatché"
++          fi
++
+           # Nettoie la sortie brute avant de la journaliser : masque les motifs de jeton connus,
+           # replie les sauts de ligne (une ligne « ::… » injectée deviendrait une workflow command),
+           # échappe « :: » et tronque à 400 caractères. Jamais la sortie complète de unit --isa
