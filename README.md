@@ -350,7 +350,9 @@ démons).
   `run-fullrun.sh` ne relance jamais de session de reprise : sans PASS de l'agent de l'étape, le job
   s'arrête en `127` (`arret=tour-fini`, `stop_after_no_resume=<étape>`) au lieu de dérouler la suite.
   `stop_after_step` est exclusif avec le chaînage : même si `chain_enabled=true` est fourni par
-  erreur, le step de chaînage termine la chaîne sans `gh workflow run` (aucun lien suivant).
+  erreur, le step de chaînage termine la chaîne sans `gh workflow run` (aucun lien suivant) et le
+  statut final exige alors `DONE=ok` (patch r3) : un job borné ne finit jamais vert sans le PASS de
+  l'agent de l'étape.
 
 Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
 réduit : seuil 3 s, activité 9 s).

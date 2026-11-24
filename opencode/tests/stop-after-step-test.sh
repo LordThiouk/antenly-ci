@@ -3,16 +3,14 @@
 # réellement dispatché (target_agent prioritaire) ou de tout agent autorisé de l'étape
 # (vera -> Algorithm, serena -> Architect, build -> Designer/Aditi/Engineer/Forge/Anvil,
 # verify -> code-reviewer/Forge/Silas, max/close -> Max), le prompt doit ordonner l'arrêt,
-# et aucune reprise ne doit dérouler les étapes suivantes. Les deux premiers patchs de la branche
-# (diag-arret-etape, fix-pr52) sont déjà présents dans HEAD : seul le patch incrémental r2 est
-# appliqué, sur une copie jetable du workflow de HEAD, puis c'est cette version patchée qui est
-# vérifiée. Ne jamais réappliquer les patchs déjà intégrés (échec garanti « patch does not apply »).
+# et aucune reprise ne doit dérouler les étapes suivantes. Le test vérifie l'arbre COURANT tel
+# quel : il ne lit ni n'applique JAMAIS un fichier de docs/patches/ (pas de git apply, pas de
+# patch). Les correctifs déjà intégrés dans la branche sont donc testés directement.
 #   opencode/tests/stop-after-step-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 WF="$ROOT/.github/workflows/opencode-fullrun.yml"
-PATCH="$ROOT/docs/patches/fix-pr52-r2-2026-11-24.patch"
 STEP="$ROOT/opencode/step-agents.sh"
 RUN="$ROOT/opencode/run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -20,7 +18,6 @@ ok() { echo "OK   $*"; }
 ko() { echo "FAIL $*"; fail=1; }
 
 [ -f "$WF" ] || { echo "FAIL workflow introuvable : $WF"; exit 1; }
-[ -f "$PATCH" ] || { echo "FAIL patch introuvable : $PATCH"; exit 1; }
 [ -f "$STEP" ] || { echo "FAIL mapping introuvable : $STEP"; exit 1; }
 
 # --- 1. mapping étape -> agents autorisés (source unique, utilisée par le workflow) ---------------
@@ -52,16 +49,10 @@ MAP
 bash "$STEP" deploy >/dev/null 2>&1; [ "$?" -eq 64 ] && ok "mapping : étape inconnue refusée (64)" || ko "mapping : étape inconnue acceptée"
 bash "$STEP" --list deploy >/dev/null 2>&1; [ "$?" -eq 64 ] && ok "mapping : étape inconnue refusée pour --list (64)" || ko "mapping --list : étape inconnue acceptée"
 
-# --- 2. appliquer le patch incrémental r2 sur la version de HEAD (copie jetable) ------------------
-mkdir -p "$T/repo/.github/workflows"
-git -C "$ROOT" show HEAD:.github/workflows/opencode-fullrun.yml >"$T/repo/.github/workflows/opencode-fullrun.yml" \
-  || { echo "FAIL impossible de lire le workflow de HEAD"; exit 1; }
-if ( cd "$T/repo" && git apply "$PATCH" ) 2>"$T/apply.err"; then
-  ok "patch incrémental r2 : git apply sur le workflow de HEAD"
-else
-  ko "patch incrémental r2 : git apply impossible ($(tr '\n' ' ' <"$T/apply.err"))"
-fi
-PF="$T/repo/.github/workflows/opencode-fullrun.yml"
+# --- 2. workflow de l'arbre courant (aucun patch réappliqué) --------------------------------------
+# Le workflow est lu tel quel : les correctifs sont déjà dans la branche. Aucune copie patchée,
+# aucun `git apply` : c'est exactement ce que la CI exécutera.
+PF="$WF"
 
 # --- 3. l'input done_agents est vide par défaut (l'étape décide) et accepte le vide ---------------
 python3 - "$PF" <<'PY' || fail=1
@@ -171,7 +162,7 @@ grep -qF 'OC_DONE_AGENTS_EFFECTIVE' "$PF" && ok "workflow : la valeur effective 
   || ko "workflow : OC_DONE_AGENTS_EFFECTIVE absent"
 
 # --- 6b. chaînage : un job borné ne dispatche jamais le lien suivant --------------------------------
-# Le step chain est extrait du workflow patché et exécuté avec IN_STOP_AFTER_STEP : l'arrêt doit être
+# Le step chain est extrait du workflow courant et exécuté avec IN_STOP_AFTER_STEP : l'arrêt doit être
 # décidé AVANT bun/unit et avant tout gh workflow run (aucun outil n'est disponible ici).
 python3 - "$PF" "$T/chain.sh" <<'PY' || fail=1
 import sys, yaml

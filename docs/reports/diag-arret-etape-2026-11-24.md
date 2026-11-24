@@ -50,15 +50,20 @@ Nouveau `opencode/step-agents.sh` (sourçable ou exécutable) :
 | `verify` (5) | `code-reviewer`, `Forge` ou `Silas` |
 | `max`, `close` (6-7) | `Max` |
 
-### 2. Workflow (livré en patch)
+### 2. Workflow (patchs déjà intégrés + patch r3)
 
-Les premier et deuxième correctifs ont été appliqués au workflow par les commits `f932b62` (patch
-`diag-arret-etape`) et `1790416` (patch `fix-pr52`) : ces deux patchs sont donc **déjà dans HEAD** et
-ne doivent plus être réappliqués. Les corrections de la revue du 24/11 qui restaient ouvertes sont
-livrées dans le patch **incrémental** `docs/patches/fix-pr52-r2-2026-11-24.patch`, applicable avec
-`git apply` sur le HEAD actuel de la branche (workflow non modifié directement).
+Les trois premiers correctifs sont déjà dans HEAD : `f932b62` (patch `diag-arret-etape`), `1790416`
+(patch `fix-pr52`) et `2f40055` (patch `fix-pr52-r2`). Ces patchs ne doivent plus être réappliqués :
+`git apply --check` échoue sur HEAD (déjà appliqué), ce qui est attendu.
 
-Le correctif complet (premiers patchs + r2) :
+Le point restant de la revue r3 — un job borné combiné à `chain_enabled=true` pouvait finir vert sans
+PASS — est livré dans le patch **incrémental** `docs/patches/fix-pr52-r3-2026-11-24.patch`,
+applicable avec `git apply` sur le HEAD actuel (workflow non modifié directement). Il ajoute au step
+« Statut final » un contrôle : en mode chaîné, dès que `stop_after_step` est posé, le job échoue si
+`DONE` n'est pas `ok`. Le step de chaînage termine déjà la chaîne sans `gh workflow run`, donc aucun
+lien suivant n'est dispatché.
+
+Le correctif complet (patchs intégrés + r3) :
 
 - met `done_agents` à vide par défaut et accepte le vide dans la garde ;
 - calcule `OC_DONE_AGENTS_EFFECTIVE` dans le step de préparation : `done_agents` explicite, sinon
@@ -71,6 +76,8 @@ Le correctif complet (premiers patchs + r2) :
   explicite de lancer l'étape suivante ;
 - rend `stop_after_step` exclusif avec le chaînage : le step « Décision de chaînage » termine la
   chaîne sans `gh workflow run` dès que l'input est posé, avant toute lecture d'état ;
+- ne finit jamais vert sans PASS en mode chaîné quand `stop_after_step` est posé : le « Statut
+  final » exige `DONE=ok` (r3) ;
 - utilise l'agent effectif dans le préflight, le step `oc`, le validateur final et le dispatch du
   chaînage.
 
@@ -78,15 +85,19 @@ Le correctif complet (premiers patchs + r2) :
 
 `opencode/run-fullrun.sh` mémorise `STOP_AFTER` et **désactive toute reprise** quand il est posé.
 Sans PASS de l'agent de l'étape, le job rend `127` (`arret=tour-fini`) et écrit
-`stop_after_no_resume=<étape>` dans le statut, au lieu de dérouler la suite.
+`stop_after_no_resume=<étape>` dans le statut, au lieu de dérouler la suite. En outre, `run_watched`
+surveille déjà le PASS **pendant** la passe (`done_check` toutes les `OC_DONE_CHECK_SEC`, coupure
+après `OC_DONE_IDLE_SEC` d'inactivité) : l'arrêt intra-tour est donc largement porté par le script,
+la consigne de prompt n'étant qu'une sécurité supplémentaire.
 
 ### 4. Test et documentation
 
-- `opencode/tests/stop-after-step-test.sh` : mapping, application du seul patch incrémental r2 sur
-  une copie du workflow de HEAD (les patchs déjà intégrés ne sont plus rejoués), calcul de l'agent
-  effectif, consigne de prompt, consommation par le workflow, absence de dispatch du lien suivant
-  avec `stop_after_step` + `chain_enabled=true`, et deux scénarios bout en bout du wrapper
-  (PASS → arrêt immédiat ; pas de PASS → aucune reprise).
+- `opencode/tests/stop-after-step-test.sh` : vérifie l'arbre **courant tel quel** (aucune lecture ni
+  application de `docs/patches/`) : mapping, calcul de l'agent effectif, consigne de prompt,
+  consommation par le workflow, absence de dispatch du lien suivant avec `stop_after_step` +
+  `chain_enabled=true`, et trois scénarios bout en bout du wrapper (PASS → arrêt immédiat ; pas de
+  PASS → aucune reprise ; PASS d'un agent autorisé en mode ANY → arrêt immédiat). Le correctif r3
+  (statut final borné chaîné) est validé sur un worktree temporaire, jamais dans le test permanent.
 - `opencode/tests/first-link-prompt-test.sh` : ne dépend plus de `rg` (grep -E), donc plus de faux
   échec quand ripgrep manque localement.
 - `README.md` : `done_agents` vide par défaut, mapping, arrêt sans reprise des jobs bornés et
@@ -94,18 +105,23 @@ Sans PASS de l'agent de l'étape, le job rend `127` (`arret=tour-fini`) et écri
 
 ## Vérifications
 
-- `bash opencode/tests/stop-after-step-test.sh` : **40 OK, 0 KO** (patch r2 appliqué sur une copie
-  du workflow de HEAD).
-- Workflow patché (r2) appliqué temporairement, puis suites existantes :
-  `first-link-prompt-test.sh` 13 OK / 0 KO ; `chain-step-test.sh`, `start-step-test.sh`,
-  `turn-end-test.sh`, `prompt-contract-test.sh` : OK.
-- `preflight-test.sh` reste dépendant de `rg` et du CLI lifeos (limites d'environnement local ; la
-  CI installe ripgrep et le CLI épinglé).
-- `bash -n` sur `run-fullrun.sh`, `step-agents.sh`, `done_check.sh` et tous les blocs `run` du
-  workflow : OK.
-- `git apply --check docs/patches/fix-pr52-r2-2026-11-24.patch` sur le HEAD de la branche : OK.
-- `git apply --check docs/patches/fix-pr52-2026-11-24.patch` sur HEAD : échoue, attendu (déjà
-  appliqué) ; le test ne le rejoue plus.
+- `bash opencode/tests/stop-after-step-test.sh` sur l'arbre courant : **39 OK, 0 FAIL, exit 0**.
+- `bash opencode/tests/chain-step-test.sh` : 44 OK, exit 0.
+- `bash opencode/tests/start-step-test.sh` : 12 OK, exit 0.
+- `bash opencode/tests/first-link-prompt-test.sh` : 13 OK, exit 0.
+- `bash opencode/tests/turn-end-test.sh` : 6 ok, exit 0.
+- `bash opencode/tests/prompt-contract-test.sh` : 5 ok, exit 0.
+- `bash opencode/tests/preflight-test.sh` : échoue localement faute de `rg` (`rg: command not
+  found`, 5 OK / 20 FAIL) ; la CI installe ripgrep et le CLI lifeos épinglé.
+- `bash opencode/tests/done-check-test.sh` : non exécutable localement (`bun` absent ; présent en
+  CI).
+- `bash -n` sur `run-fullrun.sh`, `step-agents.sh`, `done_check.sh`, `stop-after-step-test.sh` : OK.
+- `git apply --check docs/patches/fix-pr52-r3-2026-11-24.patch` sur HEAD : OK.
+- `git apply --check` des patchs `fix-pr52-r2` et `fix-pr52` sur HEAD : échoue (déjà appliqués),
+  attendu ; le test ne les rejoue plus.
+- r3 appliqué sur un worktree temporaire : borné chaîné sans PASS → exit 1 ; borné chaîné avec PASS
+  → exit 0 ; lien intermédiaire sans PASS → exit 0 (inchangé) ; le test `stop-after-step-test.sh` y
+  passe aussi (39 OK / 0 FAIL).
 
 Échecs restants de la suite complète, **indépendants de ce correctif** et liés à l'environnement
 local : `done-check-test.sh` exige le dépôt lifeos voisin (`FullRunVerdict.ts`/`FullRunVerdictParse.ts`)
@@ -118,11 +134,16 @@ La CI installe ces outils et ne présente pas ces limites.
 - Le mapping est centralisé mais reste une hypothèse de contrat pour `scaffold` et
   `completeness_pre` (`Algorithm`). Les six étapes de la règle « un job = une étape » sont couvertes
   explicitement.
-- La consigne de prompt réduit fortement le risque, mais un modèle peut encore dépasser son tour ;
-  dans ce cas le wrapper s'arrête sans reprise (127) au lieu de continuer le pipeline.
-- Le patch workflow r2 (les deux premiers patchs sont déjà dans HEAD) doit être appliqué pour que
-  l'exclusivité `stop_after_step`/chaînage et le comportement `target_agent` hors job borné prennent
-  effet côté GitHub Actions.
+- **Arrêt intra-tour (limite connue, non bloquante).** Le script ne s'appuie pas que sur le prompt :
+  `run_watched` interroge `done_check` toutes les `OC_DONE_CHECK_SEC` (60 s par défaut) et coupe la
+  session dès que le PASS est vérifié et que la session est inactive depuis `OC_DONE_IDLE_SEC`
+  (180 s), avant la fin du tour. Il reste un cas résiduel : si le modèle poursuit l'étape suivante
+  dans le même tour avant que cette détection ne coupe (ou produit des commits qui rendent le PASS
+  non « postérieur au dernier commit de code »), du travail supplémentaire peut être écrit. La
+  consigne de prompt réduit fortement ce risque sans le supprimer ; un job borné ne reprend jamais
+  et, sans PASS vérifié, échoue en `127` au lieu de continuer le pipeline.
+- Le patch workflow r3 (les trois premiers patchs sont déjà dans HEAD) doit être appliqué pour que
+  le statut final refuse un job borné chaîné sans PASS côté GitHub Actions.
 
 ## Fichiers
 
@@ -135,6 +156,8 @@ La CI installe ces outils et ne présente pas ces limites.
 - `opencode/tests/done-check-test.sh` (mode ANY)
 - `docs/patches/diag-arret-etape-2026-11-24.patch` (premier patch, appliqué par `f932b62`)
 - `docs/patches/fix-pr52-2026-11-24.patch` (deuxième patch, appliqué par `1790416`)
-- `docs/patches/fix-pr52-r2-2026-11-24.patch` (correctifs de la revue restants, incrémental sur HEAD)
+- `docs/patches/fix-pr52-r2-2026-11-24.patch` (troisième patch, appliqué par `2f40055`)
+- `docs/patches/fix-pr52-r3-2026-11-24.patch` (statut final borné chaîné : PASS exigé, incrémental
+  sur HEAD, non appliqué directement)
 - `docs/reports/diag-arret-etape-2026-11-24.md` (ce rapport)
 - `README.md`
