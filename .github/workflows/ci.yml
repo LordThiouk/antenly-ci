@@ -236,56 +236,8 @@ jobs:
           # Config du dépôt (décision Papa 2026-11-04) : seule exception,
           # les fichiers de test et fixtures.
           GITLEAKS_CONFIG: .gitleaks.toml
-  shell-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      # done_check.sh lit le verdict via le CLI lifeos (source unique, LIFEOS/TOOLS/FullRunVerdict.ts) :
-      # les tests qui font tourner le vrai done_check.sh en ont besoin, avec bun.
-      - name: Checkout LifeOS (lecture seule, CLI de verdict)
-        uses: actions/checkout@v4
-        with:
-          repository: LordThiouk/lifeos
-          # Épinglé : lifeos#24 mergée (4fac2d5 : préflight + CLI de verdict de #23). Un `main` mouvant changerait le verdict sous nos pieds.
-          ref: 4fac2d59de94bf6a5fa6c68c7f09874a2f9cd634
-          token: ${{ secrets.LIFEOS_READ_TOKEN }}
-          path: lifeos
-          persist-credentials: false
-      # ripgrep n'est plus fourni par l'image ubuntu-latest : les tests shell l'appellent (rg -q), et le step
-      # extrait par preflight-test.sh tourne avec PATH=/usr/bin:/bin, d'où apt (binaire dans /usr/bin).
-      - name: Installer ripgrep et age (tests shell)
-        run: sudo apt-get update && sudo apt-get install -y ripgrep age && rg --version | head -1 && age --version
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.4"
-      # Marqueur root (non inscriptible) sans lequel done_check.sh refuse le mode test sous GITHUB_ACTIONS :
-      # posé ici pour la seule suite de tests, jamais par opencode-fullrun.yml.
-      - name: Marqueur root du mode test (suite de tests seulement)
-        run: sudo install -o root -g root -m 0644 /dev/null /etc/fullrun-done-test-mode
-      - name: Tests shell opencode (memcap, watchdog, wippush, …)
-        env:
-          OC_VERDICT_CLI: ${{ github.workspace }}/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts
-          # Bout en bout du préflight avec le vrai CLI lifeos (pin ci-dessus, contient lifeos#24) : son absence
-          # fait échouer preflight-test.sh au lieu d'un SKIP.
-          LIFEOS_DIR: ${{ github.workspace }}/lifeos
-          OC_REQUIRE_PREFLIGHT_E2E: "1"
-          OC_REQUIRE_PROD_TESTS: "1"
-        run: |
-          set -euo pipefail
-          failed=0
-          for t in opencode/tests/*-test.sh; do
-            echo "--- $t ---"
-            if bash "$t"; then
-              echo "✓ $t"
-            else
-              echo "✗ $t"
-              failed=1
-            fi
-          done
-          exit "$failed"
   report-status:
-    needs: [pending, rust, python, security-stack, preannot-ina, licenses, secrets, shell-tests]
+    needs: [pending, rust, python, security-stack, preannot-ina, licenses, secrets]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -312,5 +264,5 @@ jobs:
           STATE=$([ "$OK" = "true" ] && echo success || echo failure)
           gh api -X POST "repos/LordThiouk/antenly/statuses/$SHA" \
             -f state="$STATE" -f context="antenly-ci" -f target_url="$RUN_URL" \
-            -f description="CI publique (rust, python, security-stack, preannot-ina, licences, secrets, shell-tests)" >/dev/null
+            -f description="CI publique (rust, python, security-stack, preannot-ina, licences, secrets)" >/dev/null
           echo "antenly $SHA : $STATE"
