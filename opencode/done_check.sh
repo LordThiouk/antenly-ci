@@ -3,8 +3,10 @@
 # python3. OC_DONE_AGENTS (liste séparée par des virgules, défaut = OC_MAX_SUBAGENT = Max) :
 # CHAQUE agent listé (ex. « Max,Silas ») doit satisfaire a et b ; un PASS qui ne vient pas d'une
 # vraie réponse de l'agent dans le stockage opencode (texte écrit par l'agent principal, fichier,
-# rapport) ne compte jamais. OC_DONE_ONLY=verdict s'arrête après a et b (utilisé par
-# checkpoint.sh pour n'enregistrer que des verdicts réels). Sort 0 seulement si TOUT est vrai :
+# rapport) ne compte jamais. OC_DONE_AGENTS_ANY=1 (valeur exacte 1 ; job borné à une étape) :
+# au moins UN agent de la liste doit satisfaire a et b. OC_DONE_ONLY=verdict s'arrête après a et b
+# (utilisé par checkpoint.sh pour n'enregistrer que des verdicts réels). Sort 0 seulement si TOUT
+# est vrai :
 #   a. stockage opencode : un `task` subagent_type=Max completed, sa session enfant a un message
 #      assistant d'un modèle `-free` avec tokens.output > 0, sa sortie CONCLUT PASS dans un verdict structuré
 #      (JSON final {"verdict":…} ou dernière ligne « VERDICT: PASS »; jamais lu dans le corps, aucun verdict
@@ -27,6 +29,7 @@ ISA="${OC_ISA:-${OC_ISA_PATH:-}}"
 REPO="${OC_DONE_REPO:-$(pwd)}"
 MAX_AGENT="${OC_MAX_SUBAGENT:-Max}"
 AGENTS="${OC_DONE_AGENTS:-$MAX_AGENT}"
+ANY="${OC_DONE_AGENTS_ANY:-}"; [ "$ANY" = 1 ] || ANY=""
 ONLY="${OC_DONE_ONLY:-}"
 DONE_VERIFY="${OC_DONE_VERIFY:-}"
 
@@ -45,10 +48,11 @@ last_commit=$(git -C "$REPO" log -1 --format=%ct -- . ':!MEMORY' ':!.fullrun' 2>
 [[ "$last_commit" =~ ^[0-9]+$ ]] || last_commit=0
 
 # --- a. stockage opencode (SQLite 1.19+ ou arbre JSON) ---
-storage=$(python3 - "$STORE" "$AGENTS" "$last_commit" <<'PY'
+storage=$(python3 - "$STORE" "$AGENTS" "$last_commit" "$ANY" <<'PY'
 import glob, json, os, shutil, sqlite3, stat, subprocess, sys
 
 store, agents_arg, last_commit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+any_mode = sys.argv[4] == '1'
 agents = [a for a in agents_arg.split(',') if a]
 # Verdict : UNE seule règle, celle du pipeline lifeos (parseReviewVerdict), lue via son CLI
 # LIFEOS/TOOLS/FullRunVerdict.ts (stdin -> pass|fail|unknown, code 0/1/3). Ce script ne réimplémente
@@ -264,6 +268,23 @@ def check(max_agent):
     return 'model'
 
 
+if any_mode:
+    # Job borné : au moins un agent autorisé de l'étape doit avoir rendu un vrai PASS. On liste
+    # tous ceux qui passent a pour que la vérification b (hooks) puisse en retenir un.
+    passing = []
+    first = None
+    for agent in agents:
+        why = check(agent)
+        if not why:
+            passing.append(agent)
+        elif first is None:
+            first = (agent, why)
+    if passing:
+        print('OK:%s' % ','.join(passing))
+        sys.exit(0)
+    agent, why = first
+    print('KO:%s' % ('none:%s' % agent if why == 'none' else why))
+    sys.exit(0)
 for agent in agents:
     why = check(agent)
     if why:
@@ -273,12 +294,16 @@ for agent in agents:
 print('OK')
 PY
 ) || ko a:stockage
-[ "$storage" = OK ] || ko "a:${storage#KO:}"
+storage_agents=""
+case "$storage" in
+  OK) ;;
+  OK:*) storage_agents="${storage#OK:}" ;;
+  *) ko "a:${storage#KO:}" ;;
+esac
 
 # --- b. hooks.log : ligne du plugin PAR agent exigé, postérieure au dernier commit de code ---
-IFS=',' read -r -a agent_list <<<"$AGENTS"
-for ag in "${agent_list[@]}"; do
-  hooks_ok=0
+agent_hook_ok() { # $1 = agent ; true si un SUBAGENT done postérieur au dernier commit existe
+  local ag="$1" hooks_ok=0 ts epoch line
   if [ -f "$HOOKS" ]; then
     while IFS= read -r line; do
       case "$line" in *"SUBAGENT done subagent_type=$ag ok=true"*) ;; *) continue ;; esac
@@ -287,8 +312,23 @@ for ag in "${agent_list[@]}"; do
       if [ "$epoch" -gt "$last_commit" ]; then hooks_ok=1; break; fi
     done <"$HOOKS"
   fi
+  [ "$hooks_ok" -eq 1 ]
+}
+IFS=',' read -r -a agent_list <<<"$AGENTS"
+if [ -n "$storage_agents" ] && [ "$ANY" = 1 ]; then
+  # Mode ANY : un agent suffit, mais il doit avoir réussi a ET b (pas un PASS d'un agent et le
+  # hook d'un autre).
+  IFS=',' read -r -a agent_list <<<"$storage_agents"
+  hooks_ok=0
+  for ag in "${agent_list[@]}"; do
+    if agent_hook_ok "$ag"; then hooks_ok=1; break; fi
+  done
   [ "$hooks_ok" -eq 1 ] || ko b:hooks
-done
+else
+  for ag in "${agent_list[@]}"; do
+    agent_hook_ok "$ag" || ko b:hooks
+  done
+fi
 [ "$ONLY" = verdict ] && ok
 
 # --- c. vérificateurs relancés (fichier ou liste séparée par des `;`) ---

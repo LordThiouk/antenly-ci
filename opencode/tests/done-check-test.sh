@@ -289,6 +289,18 @@ out=$(call2 "$T/s12e"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12e
 out=$(call "$T/s12a" OC_DONE_AGENTS=Max OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ok" ] && ok 12f "done_agents=Max, Max présent : ok" || ko "12f [$out]"
 mkstore2 "$T/s12g" "Silas:$ENDP"
 out=$(call "$T/s12g" OC_DONE_AGENTS=Max OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12g "done_agents=Max, aucun Max : a:none:Max" || ko "12g [$out]"
+# ANY (job borné) : un seul agent autorisé doit avoir rendu un vrai PASS ; a et b portent sur le MÊME agent.
+out=$(call "$T/s12a" OC_DONE_AGENTS=Max,Silas OC_DONE_AGENTS_ANY=1 OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ok" ] && ok 12h "ANY : Max seul parmi Max,Silas -> ok" || ko "12h [$out]"
+out=$(call "$T/s12b" OC_DONE_AGENTS=Max,Silas OC_DONE_AGENTS_ANY=1 OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ok" ] && ok 12i "ANY : Silas seul parmi Max,Silas -> ok" || ko "12i [$out]"
+out=$(call "$T/s12e" OC_DONE_AGENTS=Max,Silas OC_DONE_AGENTS_ANY=1 OC_HOOKS_LOG="$HOOKS2"); [ "$out" = "done_check=ko raison=a:none:Max" ] && ok 12j "ANY : aucun agent -> a:none:Max" || ko "12j [$out]"
+HOOKS_MAX_ONLY="$T/hooks-max.log"
+printf '%s SUBAGENT done subagent_type=Max ok=true session=s call=c\n' \
+  "$(date -u -d "@$((COMMIT + 5))" +%Y-%m-%dT%H:%M:%S.000Z)" >"$HOOKS_MAX_ONLY"
+out=$(call "$T/s12c" OC_DONE_AGENTS=Max,Silas OC_DONE_AGENTS_ANY=1 OC_HOOKS_LOG="$HOOKS_MAX_ONLY"); [ "$out" = "done_check=ok" ] && ok 12k "ANY : Max (a+b) suffit même si le hook de Silas manque" || ko "12k [$out]"
+HOOKS_SILAS_ONLY="$T/hooks-silas.log"
+printf '%s SUBAGENT done subagent_type=Silas ok=true session=s call=c\n' \
+  "$(date -u -d "@$((COMMIT + 5))" +%Y-%m-%dT%H:%M:%S.000Z)" >"$HOOKS_SILAS_ONLY"
+out=$(call "$T/s12c" OC_DONE_AGENTS=Max,Silas OC_DONE_AGENTS_ANY=1 OC_HOOKS_LOG="$HOOKS_SILAS_ONLY"); [ "$out" = "done_check=ok" ] && ok 12l "ANY : un agent sans hook n'empêche pas un autre agent (a+b)" || ko "12l [$out]"
 
 # Max PASS sur un ancien état : du code a changé APRÈS lui -> refus (a:time), même si Silas est frais.
 cp -r "$R" "$T/repo2"; ( cd "$T/repo2" && echo apres >b.txt && git add -A \

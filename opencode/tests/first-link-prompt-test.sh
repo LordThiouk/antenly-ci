@@ -87,9 +87,9 @@ run_prep() { # $1 = prompt_path brut, $2 = prompt effectif, $3 = chain_enabled, 
   # prep consomme la référence distante (usage unique, supprimée en fin d'étape) : la recréer.
   ( cd "$T/antenly" && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       git update-ref refs/remotes/origin/fullrun-prompts refs/heads/fullrun-prompts )
-  : >"$T/gout"
-  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" GITHUB_OUTPUT="$T/gout" RUNNER_TEMP="$T" \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  : >"$T/gout"; : >"$T/genv"
+  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" GITHUB_OUTPUT="$T/gout" GITHUB_ENV="$T/genv" \
+    RUNNER_TEMP="$T" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     ANTENLY_DIR="$T/antenly" CI_DIR="$T/ci" OC_WORK="$T/oc" \
     IN_BRANCH=feat/x IN_JOB=job1 IN_PROMPT="$1" IN_PROMPT_EFFECTIVE="$2" \
     IN_CHAIN_ENABLED="$3" IN_CHAIN_PHASE="$4" IN_NEXT= \
@@ -97,17 +97,17 @@ run_prep() { # $1 = prompt_path brut, $2 = prompt effectif, $3 = chain_enabled, 
     OC_REPORT="$T/oc/REPORT.md" OC_BRANCH=feat/x \
     bash "$T/prep.sh" >"$T/prep.out" 2>"$T/prep.err"
 }
-run_prep prompts:p.md prompts:b.md true build
-if rg -q '^PROMPT-BUILD$' "$T/oc/prompt.md" && ! rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
+run_prep prompts:p.md prompts:b.md true build; rc=$?
+if [ "$rc" -eq 0 ] && rg -q '^PROMPT-BUILD$' "$T/oc/prompt.md" && ! rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
   ok "prep chaîné (build) : le prompt du job est prompt_path_build, pas le gros prompt plan"
 else
-  ko "prep chaîné : mauvais prompt — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null) prompt=$(tail -n 3 "$T/oc/prompt.md" 2>/dev/null)"
+  ko "prep chaîné (rc=$rc) : mauvais prompt ou échec de prep — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null) prompt=$(tail -n 3 "$T/oc/prompt.md" 2>/dev/null)"
 fi
-run_prep prompts:p.md prompts:p.md false plan
-if rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
+run_prep prompts:p.md prompts:p.md false plan; rc=$?
+if [ "$rc" -eq 0 ] && rg -q '^PROMPT-PLAN$' "$T/oc/prompt.md"; then
   ok "prep hors chaîne : prompt_path inchangé"
 else
-  ko "prep hors chaîne : prompt absent — $(cat "$T/prep.err")"
+  ko "prep hors chaîne (rc=$rc) : prompt absent — out=$(cat "$T/prep.out" 2>/dev/null) err=$(cat "$T/prep.err" 2>/dev/null)"
 fi
 
 # --- 3. Un seul endroit qui décide : prep lit l'effectif, chain ne recalcule plus de prompt ----------
