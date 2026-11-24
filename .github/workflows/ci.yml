@@ -254,8 +254,8 @@ jobs:
           persist-credentials: false
       # ripgrep n'est plus fourni par l'image ubuntu-latest : les tests shell l'appellent (rg -q), et le step
       # extrait par preflight-test.sh tourne avec PATH=/usr/bin:/bin, d'où apt (binaire dans /usr/bin).
-      - name: Installer ripgrep (tests shell)
-        run: sudo apt-get update && sudo apt-get install -y ripgrep && rg --version | head -1
+      - name: Installer ripgrep et age (tests shell)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep age && rg --version | head -1 && age --version
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.4"
