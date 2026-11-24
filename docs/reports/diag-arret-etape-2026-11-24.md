@@ -52,20 +52,25 @@ Nouveau `opencode/step-agents.sh` (sourçable ou exécutable) :
 
 ### 2. Workflow (livré en patch)
 
-Le premier correctif a été appliqué au workflow par le commit `f932b62` ; les corrections de la
-revue du 24/11 sont livrées dans le patch **incrémental**
-`docs/patches/fix-pr52-2026-11-24.patch`, applicable avec `git apply` sur le HEAD de la branche.
+Les premier et deuxième correctifs ont été appliqués au workflow par les commits `f932b62` (patch
+`diag-arret-etape`) et `1790416` (patch `fix-pr52`) : ces deux patchs sont donc **déjà dans HEAD** et
+ne doivent plus être réappliqués. Les corrections de la revue du 24/11 qui restaient ouvertes sont
+livrées dans le patch **incrémental** `docs/patches/fix-pr52-r2-2026-11-24.patch`, applicable avec
+`git apply` sur le HEAD actuel de la branche (workflow non modifié directement).
 
-Le premier patch :
+Le correctif complet (premiers patchs + r2) :
 
 - met `done_agents` à vide par défaut et accepte le vide dans la garde ;
 - calcule `OC_DONE_AGENTS_EFFECTIVE` dans le step de préparation : `done_agents` explicite, sinon
-  `target_agent` (prioritaire, car c'est l'agent réellement dispatché), sinon la liste des agents
-  autorisés de `stop_after_step`, sinon `Max` ;
+  dans un job borné `target_agent` (prioritaire, car c'est l'agent réellement dispatché), sinon la
+  liste des agents autorisés de `stop_after_step`, sinon `Max` ; hors job borné, `Max` reste maître
+  même si `target_agent` est fourni (chaînage manuel inchangé) ;
 - pose `OC_DONE_AGENTS_ANY=1` pour un job borné : un seul PASS parmi les agents autorisés suffit ;
 - ajoute au prompt une section **« Étape finale imposée »** avec l'étape et le même agent que celui
   qui est dispatché (`target_agent` s'il est fourni, sinon la liste autorisée), plus l'interdiction
   explicite de lancer l'étape suivante ;
+- rend `stop_after_step` exclusif avec le chaînage : le step « Décision de chaînage » termine la
+  chaîne sans `gh workflow run` dès que l'input est posé, avant toute lecture d'état ;
 - utilise l'agent effectif dans le préflight, le step `oc`, le validateur final et le dispatch du
   chaînage.
 
@@ -77,21 +82,30 @@ Sans PASS de l'agent de l'étape, le job rend `127` (`arret=tour-fini`) et écri
 
 ### 4. Test et documentation
 
-- `opencode/tests/stop-after-step-test.sh` : mapping, application du patch, calcul de l'agent
-  effectif, consigne de prompt, consommation par le workflow et deux scénarios bout en bout du
-  wrapper (PASS → arrêt immédiat ; pas de PASS → aucune reprise).
-- `README.md` : `done_agents` vide par défaut, mapping, et arrêt sans reprise des jobs bornés.
+- `opencode/tests/stop-after-step-test.sh` : mapping, application du seul patch incrémental r2 sur
+  une copie du workflow de HEAD (les patchs déjà intégrés ne sont plus rejoués), calcul de l'agent
+  effectif, consigne de prompt, consommation par le workflow, absence de dispatch du lien suivant
+  avec `stop_after_step` + `chain_enabled=true`, et deux scénarios bout en bout du wrapper
+  (PASS → arrêt immédiat ; pas de PASS → aucune reprise).
+- `opencode/tests/first-link-prompt-test.sh` : ne dépend plus de `rg` (grep -E), donc plus de faux
+  échec quand ripgrep manque localement.
+- `README.md` : `done_agents` vide par défaut, mapping, arrêt sans reprise des jobs bornés et
+  exclusivité `stop_after_step`/chaînage.
 
 ## Vérifications
 
-- `bash opencode/tests/stop-after-step-test.sh` : **39 OK, 0 KO**.
-- Workflow patché appliqué temporairement, puis suites existantes :
-  `preflight-test.sh` 24 OK / 0 KO ;
-  `chain-step-test.sh`, `start-step-test.sh`, `turn-end-test.sh`, `prompt-contract-test.sh`,
-  `first-link-prompt-test.sh` : OK.
+- `bash opencode/tests/stop-after-step-test.sh` : **40 OK, 0 KO** (patch r2 appliqué sur une copie
+  du workflow de HEAD).
+- Workflow patché (r2) appliqué temporairement, puis suites existantes :
+  `first-link-prompt-test.sh` 13 OK / 0 KO ; `chain-step-test.sh`, `start-step-test.sh`,
+  `turn-end-test.sh`, `prompt-contract-test.sh` : OK.
+- `preflight-test.sh` reste dépendant de `rg` et du CLI lifeos (limites d'environnement local ; la
+  CI installe ripgrep et le CLI épinglé).
 - `bash -n` sur `run-fullrun.sh`, `step-agents.sh`, `done_check.sh` et tous les blocs `run` du
   workflow : OK.
-- `git apply --check docs/patches/fix-pr52-2026-11-24.patch` sur le HEAD de la branche : OK.
+- `git apply --check docs/patches/fix-pr52-r2-2026-11-24.patch` sur le HEAD de la branche : OK.
+- `git apply --check docs/patches/fix-pr52-2026-11-24.patch` sur HEAD : échoue, attendu (déjà
+  appliqué) ; le test ne le rejoue plus.
 
 Échecs restants de la suite complète, **indépendants de ce correctif** et liés à l'environnement
 local : `done-check-test.sh` exige le dépôt lifeos voisin (`FullRunVerdict.ts`/`FullRunVerdictParse.ts`)
@@ -106,18 +120,21 @@ La CI installe ces outils et ne présente pas ces limites.
   explicitement.
 - La consigne de prompt réduit fortement le risque, mais un modèle peut encore dépasser son tour ;
   dans ce cas le wrapper s'arrête sans reprise (127) au lieu de continuer le pipeline.
-- Le patch workflow (premier patch déjà appliqué, correctifs de revue en patch incrémental) doit
-  être présent pour que `stop_after_step` prenne effet côté GitHub Actions.
+- Le patch workflow r2 (les deux premiers patchs sont déjà dans HEAD) doit être appliqué pour que
+  l'exclusivité `stop_after_step`/chaînage et le comportement `target_agent` hors job borné prennent
+  effet côté GitHub Actions.
 
 ## Fichiers
 
-- `opencode/step-agents.sh` (mapping ; `--list` pour les agents autorisés)
+- `opencode/step-agents.sh` (mapping ; le mode par défaut et `--list` renvoient la même liste
+  complète des agents autorisés)
 - `opencode/run-fullrun.sh`
 - `opencode/done_check.sh` (`OC_DONE_AGENTS_ANY=1`)
 - `opencode/tests/stop-after-step-test.sh`
-- `opencode/tests/first-link-prompt-test.sh` (`GITHUB_ENV` fourni au prep)
+- `opencode/tests/first-link-prompt-test.sh` (`GITHUB_ENV` fourni au prep, sans dépendance à `rg`)
 - `opencode/tests/done-check-test.sh` (mode ANY)
 - `docs/patches/diag-arret-etape-2026-11-24.patch` (premier patch, appliqué par `f932b62`)
-- `docs/patches/fix-pr52-2026-11-24.patch` (correctifs de la revue, incrémental)
+- `docs/patches/fix-pr52-2026-11-24.patch` (deuxième patch, appliqué par `1790416`)
+- `docs/patches/fix-pr52-r2-2026-11-24.patch` (correctifs de la revue restants, incrémental sur HEAD)
 - `docs/reports/diag-arret-etape-2026-11-24.md` (ce rapport)
 - `README.md`

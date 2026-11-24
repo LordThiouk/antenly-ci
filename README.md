@@ -335,18 +335,22 @@ démons).
   stockage opencode (tokens d'un modèle `-free`, PASS explicite, postérieure au dernier commit de
   code) et la ligne `SUBAGENT done` du plugin. Un PASS écrit par l'agent principal (message, fichier,
   checkpoint) ne compte pas ; `checkpoint.sh verdict` refuse de l'enregistrer. Verdict manquant ≠ PASS.
-  `done_agents` est vide par défaut : l'agent exigé est alors `target_agent` s'il est fourni
-  (l'agent réellement dispatché prime), sinon tout agent autorisé de l'étape `stop_after_step`
-  (un seul PASS suffit, `OC_DONE_AGENTS_ANY=1`) : scaffold/completeness_pre/vera → `Algorithm`,
-  serena → `Architect`, build → `Designer`/`Aditi`/`Engineer`/`Forge`/`Anvil`, verify →
-  `code-reviewer`/`Forge`/`Silas`, max/close → `Max` ; hors job borné, `Max`. Le mapping est
-  centralisé dans `opencode/step-agents.sh` (même source pour le prompt, le préflight, le run et le
-  validateur).
+  `done_agents` est vide par défaut : dans un job borné (`stop_after_step`), l'agent exigé est
+  `target_agent` s'il est fourni (l'agent réellement dispatché prime), sinon tout agent autorisé de
+  l'étape `stop_after_step` (un seul PASS suffit, `OC_DONE_AGENTS_ANY=1`) :
+  scaffold/completeness_pre/vera → `Algorithm`, serena → `Architect`, build →
+  `Designer`/`Aditi`/`Engineer`/`Forge`/`Anvil`, verify → `code-reviewer`/`Forge`/`Silas`,
+  max/close → `Max` ; hors job borné (y compris `chain_enabled=false` avec `target_agent`), `Max`,
+  comportement historique inchangé. Le mapping est centralisé dans `opencode/step-agents.sh`
+  (même source pour le prompt, le préflight, le run et le validateur ; son mode par défaut renvoie
+  la liste complète des agents autorisés, jamais un seul agent plus étroit que la règle).
   Le verdict est lu par le CLI lifeos `LIFEOS/TOOLS/FullRunVerdict.ts` (source unique, même règle que le pipeline). En production `done_check.sh` n'exécute qu'UN couple : `/opt/fullrun-tools/FullRunVerdict.js` (bundle construit à l'étape de gel, échec dur s'il manque) par `/opt/fullrun-tools/bun` avec `/opt/fullrun-tools/bunfig.toml` (vide), dans ce dossier et avec un environnement minimal ; chaque fichier et chaque dossier parent y sont à root, sans lien symbolique ni droit d'écriture pour le groupe ou les autres. `OC_VERDICT_CLI`/`OC_BUN` ne valent que sous `OC_DONE_TEST_MODE=1` (scripts de test ; sous GITHUB_ACTIONS, seulement avec le marqueur root `/etc/fullrun-done-test-mode` posé par `ci.yml`), et chaque appelant (workflow, `run-fullrun.sh`, `checkpoint.sh`) les vide ; aucun repli `~/.claude`. Règle : `pass` = code 0 et sortie `pass`, `unknown` (code 3) = inconclusif, CLI inutilisable = `a:verdict-cli`, jamais PASS.
 - *Un job borné s'arrête à son étape.* Avec `stop_after_step`, le prompt reçoit une consigne
   explicite (« étape finale imposée », agent validateur nommé, aucune étape suivante) et
   `run-fullrun.sh` ne relance jamais de session de reprise : sans PASS de l'agent de l'étape, le job
   s'arrête en `127` (`arret=tour-fini`, `stop_after_no_resume=<étape>`) au lieu de dérouler la suite.
+  `stop_after_step` est exclusif avec le chaînage : même si `chain_enabled=true` est fourni par
+  erreur, le step de chaînage termine la chaîne sans `gh workflow run` (aucun lien suivant).
 
 Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
 réduit : seuil 3 s, activité 9 s).

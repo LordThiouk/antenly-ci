@@ -3,15 +3,16 @@
 # réellement dispatché (target_agent prioritaire) ou de tout agent autorisé de l'étape
 # (vera -> Algorithm, serena -> Architect, build -> Designer/Aditi/Engineer/Forge/Anvil,
 # verify -> code-reviewer/Forge/Silas, max/close -> Max), le prompt doit ordonner l'arrêt,
-# et aucune reprise ne doit dérouler les étapes suivantes. Le workflow étant livré en patch
-# incrémental (docs/patches), ce test l'applique d'abord sur la version de HEAD, dans une copie
-# jetable : c'est la version patchée qui est vérifiée.
+# et aucune reprise ne doit dérouler les étapes suivantes. Les deux premiers patchs de la branche
+# (diag-arret-etape, fix-pr52) sont déjà présents dans HEAD : seul le patch incrémental r2 est
+# appliqué, sur une copie jetable du workflow de HEAD, puis c'est cette version patchée qui est
+# vérifiée. Ne jamais réappliquer les patchs déjà intégrés (échec garanti « patch does not apply »).
 #   opencode/tests/stop-after-step-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 WF="$ROOT/.github/workflows/opencode-fullrun.yml"
-PATCH="$ROOT/docs/patches/fix-pr52-2026-11-24.patch"
+PATCH="$ROOT/docs/patches/fix-pr52-r2-2026-11-24.patch"
 STEP="$ROOT/opencode/step-agents.sh"
 RUN="$ROOT/opencode/run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -22,43 +23,43 @@ ko() { echo "FAIL $*"; fail=1; }
 [ -f "$PATCH" ] || { echo "FAIL patch introuvable : $PATCH"; exit 1; }
 [ -f "$STEP" ] || { echo "FAIL mapping introuvable : $STEP"; exit 1; }
 
-# --- 1. mapping étape -> agent(s) (source unique, utilisée par le workflow) -----------------------
+# --- 1. mapping étape -> agents autorisés (source unique, utilisée par le workflow) ---------------
 mapping_ok=1
-while read -r step agent agents; do
+while read -r step agents; do
   got=$(bash "$STEP" "$step" 2>/dev/null) || got="(erreur)"
   got_list=$(bash "$STEP" --list "$step" 2>/dev/null) || got_list="(erreur)"
-  [ "$got" = "$agent" ] || { ko "mapping $step -> '$got' au lieu de '$agent'"; mapping_ok=0; }
+  [ "$got" = "$agents" ] || { ko "mapping $step -> '$got' au lieu de '$agents'"; mapping_ok=0; }
   [ "$got_list" = "$agents" ] || { ko "mapping --list $step -> '$got_list' au lieu de '$agents'"; mapping_ok=0; }
 done <<'MAP'
-0 Algorithm Algorithm
-scaffold Algorithm Algorithm
-1 Algorithm Algorithm
-completeness_pre Algorithm Algorithm
-2 Algorithm Algorithm
-vera Algorithm Algorithm
-3 Architect Architect
-serena Architect Architect
-4 Forge Designer,Aditi,Engineer,Forge,Anvil
-build Forge Designer,Aditi,Engineer,Forge,Anvil
-5 Silas code-reviewer,Forge,Silas
-verify Silas code-reviewer,Forge,Silas
-6 Max Max
-max Max Max
-7 Max Max
-close Max Max
+0 Algorithm
+scaffold Algorithm
+1 Algorithm
+completeness_pre Algorithm
+2 Algorithm
+vera Algorithm
+3 Architect
+serena Architect
+4 Designer,Aditi,Engineer,Forge,Anvil
+build Designer,Aditi,Engineer,Forge,Anvil
+5 code-reviewer,Forge,Silas
+verify code-reviewer,Forge,Silas
+6 Max
+max Max
+7 Max
+close Max
 MAP
-[ "$mapping_ok" -eq 1 ] && ok "mapping : les 8 étapes (noms et 0-7) désignent le bon agent et la bonne liste"
+[ "$mapping_ok" -eq 1 ] && ok "mapping : les 8 étapes (noms et 0-7) désignent la bonne liste d'agents autorisés"
 bash "$STEP" deploy >/dev/null 2>&1; [ "$?" -eq 64 ] && ok "mapping : étape inconnue refusée (64)" || ko "mapping : étape inconnue acceptée"
 bash "$STEP" --list deploy >/dev/null 2>&1; [ "$?" -eq 64 ] && ok "mapping : étape inconnue refusée pour --list (64)" || ko "mapping --list : étape inconnue acceptée"
 
-# --- 2. appliquer le patch incrémental sur la version de HEAD (copie jetable) --------------------
+# --- 2. appliquer le patch incrémental r2 sur la version de HEAD (copie jetable) ------------------
 mkdir -p "$T/repo/.github/workflows"
 git -C "$ROOT" show HEAD:.github/workflows/opencode-fullrun.yml >"$T/repo/.github/workflows/opencode-fullrun.yml" \
   || { echo "FAIL impossible de lire le workflow de HEAD"; exit 1; }
 if ( cd "$T/repo" && git apply "$PATCH" ) 2>"$T/apply.err"; then
-  ok "patch incrémental : git apply sur le workflow de HEAD"
+  ok "patch incrémental r2 : git apply sur le workflow de HEAD"
 else
-  ko "patch incrémental : git apply impossible ($(tr '\n' ' ' <"$T/apply.err"))"
+  ko "patch incrémental r2 : git apply impossible ($(tr '\n' ' ' <"$T/apply.err"))"
 fi
 PF="$T/repo/.github/workflows/opencode-fullrun.yml"
 
@@ -126,7 +127,9 @@ check_eff Designer "target_agent prioritaire sur stop_after_step (build)" OC_STO
 check_any "" "target_agent prioritaire : ANY vide" OC_STOP_AFTER_STEP=build OC_TARGET_AGENT=Designer
 check_eff code-reviewer "target_agent prioritaire sur stop_after_step (verify)" OC_STOP_AFTER_STEP=verify OC_TARGET_AGENT=code-reviewer
 check_eff Anvil "target_agent Anvil accepté en build" OC_STOP_AFTER_STEP=build OC_TARGET_AGENT=Anvil
-check_eff Silas "target_agent sans stop_after_step" OC_TARGET_AGENT=Silas
+# Hors job borné, le défaut historique Max reste maître même si target_agent limite le dispatch :
+# le chaînage manuel (chain_enabled=false, sans stop_after_step) ne change pas de validateur.
+check_eff Max "target_agent sans stop_after_step : Max (comportement inchangé)" OC_TARGET_AGENT=Silas
 
 # --- 5. consigne d'arrêt injectée dans le prompt (bloc réellement publié) -------------------------
 extract_block prep "# BEGIN stop-after-prompt" "# END stop-after-prompt" "$T/prompt-block.sh" \
@@ -166,6 +169,32 @@ grep -qF 'done_agents="${OC_DONE_AGENTS_EFFECTIVE:-${IN_DONE_AGENTS:-Max}}"' "$P
   && ok "workflow : chaînage transmet l'agent effectif" || ko "workflow : chaînage ignore l'agent effectif"
 grep -qF 'OC_DONE_AGENTS_EFFECTIVE' "$PF" && ok "workflow : la valeur effective est posée et consommée" \
   || ko "workflow : OC_DONE_AGENTS_EFFECTIVE absent"
+
+# --- 6b. chaînage : un job borné ne dispatche jamais le lien suivant --------------------------------
+# Le step chain est extrait du workflow patché et exécuté avec IN_STOP_AFTER_STEP : l'arrêt doit être
+# décidé AVANT bun/unit et avant tout gh workflow run (aucun outil n'est disponible ici).
+python3 - "$PF" "$T/chain.sh" <<'PY' || fail=1
+import sys, yaml
+wf, out = sys.argv[1], sys.argv[2]
+y = yaml.safe_load(open(wf))
+step = next(s for s in y["jobs"]["fullrun"]["steps"] if s.get("id") == "chain")
+open(out, "w").write("#!/usr/bin/env bash\nset -euo pipefail\n" + step["run"])
+PY
+chmod +x "$T/chain.sh" 2>/dev/null || true
+: >"$T/chain.out"; : >"$T/chain.summary"
+if env -i PATH="/usr/bin:/bin" HOME="$T" GITHUB_OUTPUT="$T/chain.out" GITHUB_STEP_SUMMARY="$T/chain.summary" \
+     IN_CHAIN_PROGRESS=0/20 IN_STOP_AFTER_STEP=vera \
+     bash "$T/chain.sh" >/dev/null 2>"$T/chain.err"; then
+  grep -qx 'block=false' "$T/chain.out" && grep -qx 'continue=false' "$T/chain.out" \
+    && grep -q 'stop_after_step=vera' "$T/chain.out" \
+    && ok "chaînage : stop_after_step + chain_enabled=true -> aucun lien suivant dispatché" \
+    || ko "chaînage : arrêt non tracé ($(tr '\n' ' ' <"$T/chain.out"))"
+else
+  ko "chaînage : le step chain échoue avec stop_after_step ($(tr '\n' ' ' <"$T/chain.err"))"
+fi
+grep -qF 'IN_STOP_AFTER_STEP: ${{ inputs.stop_after_step }}' "$PF" \
+  && ok "chaînage : l'input stop_after_step est épinglé dans le step chain" \
+  || ko "chaînage : input stop_after_step non épinglé dans le step chain"
 
 # --- 7. bout en bout du wrapper : l'agent de l'étape arrête le job, sans reprise -------------------
 rm -rf "$T/repo-ant"; mkdir -p "$T/repo-ant" "$T/store" "$T/agents" "$T/internals"; : >"$T/prompt.md"
