@@ -84,10 +84,15 @@ fi
 # fois : la skill FullRunWorkflow (LordThiouk/lifeos) lit ces deux variables et les passe à
 # `FullRunPipeline.ts unit` via --stop-after-step/--agent. Vide = rien n'est exporté (run complet).
 unset FULLRUN_STOP_AFTER_STEP FULLRUN_TARGET_AGENT
-if [ -n "${OC_STOP_AFTER_STEP:-}" ]; then
-  [[ "$OC_STOP_AFTER_STEP" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
+# Job borné à UNE étape : aucune reprise ne doit dérouler les étapes suivantes. La variable est
+# aussi transmise à LifeOS (FullRunWorkflow lit FULLRUN_STOP_AFTER_STEP), mais la garde CI ne peut
+# pas dépendre d'un agent : si la première passe ne rend pas le PASS de l'étape, le job s'arrête
+# (127, tour-fini) au lieu de relancer une session qui continuerait le pipeline.
+STOP_AFTER="${OC_STOP_AFTER_STEP:-}"
+if [ -n "$STOP_AFTER" ]; then
+  [[ "$STOP_AFTER" =~ ^(scaffold|completeness_pre|vera|serena|build|verify|max|close|[0-7])$ ]] \
     || { echo "OC_STOP_AFTER_STEP invalide" >&2; exit 90; }
-  export FULLRUN_STOP_AFTER_STEP="$OC_STOP_AFTER_STEP"
+  export FULLRUN_STOP_AFTER_STEP="$STOP_AFTER"
 fi
 if [ -n "${OC_TARGET_AGENT:-}" ]; then
   [[ "$OC_TARGET_AGENT" =~ ^[A-Za-z][A-Za-z0-9_-]{0,39}$ ]] \
@@ -742,7 +747,13 @@ esac
 
 # --- Reprises : sonde --continue puis session neuve, modèle de repli ---
 STALLS=0
-while [ "$need_resume" -eq 1 ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remaining)" -gt 900 ]; do
+if [ -n "$STOP_AFTER" ] && [ "$need_resume" -eq 1 ]; then
+  # Une reprise repartirait du point de reprise et pourrait ouvrir l'étape SUIVANTE : un job
+  # borné ne le fait jamais. Le premier tour est le seul ; sans PASS de l'étape, échec nommé.
+  printf '[stall] job borné à l'\''étape %s : aucune reprise (pas d'\''étape suivante)\n' "$STOP_AFTER" >>"$OC_LOG"
+  echo "stop_after_no_resume=$STOP_AFTER" >>"$OC_LOG.status"
+fi
+while [ "$need_resume" -eq 1 ] && [ -z "$STOP_AFTER" ] && [ "$STALLS" -lt "$MAX_RESUMES" ] && [ "$(remaining)" -gt 900 ]; do
   STALLS=$((STALLS + 1))
   m="${CHAIN[$(( (STALLS - 1) % ${#CHAIN[@]} ))]}"
   printf '\n[stall] fin de tour ou silence, reprise %s/%s\n' "$STALLS" "$MAX_RESUMES" >>"$OC_LOG"
