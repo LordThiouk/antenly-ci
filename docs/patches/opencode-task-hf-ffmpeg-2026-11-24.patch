@@ -1,0 +1,121 @@
+diff --git a/.github/workflows/opencode-task.yml b/.github/workflows/opencode-task.yml
+index e5c99a7..b07f1b6 100644
+--- a/.github/workflows/opencode-task.yml
++++ b/.github/workflows/opencode-task.yml
+@@ -45,6 +45,11 @@ on:
+         description: "Durée max d'exécution opencode en minutes (10 à 90)"
+         type: string
+         default: "45"
++      with_hf_corpus:
++        description: "Télécharger le corpus HF privé (cible antenly) avant opencode"
++        type: boolean
++        required: false
++        default: false
+ 
+ permissions:
+   contents: read
+@@ -248,6 +253,95 @@ jobs:
+           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" /usr/local/bin/gitleaks
+           gitleaks version
+ 
++      # ffmpeg/ffprobe : le banc fingerprint décode des .opus. Même schéma que
++      # opencode-fullrun.yml (binaire statique épinglé, secours apt). Cible antenly.
++      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
++        id: ffmpeg
++        if: ${{ inputs.target_repo == 'antenly' }}
++        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6  # v3.1
++        continue-on-error: true
++        timeout-minutes: 10
++        with:
++          ffmpeg-version: release
++      - name: ffmpeg (secours apt)
++        if: ${{ inputs.target_repo == 'antenly' && steps.ffmpeg.outcome != 'success' }}
++        timeout-minutes: 10
++        run: sudo apt-get update && sudo apt-get install -y ffmpeg
++      - name: Vérifier ffmpeg et ffprobe
++        if: ${{ inputs.target_repo == 'antenly' }}
++        run: |
++          command -v ffmpeg >/dev/null || { echo "::error::ffmpeg absent du PATH"; exit 1; }
++          command -v ffprobe >/dev/null || { echo "::error::ffprobe absent du PATH"; exit 1; }
++          ffmpeg -version | head -1
++          ffprobe -version | head -1
++
++      - name: Installer la CLI Hugging Face (cible antenly)
++        if: ${{ inputs.target_repo == 'antenly' }}
++        run: |
++          export PATH="$HOME/.local/bin:$PATH"
++          if command -v uv >/dev/null 2>&1; then
++            uv tool install --force "huggingface_hub[cli]" >/dev/null 2>&1 || true
++          fi
++          if ! command -v hf >/dev/null 2>&1 && ! command -v huggingface-cli >/dev/null 2>&1; then
++            python3 -m pip install --user --break-system-packages -U "huggingface_hub[cli]" >/dev/null 2>&1 || true
++          fi
++          command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 \
++            || echo "::warning::CLI Hugging Face absente ; le corpus restera indisponible"
++
++      - name: Télécharger le corpus HF (cible antenly, optionnel)
++        id: hf_corpus
++        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus }}
++        continue-on-error: true
++        timeout-minutes: 30
++        env:
++          HF_TOKEN: ${{ secrets.HF_TOKEN }}
++        run: |
++          set +x
++          export PATH="$HOME/.local/bin:$PATH"
++          DEST="$RUNNER_TEMP/corpus/antenly-corpus"
++          case "$DEST" in
++            "$GITHUB_WORKSPACE/target"|"$GITHUB_WORKSPACE/target/"*) echo "::error::le corpus ne doit jamais être dans target/"; exit 1;;
++          esac
++          mkdir -p "$RUNNER_TEMP/corpus"
++          if [ -z "${HF_TOKEN:-}" ]; then
++            {
++              echo "### Corpus HF (optionnel)"
++              echo ""
++              echo "Corpus non téléchargé : le secret \`HF_TOKEN\` est absent."
++            } >> "$GITHUB_STEP_SUMMARY"
++            exit 0
++          fi
++          set +e
++          if command -v hf >/dev/null 2>&1; then
++            hf download LordThiouk/antenly-corpus --repo-type dataset --local-dir "$DEST" >/dev/null 2>&1
++          else
++            huggingface-cli download LordThiouk/antenly-corpus --repo-type dataset --local-dir "$DEST" >/dev/null 2>&1
++          fi
++          rc=$?
++          set -e
++          if [ "$rc" -ne 0 ] || [ ! -d "$DEST" ]; then
++            {
++              echo "### Corpus HF (optionnel)"
++              echo ""
++              echo "Téléchargement du corpus indisponible (rc=$rc) : la tâche continue sans corpus."
++            } >> "$GITHUB_STEP_SUMMARY"
++            exit 0
++          fi
++          chmod -R a-w "$DEST"
++          echo "ANTENLY_CORPUS_DIR=$DEST" >> "$GITHUB_ENV"
++          cat <<CTX >> "$RUNNER_TEMP/oc/prompt.md"
++
++          ## Corpus radio Hugging Face (lecture seule)
++          - Le corpus privé \`LordThiouk/antenly-corpus\` (\`.opus\`) est disponible en lecture seule ici : \`$DEST\` (variable \`ANTENLY_CORPUS_DIR\`).
++          - Décode l'Opus avec ffmpeg/ffprobe ; ne modifie jamais le corpus (dossier en lecture seule, hors dépôt cible).
++          CTX
++          {
++            echo "### Corpus HF (optionnel)"
++            echo ""
++            echo "- Corpus téléchargé : \`$DEST\` (lecture seule, \`chmod -R a-w\`)."
++            echo "- Exposé à opencode via \`ANTENLY_CORPUS_DIR\`, hors de \`target/\` : jamais vu par la porte gitleaks/push."
++          } >> "$GITHUB_STEP_SUMMARY"
++
+       - name: Configurer opencode (sans FullRun ni secrets)
+         run: |
+           cat <<'CFG' > "$RUNNER_TEMP/oc/opencode.json"
+@@ -279,6 +373,8 @@ jobs:
+ 
+       - name: Exécuter la tâche opencode
+         id: oc
++        env:
++          HF_TOKEN: ${{ inputs.target_repo == 'antenly' && secrets.HF_TOKEN || '' }}
+         run: |
+           export PATH="$HOME/.local/bin:$PATH"
+           export OPENCODE_CONFIG="$RUNNER_TEMP/oc/opencode.json"

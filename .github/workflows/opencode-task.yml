@@ -45,6 +45,16 @@ on:
         description: "Durée max d'exécution opencode en minutes (10 à 90)"
         type: string
         default: "45"
+      with_hf_corpus:
+        description: "Télécharger le corpus HF privé (cible antenly) avant opencode"
+        type: boolean
+        required: false
+        default: false
+      hf_corpus:
+        description: "Si with_hf_corpus : chemin, sur la branche cible, de la liste de fichiers du corpus (400 max)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -247,6 +257,154 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gl" && tar -xzf "$f" -C "$RUNNER_TEMP/gl" gitleaks
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/gl/gitleaks" /usr/local/bin/gitleaks
           gitleaks version
+
+      # ffmpeg/ffprobe : le banc fingerprint décode des .opus. Même schéma que
+      # opencode-fullrun.yml (binaire statique épinglé, secours apt). Cible antenly.
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg
+        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus }}
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6  # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus && steps.ffmpeg.outcome != 'success' }}
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Vérifier ffmpeg et ffprobe
+        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus }}
+        run: |
+          command -v ffmpeg >/dev/null || { echo "::error::ffmpeg absent du PATH"; exit 1; }
+          command -v ffprobe >/dev/null || { echo "::error::ffprobe absent du PATH"; exit 1; }
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Installer la CLI Hugging Face (cible antenly)
+        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          if command -v uv >/dev/null 2>&1; then
+            uv tool install --force "huggingface_hub[cli]" >/dev/null 2>&1 || true
+          fi
+          if ! command -v hf >/dev/null 2>&1 && ! command -v huggingface-cli >/dev/null 2>&1; then
+            python3 -m pip install --user --break-system-packages -U "huggingface_hub[cli]" >/dev/null 2>&1 || true
+          fi
+          command -v hf >/dev/null 2>&1 || command -v huggingface-cli >/dev/null 2>&1 \
+            || echo "::warning::CLI Hugging Face absente ; le corpus restera indisponible"
+
+      - name: Télécharger le corpus HF (cible antenly, optionnel)
+        id: hf_corpus
+        if: ${{ inputs.target_repo == 'antenly' && inputs.with_hf_corpus }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_CORPUS: ${{ inputs.hf_corpus }}
+          HF_REPO: LordThiouk/antenly-corpus
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+        run: |
+          set +x
+          export PATH="$HOME/.local/bin:$PATH"
+          DEST="$RUNNER_TEMP/corpus/antenly-corpus"
+          warn() {
+            echo "::warning::$1"
+            {
+              echo "### Corpus HF (optionnel)"
+              echo ""
+              echo "$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          case "$DEST" in
+            "$GITHUB_WORKSPACE/target"|"$GITHUB_WORKSPACE/target/"*) echo "::error::le corpus ne doit jamais être dans target/"; exit 1;;
+          esac
+          [ -n "${HF_TOKEN:-}" ] || warn "Corpus demandé (\`with_hf_corpus=true\`) mais le secret \`HF_TOKEN\` est absent : la tâche continue sans corpus."
+          [ -n "${HF_CORPUS:-}" ] || warn "Corpus demandé (\`with_hf_corpus=true\`) mais l'entrée \`hf_corpus\` (liste de fichiers) est vide : la tâche continue sans corpus."
+          case "$HF_CORPUS" in
+            /*|*..*) warn "Entrée \`hf_corpus\` invalide (chemin absolu ou \`..\` interdit) : la tâche continue sans corpus.";;
+          esac
+          [[ "$HF_CORPUS" =~ ^[A-Za-z0-9._/-]+$ ]] || warn "Entrée \`hf_corpus\` invalide (caractères admis : lettres, chiffres, . _ / -) : la tâche continue sans corpus."
+          LIST="$GITHUB_WORKSPACE/target/$HF_CORPUS"
+          [ -f "$LIST" ] || warn "Liste \`hf_corpus\` introuvable sur la branche : la tâche continue sans corpus."
+          mkdir -p "$RUNNER_TEMP/corpus"
+          # Liste assainie : une entrée par ligne, doublons retirés, plafond 400 fichiers.
+          LIST_OUT="$RUNNER_TEMP/corpus/antenly-corpus.list"
+          if ! LIST_FILE="$LIST" LIST_OUT="$LIST_OUT" python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          MAX_FILES = 400
+          src = Path(os.environ["LIST_FILE"])
+          out = Path(os.environ["LIST_OUT"])
+          paths, seen, bad = [], set(), []
+          for n, raw in enumerate(src.read_text(encoding="utf-8", errors="strict").splitlines(), 1):
+              line = raw.strip()
+              if not line:
+                  continue
+              if line.startswith("/"):
+                  bad.append(f"ligne {n} : chemin absolu interdit")
+                  continue
+              if ".." in line.split("/"):
+                  bad.append(f"ligne {n} : '..' interdit")
+                  continue
+              if "\\" in line or any(ord(c) < 32 for c in line):
+                  bad.append(f"ligne {n} : caractère interdit")
+                  continue
+              if line not in seen:
+                  seen.add(line)
+                  paths.append(line)
+          if bad:
+              for m in bad[:20]:
+                  print(f"::warning::hf_corpus invalide : {m}")
+              print(f"::warning::hf_corpus invalide : {len(bad)} ligne(s) refusée(s)")
+              sys.exit(1)
+          if not paths:
+              print("::warning::hf_corpus : liste vide (aucun fichier à télécharger)")
+              sys.exit(1)
+          if len(paths) > MAX_FILES:
+              print(f"::warning::hf_corpus : {len(paths)} fichiers, plafond {MAX_FILES}")
+              sys.exit(1)
+          out.write_text("\n".join(paths) + "\n", encoding="utf-8")
+          os.chmod(out, 0o600)
+          print(f"hf_corpus : {len(paths)} fichier(s) validé(s)")
+          PY
+          then
+            warn "Liste \`hf_corpus\` refusée (voir avertissements ci-dessus) : la tâche continue sans corpus."
+          fi
+          mapfile -t names < "$LIST_OUT"
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          set +e
+          if command -v hf >/dev/null 2>&1; then
+            hf download "$HF_REPO" "${names[@]}" --repo-type dataset --local-dir "$DEST" >/dev/null 2>&1
+          else
+            huggingface-cli download "$HF_REPO" "${names[@]}" --repo-type dataset --local-dir "$DEST" >/dev/null 2>&1
+          fi
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ] || [ ! -d "$DEST" ]; then
+            rm -rf "$DEST" "$LIST_OUT"
+            warn "Téléchargement du corpus indisponible (rc=$rc) : la tâche continue sans corpus."
+          fi
+          rm -f "$LIST_OUT"
+          chmod -R a-w "$DEST"
+          echo "ANTENLY_CORPUS_DIR=$DEST" >> "$GITHUB_ENV"
+          cat <<CTX >> "$RUNNER_TEMP/oc/prompt.md"
+
+          ## Corpus radio Hugging Face (lecture seule)
+          - Le corpus privé \`LordThiouk/antenly-corpus\` (\`.opus\`) est disponible en lecture seule ici : \`$DEST\` (variable \`ANTENLY_CORPUS_DIR\`).
+          - Décode l'Opus avec ffmpeg/ffprobe ; ne modifie jamais le corpus (dossier en lecture seule, hors dépôt cible).
+          CTX
+          nfiles=$(find "$DEST" -type f ! -path '*/.cache/*' | wc -l | tr -d ' ')
+          {
+            echo "### Corpus HF (optionnel)"
+            echo ""
+            echo "- Corpus téléchargé : $nfiles fichier(s) dans \`$DEST\` (lecture seule, \`chmod -R a-w\`)."
+            echo "- Exposé à opencode via \`ANTENLY_CORPUS_DIR\`, hors de \`target/\` : jamais vu par la porte gitleaks/push."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Configurer opencode (sans FullRun ni secrets)
         run: |
