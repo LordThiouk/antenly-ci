@@ -2,138 +2,171 @@
 
 ## Objet
 
-Revue de la branche `fix/diag-arret-etape-2026-11-24` (HEAD `2f40055`) contre `origin/main`
+Revue de la branche `fix/diag-arret-etape-2026-11-24` (HEAD `43283bd`) contre `origin/main`
 (`5647624`), sur le diagnostic `docs/reports/diag-arret-etape-2026-11-24.md`, le diff de la branche
 (`.github/workflows/opencode-fullrun.yml`, `opencode/run-fullrun.sh`, `opencode/step-agents.sh`,
 `opencode/done_check.sh`, `opencode/tests/stop-after-step-test.sh`) et les patches
 `docs/patches/*.patch`.
 
-Cette revue remplace la précédente : les trois patches (`diag-arret-etape`, `fix-pr52`,
-`fix-pr52-r2`) sont désormais appliqués dans HEAD, le dernier par le commit `2f40055`.
+Les correctifs des revues précédentes sont désormais dans HEAD : `f932b62`, `1790416`,
+`2f40055`, puis `43283bd` qui applique `fix-pr52-r3`.
 
 Verdict : À CORRIGER
 
 ## Problèmes
 
-### 1. Bloquant — `stop-after-step-test.sh` applique le patch r2 sur un HEAD qui le contient déjà
+### 1. Moyen — le rapport de diagnostic est obsolète sur l'état du patch r3
 
 - Fichiers/lignes :
-  - `opencode/tests/stop-after-step-test.sh:55-63` (extrait le workflow de HEAD puis `git apply` de r2)
-  - `docs/patches/fix-pr52-r2-2026-11-24.patch` (contenu déjà présent dans HEAD)
-  - `.github/workflows/opencode-fullrun.yml:68-71,651-673,1837-1842` (version déjà patchée)
-  - HEAD `2f40055` (« applique tel quel docs/patches/fix-pr52-r2-2026-11-24.patch »)
-- Gravité : **bloquant**.
-
-Le test lit le workflow de HEAD, puis applique `fix-pr52-r2` sur cette copie. Or HEAD contient déjà
-ce patch : l'application échoue forcément. Exécution réelle sur HEAD :
-
-```
-FAIL patch incrémental r2 : git apply impossible (error: patch failed: .github/workflows/opencode-fullrun.yml:68 ...)
-39 OK, 1 FAIL, exit 1
-```
-
-et `git apply --check docs/patches/fix-pr52-r2-2026-11-24.patch` renvoie 1 sur HEAD. La séquence
-complète `diag-arret-etape` → `fix-pr52` → `fix-pr52-r2` s'applique bien sur `origin/main` et produit
-un workflow identique à celui de HEAD (vérifié sur une copie temporaire). `.github/workflows/ci-scripts.yml:76`
-exécute tous les `opencode/tests/*-test.sh` et `stop-after-step-test.sh` n'est pas dans
-`OC_CI_KNOWN_FAILING` : la CI de la PR échouera.
-
-Attendu : tester directement le workflow de HEAD, ou rejouer la séquence de patches sur `origin/main`,
-ou supprimer le patch devenu redondant. Aucun correctif n'a été appliqué dans cette revue.
-
-### 2. Moyen — le rapport de diagnostic annonce des vérifications fausses
-
-- Fichiers/lignes :
-  - `docs/reports/diag-arret-etape-2026-11-24.md:97-98` (« 40 OK, 0 KO »)
-  - `docs/reports/diag-arret-etape-2026-11-24.md:106` (`git apply --check` de r2 sur HEAD « OK »)
-  - `docs/reports/diag-arret-etape-2026-11-24.md:53-59` (r2 « applicable sur le HEAD actuel »)
-  - `docs/reports/diag-arret-etape-2026-11-24.md:85-89` (application de r2 sur une copie de HEAD)
+  - `docs/reports/diag-arret-etape-2026-11-24.md:59-64` (« patch incrémental applicable avec
+    `git apply` sur le HEAD actuel », « workflow non modifié directement »)
+  - `docs/reports/diag-arret-etape-2026-11-24.md:119` (`git apply --check` de r3 sur HEAD « OK »)
+  - `docs/reports/diag-arret-etape-2026-11-24.md:145-146` (« doit être appliqué »)
+  - `.github/workflows/opencode-fullrun.yml:2043-2048` (contrôle r3 présent)
+  - HEAD `43283bd` (« applique tel quel docs/patches/fix-pr52-r3-2026-11-24.patch »)
 - Gravité : **moyen**.
 
-Sur HEAD, le test donne **39 OK / 1 FAIL** (exit 1), pas 40 OK / 0 KO, et `git apply --check` de r2
-échoue. Le rapport décrit donc un état qui n'est plus celui de la branche et masque le problème
-bloquant ci-dessus.
+Le rapport décrit encore r3 comme un patch non appliqué. Or HEAD contient déjà le contrôle du
+statut final borné chaîné, et `git apply --check docs/patches/fix-pr52-r3-2026-11-24.patch`
+échoue sur HEAD (patch déjà appliqué), comme pour les trois patches précédents. Le rapport doit
+être mis à jour : r3 est intégré, le patch est historique, et la vérification « `git apply --check`
+r3 : OK » n'est plus vraie.
 
-### 3. Moyen — un job borné combiné à `chain_enabled=true` peut finir vert sans PASS
+### 2. Moyen — `target_agent` contourne le mapping étape → agents sans contrôle d'appartenance
 
 - Fichiers/lignes :
-  - `.github/workflows/opencode-fullrun.yml:1840-1842` (`finish_chain` dès que `stop_after_step` est posé)
-  - `.github/workflows/opencode-fullrun.yml:2025-2043` (branche « chaîné » du statut final : `exit 0` sans contrôle de `DONE`)
-  - `opencode/run-fullrun.sh:751-757,811-813` (sans PASS : `127`, `arret=tour-fini`)
+  - `.github/workflows/opencode-fullrun.yml:38-39` (description : « un seul agent de l'étape
+    visée »)
+  - `.github/workflows/opencode-fullrun.yml:269-272` (la garde ne valide que le charset)
+  - `.github/workflows/opencode-fullrun.yml:657-671` (`target_agent` prioritaire sur le mapping)
+  - `.github/workflows/opencode-fullrun.yml:678-686` (le prompt impose cet agent)
+  - `opencode/step-agents.sh:22-35` (liste autorisée par étape)
+  - `opencode/tests/stop-after-step-test.sh:117-120` (seuls des `target_agent` valides sont testés)
 - Gravité : **moyen**.
 
-Quand `stop_after_step` et `chain_enabled=true` sont fournis ensemble, le wrapper peut rendre `127`
-sans PASS, puis le step « Décision de chaînage » termine la chaîne (`block=false`, `continue=false`).
-Le step « Statut final » prend alors la branche chaînée et sort **0** sans jamais vérifier `DONE` :
-le job borné est arrêté (aucun lien suivant dispatché, l'exigence principale est tenue) mais il peut
-être vert sans le verdict exigé, contrairement au même job borné en `chain_enabled=false`
-(`.github/workflows/opencode-fullrun.yml:2045-2050`).
+Avec `stop_after_step`, `target_agent` est utilisé tel quel comme validateur, sans vérifier qu'il
+appartient à la liste autorisée de l'étape. Vérifié sur le bloc réel de prep :
 
-Attendu : refuser la combinaison dans la garde, ou faire contrôler `DONE`/le PASS au statut final
-lorsque `stop_after_step` est posé, même en mode chaîné.
+```
+stop_after_step=vera  target_agent=Max       -> OC_DONE_AGENTS_EFFECTIVE=Max
+stop_after_step=build target_agent=Silas     -> OC_DONE_AGENTS_EFFECTIVE=Silas
+stop_after_step=verify target_agent=Designer -> OC_DONE_AGENTS_EFFECTIVE=Designer
+```
 
-### 4. Faible — l'arrêt strict à l'étape reste dépendant du prompt pour le travail intra-tour
+Le job peut donc exiger le PASS d'un agent hors de la règle de Papa (Max pour vera, Silas pour
+build, etc.), et le prompt lui demande de dispatcher cet agent. Le préflight ne le refuse que
+lorsque `isa_path` est fourni ; un job borné sans ISA passe la garde. Attendu : refuser un
+`target_agent` absent de `opencode/step-agents.sh` pour l'étape visée, ou l'intersecter avec la
+liste autorisée, avant de le publier dans `OC_DONE_AGENTS_EFFECTIVE`, et couvrir ce cas dans
+`stop-after-step-test.sh`.
+
+### 3. Faible — en borné + chaîné, `finish_chain` court-circuite les portes d'échec du chaînage
 
 - Fichiers/lignes :
-  - `.github/workflows/opencode-fullrun.yml:677-699` (consigne « Étape finale imposée »)
-  - `opencode/run-fullrun.sh:737,751-757,811-813` (`maybe_finish`/fin de tour, puis pas de reprise)
-- Gravité : **faible** (limite documentée dans le diagnostic).
+  - `.github/workflows/opencode-fullrun.yml:1837-1842` (`finish_chain` dès que
+    `IN_STOP_AFTER_STEP` est posé, avant `CHECK_OUTCOME`, `PUSH_OUTCOME`, `save_state`,
+    `restore_state` et `OC_STOP`)
+  - `.github/workflows/opencode-fullrun.yml:2043-2048` (statut final : seul `DONE=ok` est exigé)
+- Gravité : **faible**.
 
-La reprise et le lien suivant sont bien bloqués, mais la seule barrière contre le passage à l'étape
-suivante **dans le même tour** est la consigne du prompt. Si le modèle écrit l'étape suivante avant
-de rendre la main, `maybe_finish` constate le PASS de l'étape cible et sort 0 après ce travail
-supplémentaire (scénario du run `45328234540`). La consigne réduit fortement le risque, sans le
-supprimer ; ce n'est pas un blocage de cette revue.
+Un job borné lancé avec `chain_enabled=true` termine la chaîne immédiatement, sans évaluer les
+portes placées plus bas. Les échecs de `check`/`push`/`save_state`/`publish_state` font encore
+échouer le job par le statut du step, mais un `restore_state` refusé (le step sort 0 avec
+`status=refused`) ou un `OC_STOP` anormal (`erreur`, `silence`, `plafond`, `vide`, `annulation`,
+sortie absente ; le step `oc` est `continue-on-error`) ne sont plus bloquants si `DONE=ok`.
+Vérifié en exécutant les blocs réels : `IN_STOP_AFTER_STEP=vera` + `OC_STOP=erreur` +
+`DONE=ok` donne `rc=0` au statut final. Le même job borné non chaîné échoue (`OC_OUTCOME`
+n'est pas `success`). Attendu : évaluer les portes peu coûteuses (`CHECK_OUTCOME`,
+`PUSH_OUTCOME`, `OC_STOP`, statut de restauration) avant le `finish_chain` du job borné, ou les
+revérifier dans le statut final.
 
-## Risque résiduel (non bloquant)
+### 4. Faible — le contrôle r3 n'est pas couvert par le test permanent
 
-En mode ANY, `opencode/done_check.sh:271-287` accepte le PASS de n'importe quel agent autorisé de
-l'étape, pas nécessairement celui réellement dispatché. Les garde-fous « postérieur au dernier commit
-de code » et `hooks.log` limitent le risque, mais la formulation du prompt (« celui de l'agent
-dispatché ») est plus stricte que le validateur.
+- Fichiers/lignes :
+  - `opencode/tests/stop-after-step-test.sh:164-188` (teste l'arrêt anticipé du chaînage, pas le
+    statut final r3)
+  - `docs/reports/diag-arret-etape-2026-11-24.md:100` (r3 validé seulement sur un worktree
+    temporaire)
+- Gravité : **faible**.
+
+Le test permanent ne vérifie pas qu'un job borné chaîné sans PASS échoue au statut final. Le
+contrôle r3 peut donc régresser sans être détecté. Un scénario borné + `chain_enabled=true` +
+`DONE=ko` (exit 1) et `DONE=ok` (exit 0), exécuté sur le bloc « Statut final » extrait, serait
+utile.
+
+### 5. Faible — la description de `target_agent` contredit le mode ANY du job borné
+
+- Fichiers/lignes :
+  - `.github/workflows/opencode-fullrun.yml:38-39` (« vide = tous les agents requis de l'étape »)
+  - `.github/workflows/opencode-fullrun.yml:657-673` et `README.md:338-341` (vide + borné =
+    un seul PASS parmi les agents autorisés, `OC_DONE_AGENTS_ANY=1`)
+- Gravité : **faible**.
+
+Sans `target_agent`, un job borné ne requiert plus tous les agents de l'étape mais un seul PASS
+parmi eux. La description de l'input n'a pas été mise à jour et induit en erreur.
+
+### 6. Faible — le mapping de `scaffold`/`completeness_pre` reste une hypothèse
+
+- Fichiers/lignes :
+  - `opencode/step-agents.sh:25-26` (`scaffold` et `completeness_pre` → `Algorithm`)
+  - `docs/reports/diag-arret-etape-2026-11-24.md:134-135` (hypothèse reconnue)
+- Gravité : **faible**.
+
+La règle citée ne couvre que les étapes 2 à 7. Si `FullRunPipeline.ts` n'utilise pas `Algorithm`
+pour ces deux étapes, un job borné y échouera faute de PASS. L'hypothèse est documentée ; à
+confirmer côté lifeos.
 
 ## Points vérifiés
 
 - **Arrêt d'un job borné (sans chaînage)** : `opencode/run-fullrun.sh:91-95,751-757,813` désactive
   toute reprise quand `OC_STOP_AFTER_STEP` est posé ; sans PASS, sortie `127` / `arret=tour-fini` /
-  `stop_after_no_resume=<étape>`. Les deux scénarios bout en bout du test (PASS → arrêt immédiat ;
-  pas de PASS → un seul tour, aucune reprise) passent.
+  `stop_after_no_resume=<étape>`. Les scénarios du test (PASS → arrêt immédiat ; pas de PASS → un
+  seul tour, aucune reprise) passent.
 - **Chaînage manuel (`chain_enabled=false`) inchangé** : sans `stop_after_step`, `done_agents` vide
   retombe sur `Max` même si `target_agent` est fourni
-  (`.github/workflows/opencode-fullrun.yml:668-670`), comportement couvert par
-  `opencode/tests/stop-after-step-test.sh:130-132` (OK). `chain-step-test.sh` et `start-step-test.sh`
-  passent.
-- **Mapping par étape conforme à la règle de Papa** : `opencode/step-agents.sh:22-40` couvre
+  (`.github/workflows/opencode-fullrun.yml:657-671`), couvert par
+  `opencode/tests/stop-after-step-test.sh:123`.
+- **Mapping 2-7 conforme à la règle de Papa** : `opencode/step-agents.sh:22-35` donne
   vera → `Algorithm`, serena → `Architect`, build → `Designer,Aditi,Engineer,Forge,Anvil`,
-  verify → `code-reviewer,Forge,Silas`, max/close → `Max`. Les deux accesseurs (mode par défaut et
-  `--list`) renvoient la même liste complète : aucun agent fixe (Forge pour build, Silas pour verify)
-  ne peut plus bloquer un job légitime. Un `target_agent` unique reste voulu : c'est l'agent
-  réellement dispatché.
-- **Agent effectif** : calculé une fois dans le step prep
-  (`.github/workflows/opencode-fullrun.yml:657-673`) puis consommé par le préflight (l. 740), le step
-  `oc` (l. 1114-1115), le validateur final (l. 1522-1523) et le dispatch du chaînage (l. 1971).
-- **Mode ANY** : `opencode/done_check.sh:271-331` exige qu'un même agent satisfasse a et b ; les
-  tests `12h` à `12l` de `done-check-test.sh` encodent ce comportement (non exécutables ici, `bun`
-  absent).
+  verify → `code-reviewer,Forge,Silas`, max/close → `Max`. Le mode par défaut et `--list`
+  renvoient la même liste complète : aucun agent fixe (Forge pour build, Silas pour verify)
+  n'est imposé par défaut. Le seul agent fixe possible vient d'un `target_agent` explicite
+  (problème 2).
+- **Mode ANY** : `opencode/done_check.sh:271-289` exige qu'un même agent satisfasse a et b. Test
+  ad hoc avec un faux CLI/bun (voir plus bas) : `Max` seul ou `Silas` seul parmi
+  `Max,Silas` → `done_check=ok` ; mode non-ANY → `a:none:Silas` / `a:none:Max`.
+- **Statut final r3** : extrait et exécuté sur le workflow courant ; borné chaîné + `DONE=ko` →
+  `rc=1` ; borné chaîné + `DONE=ok` → `rc=0` ; non borné + `DONE=ko` → `rc=0` (comportement
+  historique).
 - **Pas de secret introduit** : `gitleaks detect --source . --log-opts="origin/main..HEAD"` :
-  aucun leak. Le seul résultat d'un scan complet de l'historique
-  (`opencode/tests/hmac-state-test.sh:20`, clé de test factice) est antérieur à la branche et déjà
-  sur `origin/main`.
+  aucun leak.
 - **`bash -n`** : OK sur `run-fullrun.sh`, `step-agents.sh`, `done_check.sh`,
   `stop-after-step-test.sh`.
+- **`shellcheck -S error`** : OK sur ces mêmes scripts.
+
+## Risque résiduel (non bloquant)
+
+- En mode ANY, `opencode/done_check.sh:271-289` accepte le PASS de n'importe quel agent autorisé de
+  l'étape, pas nécessairement celui réellement dispatché. Les garde-fous « postérieur au dernier
+  commit de code » et `hooks.log` limitent le risque, mais la formulation du prompt (« celui de
+  l'agent dispatché ») est plus stricte que le validateur.
+- L'arrêt intra-tour reste dépendant du prompt et de la surveillance `done_check` : si le modèle
+  écrit l'étape suivante avant la coupure, du travail supplémentaire peut être produit. La reprise
+  et le lien suivant sont bien bloqués ; la limite est documentée dans le diagnostic.
 
 ## Tests exécutés (environnement local, 24/11/2026)
 
-- `bash opencode/tests/stop-after-step-test.sh` : **39 OK, 1 FAIL, exit 1** — problème 1.
-- `bash opencode/tests/chain-step-test.sh` : OK, exit 0.
-- `bash opencode/tests/start-step-test.sh` : OK, exit 0.
-- `bash opencode/tests/turn-end-test.sh` : OK, exit 0.
-- `bash opencode/tests/prompt-contract-test.sh` : OK, exit 0.
-- `bash opencode/tests/first-link-prompt-test.sh` : OK, exit 0.
-- `bash opencode/tests/preflight-test.sh` : échoue localement faute de `rg` (5 ok, 20 ko), limite
-  d'environnement ; la CI installe ripgrep et le CLI lifeos épinglé.
-- `bash opencode/tests/done-check-test.sh` : non exécutable localement (`bun` absent ; présent en
-  CI).
-- `git apply --check` : r2 échoue sur HEAD (déjà appliqué) ; la séquence
-  `diag-arret-etape` → `fix-pr52` → `fix-pr52-r2` s'applique sur `origin/main` et reproduit le
-  workflow de HEAD à l'identique.
+- `bash opencode/tests/stop-after-step-test.sh` : **39 OK, 0 FAIL, exit 0**.
+- `bash opencode/tests/chain-step-test.sh` : exit 0.
+- `bash opencode/tests/start-step-test.sh` : exit 0.
+- `bash opencode/tests/first-link-prompt-test.sh` : exit 0.
+- `bash opencode/tests/turn-end-test.sh` : exit 0.
+- `bash opencode/tests/prompt-contract-test.sh` : exit 0.
+- `bash opencode/tests/preflight-test.sh` : 5 OK / 20 FAIL, exit 1, à cause de `rg` absent
+  localement (limite d'environnement ; la CI installe ripgrep).
+- `bash opencode/tests/done-check-test.sh` : non exécutable localement (`bun` absent). Les cas ANY
+  ont été vérifiés à part avec un faux CLI/bun : `Max` seul et `Silas` seul parmi `Max,Silas` →
+  `done_check=ok` ; mode non-ANY → `a:none:Silas` / `a:none:Max`.
+- `git apply --check` des patches `diag-arret-etape`, `fix-pr52`, `fix-pr52-r2` et `fix-pr52-r3`
+  sur HEAD : échec attendu (déjà appliqués).
+- `gitleaks detect` sur `origin/main..HEAD` : aucun leak.
