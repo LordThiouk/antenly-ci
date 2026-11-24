@@ -1,0 +1,8 @@
+# Modèles opencode gratuits, par ordre de priorité (un par ligne).
+# Toute ligne non vide et non commentée doit respecter ^opencode/[a-z0-9.-]+-free$
+opencode/deepseek-v4.1-flash-free
+opencode/mimo-v2.6-flash-free
+opencode/iceman-free
+opencode/nemotron-3.5-lightning-free
+opencode/beam-free
+opencode/hy4-flash-free

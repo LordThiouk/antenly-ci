@@ -1,0 +1,137 @@
+name: Agent next (lifeos-ci)
+
+# Workflow réutilisable d'enchaînement FullRun.
+# Table : vera → serena → engineer → anvil → forge-code → aditi-ui → forge-audit
+#         → silas → code-review → max.
+# Ne déclenche le workflow suivant que si le statut est « ok » et que le fichier
+# fr-<phase>-<agent>.yml existe dans lifeos-ci. Jamais pour « quota ».
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: "Agent qui vient de terminer"
+        required: true
+        type: string
+      status:
+        description: "Statut du run précédent (ok, quota, timeout, vide, erreur)"
+        required: true
+        type: string
+      model:
+        description: "Modèle utilisé par le run précédent"
+        required: false
+        type: string
+        default: ""
+      head_sha:
+        description: "SHA du run précédent"
+        required: false
+        type: string
+        default: ""
+      target_repo:
+        required: true
+        type: string
+      extra_repos:
+        required: false
+        type: string
+        default: ""
+      lifeos_write:
+        required: false
+        type: boolean
+        default: false
+      branch:
+        required: true
+        type: string
+      prompt_path:
+        required: true
+        type: string
+      isa_path:
+        required: false
+        type: string
+        default: ""
+      job_name:
+        required: true
+        type: string
+      lifeos_ref:
+        required: false
+        type: string
+        default: "main"
+      timeout_minutes:
+        required: false
+        type: string
+        default: "45"
+    secrets:
+      CI_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  next:
+    if: github.actor == 'LordThiouk'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Enchaîner l'agent suivant (si autorisé)
+        env:
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
+          IN_AGENT: ${{ inputs.agent }}
+          STATUS: ${{ inputs.status }}
+          IN_TARGET: ${{ inputs.target_repo }}
+          IN_EXTRA: ${{ inputs.extra_repos }}
+          LIFEOS_WRITE: ${{ inputs.lifeos_write }}
+          IN_BRANCH: ${{ inputs.branch }}
+          IN_PROMPT: ${{ inputs.prompt_path }}
+          IN_ISA: ${{ inputs.isa_path }}
+          IN_JOB: ${{ inputs.job_name }}
+          LIFEOS_REF: ${{ inputs.lifeos_ref }}
+          IN_TIMEOUT_MIN: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          if [ "${STATUS:-}" != "ok" ]; then
+            if [ "${STATUS:-}" = "quota" ]; then
+              echo "fin de chaîne : statut quota, aucun lien suivant"
+            else
+              echo "fin de chaîne : statut ${STATUS:-inconnu}, aucun lien suivant"
+            fi
+            exit 0
+          fi
+          chain="vera serena engineer anvil forge-code aditi-ui forge-audit silas code-review max"
+          next_agent=""
+          found=0
+          for a in $chain; do
+            if [ "$found" -eq 1 ]; then
+              next_agent="$a"
+              break
+            fi
+            [ "$a" = "$IN_AGENT" ] && found=1
+          done
+          if [ -z "$next_agent" ]; then
+            echo "fin de chaîne : ${IN_AGENT:-?} est le dernier agent"
+            exit 0
+          fi
+          case "$next_agent" in
+            vera|serena) phase="plan" ;;
+            engineer|anvil|forge-code|aditi-ui) phase="build" ;;
+            forge-audit|silas|code-review) phase="verify" ;;
+            max) phase="close" ;;
+            *) echo "::error::phase inconnue pour $next_agent"; exit 1 ;;
+          esac
+          next_wf="fr-${phase}-${next_agent}.yml"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${next_wf}" >/dev/null 2>&1; then
+            echo "fin de chaîne : workflow suivant absent ($next_wf)"
+            exit 0
+          fi
+          gh workflow run "$next_wf" --repo "$GITHUB_REPOSITORY" \
+            -f target_repo="$IN_TARGET" \
+            -f extra_repos="$IN_EXTRA" \
+            -f lifeos_write="$LIFEOS_WRITE" \
+            -f branch="$IN_BRANCH" \
+            -f prompt_path="$IN_PROMPT" \
+            -f isa_path="$IN_ISA" \
+            -f job_name="$IN_JOB" \
+            -f lifeos_ref="$LIFEOS_REF" \
+            -f timeout_minutes="$IN_TIMEOUT_MIN"
+          echo "lien suivant dispatché : $next_wf ($next_agent, phase $phase)"

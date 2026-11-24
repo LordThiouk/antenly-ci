@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          shellcheck -x opencode/*.sh targets/*.sh
+
+      - name: Installer actionlint (binaire officiel épinglé)
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/actionlint.tgz"
+          curl -sSfL -o "$f" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf "$f" -C "$RUNNER_TEMP" actionlint
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Actionlint
+        run: |
+          set -euo pipefail
+          actionlint .github/workflows/*.yml
+
+      - name: Tests shell
+        run: |
+          set -euo pipefail
+          bash opencode/tests/run-all.sh

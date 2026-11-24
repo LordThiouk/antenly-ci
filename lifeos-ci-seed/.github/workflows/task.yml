@@ -1,0 +1,78 @@
+name: Task (lifeos-ci)
+run-name: Task ${{ inputs.job_name }} → ${{ inputs.target_repo }}@${{ inputs.branch }}
+
+# Tâche opencode simple : revues, correctifs, réglages. Aucun enchaînement.
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Dépôt cible (liste blanche targets/allowed-repos.sh)"
+        type: choice
+        required: true
+        default: antenly
+        options:
+          - antenly
+          - antenly-ci
+          - galass-ci
+          - Galass_Rider
+          - Galass_Driver
+          - Galass_backend
+          - galass-emu-actions-pub
+          - lifeos
+          - lifeos-ci
+      extra_repos:
+        description: "Dépôts supplémentaires, séparés par des virgules ou espaces (vide = aucun)"
+        type: string
+        required: false
+        default: ""
+      lifeos_write:
+        description: "Autoriser l'écriture vers LordThiouk/lifeos (branche + PR uniquement)"
+        type: boolean
+        required: false
+        default: false
+      branch:
+        description: "Branche de fonctionnalité du dépôt cible, déjà poussée (jamais main/master)"
+        type: string
+        required: true
+      prompt_path:
+        description: "prompts:<chemin sur fullrun-prompts de lifeos-ci> ou target:<chemin sur la branche cible>"
+        type: string
+        required: true
+      isa_path:
+        description: "Chemin optionnel de l'ISA sur la branche cible"
+        type: string
+        required: false
+        default: ""
+      job_name:
+        description: "Nom court du job (lettres, chiffres, - _ .)"
+        type: string
+        required: true
+      lifeos_ref:
+        description: "Réf lifeos cloné en référence"
+        type: string
+        required: false
+        default: "main"
+      timeout_minutes:
+        description: "Durée max d'exécution opencode en minutes (10 à 90)"
+        type: string
+        required: false
+        default: "45"
+
+permissions:
+  contents: read
+
+jobs:
+  task:
+    uses: ./.github/workflows/_agent-run.yml
+    with:
+      agent: task
+      target_repo: ${{ inputs.target_repo }}
+      extra_repos: ${{ inputs.extra_repos }}
+      lifeos_write: ${{ inputs.lifeos_write }}
+      branch: ${{ inputs.branch }}
+      prompt_path: ${{ inputs.prompt_path }}
+      isa_path: ${{ inputs.isa_path }}
+      job_name: ${{ inputs.job_name }}
+      lifeos_ref: ${{ inputs.lifeos_ref }}
+      timeout_minutes: ${{ inputs.timeout_minutes }}
+    secrets: inherit
