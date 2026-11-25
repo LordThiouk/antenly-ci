@@ -268,6 +268,7 @@ run_preannot() {
   job_name="preannot-ina"
   while [ "$(date +%s)" -lt "$deadline" ]; do
     view=$(view_run "$run_id") || fail "impossible de lire le run ${run_id}"
+    # shellcheck disable=SC2016
     eval "$(python3 -c '
 import json,sys,shlex
 d=json.loads(sys.argv[1])
@@ -285,6 +286,7 @@ print("s_job=%s" % shlex.quote(jc))
     status="$s_status"
     conclusion="$s_conclusion"
     url="$s_url"
+    # shellcheck disable=SC2154 # s_job est produit par l eval ci-dessus
     job_conclusion="$s_job"
     case "$status" in
       completed|cancelled) break ;;

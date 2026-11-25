@@ -772,3 +772,256 @@ exit=0
 ```
 
 `actionlint` doit être lancé depuis une copie du dossier à la racine : imbriqué sous `lifeos-ci-seed/`, il résout les `uses: ./.github/workflows/...` par rapport à la racine du dépôt `antenly-ci` et ne trouve pas les workflows locaux.
+
+## Fix2 (2026-11-25)
+
+Correctifs : preuve que tous les tests du socle tournent, restauration du test
+`allowed-repos-test.sh` d'origine (galass-ci) et correction des 3 défauts
+critiques de `REVIEW.md` (§2.1, §2.2, §2.3). Aucun défaut « élevé » traité.
+
+### Tests exécutés (un par ligne)
+
+```text
+allowed-repos-test.sh
+allowed-repos-lifeos-test.sh
+autosave-test.sh
+critical-state-isolation-test.sh
+critical-frozen-tools-test.sh
+critical-git-isolation-test.sh
+internals-test.sh
+lifeos-chain-test.sh
+lifeos-guard-test.sh
+memcap-livelog-test.sh
+memcap-test.sh
+notify-test.sh
+quota-test.sh
+redact-test.sh
+split-diff-test.sh
+subagent-fail-test.sh
+watchdog-test.sh
+```
+
+`opencode/tests/run-all.sh` ne découvre plus seulement par glob : il porte une
+liste explicite `TESTS` **et** vérifie qu'aucun `opencode/tests/*-test.sh`
+présent n'est absent de cette liste (échec si un fichier est oublié). Les 25
+tests déplacés dans `opencode/tests/upstream-fullrun/` ne sont pas des tests du
+socle : ils ciblent `opencode-fullrun.yml` (absent de lifeos-ci), `bun`/`age`
+(non installés par `ci.yml`) ou la politique galass-ci qui refuse `lifeos`.
+
+### Corrections de chemins et d'adaptation (A)
+
+| Fichier | Avant → après | Raison |
+| --- | --- | --- |
+| `opencode/tests/allowed-repos-test.sh:11` | `. "$here/allowed-repos.sh"` → `. "$here/../targets/allowed-repos.sh"` | Dans lifeos-ci, la liste blanche est dans `targets/`. |
+| `opencode/tests/allowed-repos-test.sh:13` | `.github/workflows/opencode-fullrun.yml` → `.github/workflows/task.yml` | lifeos-ci n'a pas `opencode-fullrun.yml` ; `task.yml` expose les `options:` de `target_repo`. |
+| `opencode/tests/allowed-repos-test.sh:25` | liste des refus `lifeos antenly-ci …` → `Galass_backendx main …` | `lifeos` et `antenly-ci` sont dans la liste étendue de lifeos-ci ; leurs cas positifs sont dans `allowed-repos-lifeos-test.sh`. |
+| `opencode/tests/allowed-repos-lifeos-test.sh` | nouveau | Cas propres aux 9 dépôts de lifeos-ci (voir B). |
+| `opencode/tests/run-all.sh` | glob `*-test.sh` → liste `TESTS` + contrôle de complétude | Prouver que chaque test du socle est lancé ; détecter tout oubli. |
+| `opencode/tests/upstream-fullrun/*` | 25 tests + `verdict-cli.lib` déplacés | Cibles absentes (workflow FullRun, outils FullRun, `bun`/`age`) ou assertions galass-ci incompatibles ; aucune assertion n'a été affaiblie. |
+| `opencode/checkpoint.sh:33` | `STATUS=done` → `STATUS="done"` | ShellCheck SC1010, sans changement de logique. |
+| `opencode/{checkpoint,run-fullrun}.sh` (source dynamique) | ajout `# shellcheck disable=SC1091` | ShellCheck ne suit pas `. "$DC_CALL_LIB"`. |
+| `opencode/{extra-repos,livelog,wippush}.sh` (source dynamique) | ajout `# shellcheck disable=SC1091` | ShellCheck ne suit pas `. "$allowed"` (repli `../targets/`). |
+| `opencode/preannot.sh:271,288` | ajout `# shellcheck disable=SC2016,SC2154` | Valeurs produites par `eval`/`python3` ; aucune logique modifiée. |
+| `opencode/run-fullrun.sh:705` | `disable=SC2317` → `SC2317,SC2329` | `on_cancel` est appelée par `trap` ; aucune logique modifiée. |
+
+### B — `allowed-repos-test.sh` d'origine et cas lifeos-ci
+
+`opencode/tests/allowed-repos-test.sh` est la version de
+`galass-ci/opencode/tests/allowed-repos-test.sh` restaurée par `cp`, adaptée
+uniquement aux chemins (liste dans `targets/`, workflow `task.yml`). Les cas de
+la liste étendue sont dans `opencode/tests/allowed-repos-lifeos-test.sh`.
+
+Pourquoi chaque cas ajouté est nécessaire :
+
+- `antenly` : cible historique et valeur par défaut des workflows.
+- `antenly-ci` : dépôt qui porte la branche et les PR de ce socle.
+- `galass-ci` : dépôt source des outils repris ; doit rester ciblable.
+- `Galass_Rider`, `Galass_Driver`, `Galass_backend`, `galass-emu-actions-pub` :
+  dépôts Galass repris de galass-ci.
+- `lifeos` : dépôt de référence ; accepté dans la liste, mais toute écriture
+  reste conditionnée par `lifeos_write` et `lifeos-guard.sh`.
+- `lifeos-ci` : dépôt qui héberge ces workflows.
+
+Le test lifeos vérifie aussi : `validate`/`normalize_extra_repos` (virgules,
+espaces, doublons, casse, chemins injectés), l'alignement des `options:` de
+`task.yml` **et** `fr-plan-vera.yml` sur `allowed_repos_list`, et l'absence de
+copie jointe par `|` de la liste étendue hors `targets/allowed-repos.sh`.
+
+### C — Protections des 3 défauts critiques
+
+Sources reprises (lecture seule) :
+
+- **C1** : `galass-ci/.github/workflows/opencode-fullrun.yml`, step
+  « Outils de contrôle figés (root, avant opencode) », lignes 756-830
+  (même modèle dans `antenly-ci/.github/workflows/opencode-fullrun.yml`,
+  lignes 866-925) : `sudo chmod go-w /opt`, `sudo install -d -o root -g root`,
+  copies root-owned, exécution post-opencode depuis `/opt/fullrun-tools`.
+  lifeos-ci reprend ce modèle avec `/opt/lifeos-ci-tools` et
+  `/opt/lifeos-ci-state` (`_agent-run.yml`, step « Outils de confiance figés »).
+- **C2** : `galass-ci/opencode/extra-repos.sh:82-99` (`run_git` :
+  `env -i`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_COUNT`, `core.hooksPath=/dev/null`) et `:293-346` (copie nue,
+  `push --no-verify`) ; `galass-ci/.github/workflows/opencode-fullrun.yml`
+  (env `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`, `G=(git -c
+  core.hooksPath=/dev/null -c core.fsmonitor=false)`) ;
+  `antenly-ci/.github/workflows/opencode-task.yml:310-339`
+  (`--redact`, merge-base, refus `.github/workflows`, push `--no-verify`).
+  lifeos-ci pousse depuis une copie nue avec `env -i` et les mêmes options.
+- **C3** : `galass-ci/.github/workflows/opencode-fullrun.yml` : les steps
+  post-opencode utilisent `${{ inputs.* }}` et `${{ steps.prep.outputs.base }}`,
+  jamais `$GITHUB_ENV` (commentaire « Valeurs du step > $GITHUB_ENV : opencode
+  ne peut ni changer la branche, ni la base… »). lifeos-ci applique le même
+  principe : output de validation immuable, état de départ root-owned, opencode
+  sous `env -i` avec `HOME`/`TMPDIR` dédiés, statut publié par un step séparé.
+
+Tests correspondants (sans réseau, sans secret) :
+
+- C1 : `opencode/tests/critical-frozen-tools-test.sh` — copie root **avant**
+  opencode, post-opencode uniquement via `$TOOLS_DIR` (garde-fou, gitleaks,
+  notification, quota).
+- C2 : `opencode/tests/critical-git-isolation-test.sh` — analyse du workflow
+  **et** preuve fonctionnelle : un `pre-push` et un `include.path` locaux ne
+  s'exécutent pas avec l'isolation utilisée ; contrôle négatif sans
+  `hooksPath=/dev/null`.
+- C3 : `opencode/tests/critical-state-isolation-test.sh` — `env -i` (aucun
+  `GITHUB_ENV`/`GITHUB_OUTPUT`/`GITHUB_PATH`/`RUNNER_TEMP`), état root relu,
+  SHA de base écrits avant opencode, output de validation immuable.
+
+### `bash opencode/tests/run-all.sh` (sortie brute)
+
+```text
+$ bash opencode/tests/run-all.sh
+==> allowed-repos-test.sh
+OK   allowed_repo : liste acceptée, hors liste refusée
+OK   options: target_repo du workflow alignées sur allowed_repos_list
+OK   aucune copie en dur de la liste hors allowed-repos.sh
+<== ok allowed-repos-test.sh
+==> allowed-repos-lifeos-test.sh
+OK   allowed_repo : les 9 dépôts de la liste étendue sont acceptés
+OK   validate : target lifeos + extra antenly-ci,galass-ci
+OK   normalize_extra_repos : espaces/virgules normalisés
+OK   validate : doublon, casse et chemin refusés
+OK   options: target_repo de task.yml et fr-plan-vera.yml alignées
+OK   aucune copie de la liste étendue hors allowed-repos.sh
+<== ok allowed-repos-lifeos-test.sh
+==> autosave-test.sh
+OK   aucun git add -A / . / --all : seuls des chemins nommés sont ajoutés
+OK   carry + checkpoint commités en wip(carry) ; l'index de l'agent reste tel quel (credentials.json toujours indexé, non commité)
+plugin absent : regex de référence
+OK   A. les messages wip(carry) et wip(autosave) ne déclenchent pas la porte de clôture
+OK   B. 16 fichiers interdits (.env, clés, keystore, google-services, comptes de service, secrets PSP, logs, vendor, apk, lien, gros, binaire) jamais commités ; 4 autorisés sauvés
+OK   B2. fichiers nommés :(top)*, :(glob)**, :(top), :^src : traités comme des noms ordinaires, keys.json et .env jamais commités
+OK   C. fuite : leak.py ni commité ni poussé (valeur absente partout), clean.py sauvé et poussé
+OK   C. un commit contenant une fuite bloque le push (contrôle de plage de wippush)
+OK   D. index.lock, autre branche, gitleaks absent (index remis), liste d'exclusion absente : rien commité
+OK   E. arbre propre : silence, aucun commit
+OK   F. ignoré (pas root ou setpriv absent)
+<== ok autosave-test.sh
+==> critical-state-isolation-test.sh
+OK   opencode isolé ; statut, modèle, SHA et dépôts recalculés hors de sa portée
+OK   env -i : GITHUB_ENV/GITHUB_OUTPUT/GITHUB_PATH/RUNNER_TEMP absents de l'enfant
+<== ok critical-state-isolation-test.sh
+==> critical-frozen-tools-test.sh
+OK   freeze root avant opencode, post-opencode via $TOOLS_DIR uniquement
+<== ok critical-frozen-tools-test.sh
+==> critical-git-isolation-test.sh
+OK   workflow : push isolé depuis une copie nue, hooks/config neutralisés
+OK   isolation : hook pre-push et include.path locaux neutralisés
+OK   contrôle négatif : le hook bloque bien sans hooksPath=/dev/null
+<== ok critical-git-isolation-test.sh
+==> internals-test.sh
+[memcap] mécanisme=cgroupv2 limite=10G
+ok 1 journaux internes collectés (ajoutés, canaris présents avant masquage)
+ok 2 canaris masqués par redact-log.sh
+ok 3 dossier de journaux internes absent -> run normal
+<== ok internals-test.sh
+==> lifeos-chain-test.sh
+PASS lifeos-chain-test : 23 cas
+<== ok lifeos-chain-test.sh
+==> lifeos-guard-test.sh
+PASS lifeos-guard-test : 23 cas
+<== ok lifeos-guard-test.sh
+==> memcap-livelog-test.sh
+OK   journal : [memcap] mécanisme=cgroupv2 limite=10G
+OK   stderr contient la même ligne [memcap]
+OK   MEMCAP_BYTES=2G → limite=2G
+PASS memcap-livelog : ligne [memcap] dans le journal et sur stderr
+<== ok memcap-livelog-test.sh
+==> memcap-test.sh
+OK   commande sous le cap : succès
+OK   eater tué, ligne [oom] et pic numérique (rc=137)
+OK   parent (test) toujours vivant après OOM du fils
+OK   bench-capped sans argument : exit 2 (usage)
+OK   command -v bench-capped trouve l'outil dans le PATH
+OK   prlimit : [oom] et pic numérique (rc=42)
+PASS memcap : cap mémoire, OOM, parent survit, [oom] journal, PATH, pic
+<== ok memcap-test.sh
+==> notify-test.sh
+PASS notify-test : 21 cas
+<== ok notify-test.sh
+==> quota-test.sh
+PASS quota-test : 8 cas
+<== ok quota-test.sh
+==> redact-test.sh
+ok 1 nom audio masqué en [REDACTED:audio-file]
+ok 2 aucun nom de fichier audio ne survit au masquage
+ok 3 lignes sans nom audio préservées
+ok 4 gitleaks : 0 finding sur le journal masqué
+<== ok redact-test.sh
+==> split-diff-test.sh
+ok 1a --out-dir manquant -> 64
+ok 1b --max-lines trop petit -> 64
+ok 2 diff vide -> un seul morceau vide
+ok 3 petit diff -> un seul morceau, fichier intact
+ok 4a gros diff -> plusieurs morceaux (3)
+ok 4b chaque fichier dans exactement un morceau, jamais coupé en deux
+ok 5a un seul fichier > seuil -> reste un seul morceau (jamais tronqué)
+ok 5b le morceau garde TOUT le fichier (504 lignes, > seuil 100)
+ok 6 manifest.txt présent et nomme les fichiers du morceau
+ok 7 --source fichier fonctionne (pas seulement stdin)
+ok 7b --source introuvable -> 64
+résumé : 11 ok, 0 ko
+<== ok split-diff-test.sh
+==> subagent-fail-test.sh
+OK   2 sous-agents en échec : passe coupée en 2s, reprise sur opencode/b-free
+OK   la reprise passe --model opencode/b-free
+OK   le modèle des sous-agents (Max.md) est réécrit
+OK   la reprise conclut (PASS vérifié)
+OK   l'échec est tracé (agent-error timeout)
+OK   1 seul échec de sous-agent : pas de coupure par ce motif
+OK   OC_SUBAGENT_FAIL_MAX=0 : désactivé
+OK   valeur invalide refusée (90)
+<== ok subagent-fail-test.sh
+==> watchdog-test.sh
+OK   passage trop long : coupé (2 s), superviseur vivant, arrêt propre
+OK   passage tué : relancé, superviseur intact
+OK   jeton absent de l'état et des sorties du chien de garde
+PASS watchdog : timeout de passage, relance après kill, superviseur stable, jeton caché
+<== ok watchdog-test.sh
+PASS : 17 suite(s) de tests
+exit=0
+```
+
+### `shellcheck` (version 0.11.0)
+
+```text
+$ shellcheck -x opencode/*.sh targets/*.sh
+ShellCheck - shell script analysis tool
+version: 0.11.0
+exit=0
+```
+
+### `actionlint` (version 1.7.7)
+
+```text
+$ actionlint --version
+1.7.7
+installed by downloading from release page
+built with go1.23.4 compiler for linux/amd64
+$ actionlint .github/workflows/*.yml   # depuis une copie de lifeos-ci-seed à la racine
+exit=0
+```
+
+Actionlint est lancé depuis une copie du dossier à la racine du futur dépôt :
+imbriqué sous `lifeos-ci-seed/`, il résout `uses: ./.github/workflows/...` par
+rapport à la racine d'`antenly-ci` et ne trouve pas les workflows locaux.

@@ -3,16 +3,26 @@
 # Vérifie la fonction, l'alignement avec les options: du workflow_dispatch, et
 # l'absence de copie en dur dans les scripts et le workflow.
 #   opencode/tests/allowed-repos-test.sh
+#
+# Version restaurée à l'identique de galass-ci/opencode/tests/allowed-repos-test.sh
+# (cp), adaptée uniquement aux chemins de lifeos-ci :
+#   - allowed-repos.sh est dans targets/ (et non opencode/) ;
+#   - le workflow public porteur des options: est task.yml (lifeos-ci n'a pas
+#     opencode-fullrun.yml) ;
+#   - lifeos et antenly-ci sont dans la liste étendue de lifeos-ci : leurs cas
+#     positifs sont dans allowed-repos-lifeos-test.sh, pas dans la liste des
+#     dépôts « hors liste » ci-dessous.
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"
-# shellcheck source=opencode/allowed-repos.sh
-. "$here/allowed-repos.sh"
+# shellcheck source=targets/allowed-repos.sh
+. "$here/../targets/allowed-repos.sh"
+set +e -u -o pipefail
 
-wf="$here/../.github/workflows/opencode-fullrun.yml"
+wf="$here/../.github/workflows/task.yml"
 [ -f "$wf" ] || ko "workflow introuvable : $wf"
-[ -f "$here/allowed-repos.sh" ] || ko "allowed-repos.sh introuvable"
+[ -f "$here/../targets/allowed-repos.sh" ] || ko "allowed-repos.sh introuvable"
 
 # --- 1. allowed_repo suit allowed_repos_list --------------------------------
 n=0
@@ -22,7 +32,7 @@ while IFS= read -r r; do
   n=$((n + 1))
 done < <(allowed_repos_list)
 [ "$n" -ge 1 ] || ko "allowed_repos_list vide"
-for bad in lifeos antenly-ci Galass_backendx main 'Galass_backend;rm' '../x' 'Galass_Driver '; do
+for bad in Galass_backendx main 'Galass_backend;rm' '../x' 'Galass_Driver '; do
   allowed_repo "$bad" && ko "dépôt hors liste accepté : $bad"
 done
 allowed_repo "" && ko "chaîne vide acceptée"

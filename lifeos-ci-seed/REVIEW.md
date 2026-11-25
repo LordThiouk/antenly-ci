@@ -53,7 +53,14 @@ ni le dispatch réel.
 
 ## 2. Défauts bloquants
 
-### 2.1. Critique — Scripts/outils du checkout `ci/` modifiables et exécutés après opencode
+### [x] 2.1. Critique — Scripts/outils du checkout `ci/` modifiables et exécutés après opencode
+
+> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-frozen-tools-test.sh`) :
+> copie root-owned `opencode/`, `targets/` et `models.txt` dans
+> `/opt/lifeos-ci-tools` **avant** opencode (`_agent-run.yml`, step « Outils de
+> confiance figés »), `chmod go-w /opt`, puis toutes les étapes post-opencode
+> (garde-fou, quota, gitleaks, push, PR, notification) utilisent
+> `$TOOLS_DIR/...` et jamais `ci/...`.
 
 `_agent-run.yml:110-115` checkout `ci` en écriture ; `:303-325` autorise opencode à éditer `*` et `external_directory: *`; `:337-408` exécute opencode dans ce contexte. Ensuite `:361` exécute `ci/opencode/quota.sh`, `:436,473` exécutent `ci/opencode/lifeos-guard.sh`, `:515-517` exécute `ci/opencode/notify.sh`, et le push utilise `CI_TOKEN` (`:414`). `quota.sh` est aussi utilisé avant opencode (`:343`) mais la réexécution post-opencode est critique.
 
@@ -61,7 +68,15 @@ Impact : contournement du garde-fou `lifeos_write`, falsification du statut quot
 
 Correction suggérée : figer les outils avant opencode dans un répertoire root-owned hors workspace agent (modèle galass `install-hook-profile.sh`/`/opt/fullrun-tools` ou copie root-owned dans `$RUNNER_TEMP` avant opencode puis `chmod a-w`), invoquer par chemin absolu, et ne jamais exécuter un script provenant de `ci/` après le début d’opencode. Vérifier l’intégrité (SHA256) des scripts/outils avant usage.
 
-### 2.2. Critique — Hooks/filtres git des dépôts agent exécutés avec `CI_TOKEN`
+### [x] 2.2. Critique — Hooks/filtres git des dépôts agent exécutés avec `CI_TOKEN`
+
+> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-git-isolation-test.sh`) :
+> push depuis une copie nue (`git init --bare` + fetch local), environnement
+> `env -i`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+> `-c core.hooksPath=/dev/null`, `-c core.fsmonitor=false`, `--no-verify` ;
+> le jeton n'est présent que dans l'environnement du push de la copie nue.
+> Le test fonctionnel prouve qu'un `pre-push` et un `include.path` locaux ne
+> s'exécutent pas.
 
 `_agent-run.yml:426-441` et `:460-478` exécutent `git add/commit/push` directement dans `target/`, `extra/*` et `lifeos` avec `CI_TOKEN` en environnement (`:414`), sans `core.hooksPath=/dev/null`, sans `core.fsmonitor=false`, sans `--no-verify`, sans copie nue isolée. opencode peut modifier `.git/hooks/*`, `.git/config`, `.gitattributes` ou filtres.
 
@@ -69,7 +84,14 @@ Impact : exécution de code contrôlé par l’agent pendant une étape authenti
 
 Correction suggérée : reprendre le modèle galass : copie nue fraîche, `env -i`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `-c core.hooksPath=/dev/null`, `-c core.fsmonitor=false`, `push --no-verify --porcelain` (`galass-ci/opencode/extra-repos.sh:82-99,293-346`; `galass-ci/.github/workflows/opencode-task.yml:310-339`). Interdire toute écriture dans `.git/`.
 
-### 2.3. Critique — État mutable post-opencode (`GITHUB_ENV`, `GITHUB_OUTPUT`, `$RUNNER_TEMP`, checkout `ci/`)
+### [x] 2.3. Critique — État mutable post-opencode (`GITHUB_ENV`, `GITHUB_OUTPUT`, `$RUNNER_TEMP`, checkout `ci/`)
+
+> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-state-isolation-test.sh`) :
+> plus de `GITHUB_ENV` de sécurité ; `extra_repos` normalisé dans un output de
+> step (valeur gérée par Actions), SHA de départ écrits en root dans
+> `/opt/lifeos-ci-state`, opencode lancé avec `env -i` et un `HOME`/`TMPDIR`
+> dédiés (aucun accès à `GITHUB_ENV`/`GITHUB_OUTPUT`/`GITHUB_PATH`/`$RUNNER_TEMP`),
+> statut/modèle publiés par un step `id: oc` qui relit l'état root.
 
 `_agent-run.yml:147` écrit `EXTRA_REPOS_NORM` dans `GITHUB_ENV`; `:406-407,497` écrivent des outputs ; les états sont dans `$RUNNER_TEMP/agent-repos.txt`, `agent-extra-base.txt`, `lifeos-base.txt` (`:176,187,220-226,419,460,462`). Après opencode, le job relit ces fichiers/valeurs et exécute des actions sensibles. opencode hérite aussi de variables d’environnement du runner et peut écrire dans les chemins accessibles.
 

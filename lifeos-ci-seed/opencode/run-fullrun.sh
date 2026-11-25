@@ -466,6 +466,7 @@ fi
 if [ -f /opt/fullrun-tools/done-check-call.sh ]; then DC_CALL_LIB=/opt/fullrun-tools/done-check-call.sh
 else DC_CALL_LIB="$(cd "$(dirname "$0")" && pwd)/done-check-call.sh"; fi
 # shellcheck source=done-check-call.sh
+# shellcheck disable=SC1091
 . "$DC_CALL_LIB"
 DONE_OK=0
 
@@ -701,7 +702,7 @@ run_pass() {
 # Annulation du run (SIGINT/SIGTERM du runner) : opencode est dans sa propre session, on
 # l'arrête donc nous-mêmes pour que les steps de rapport et de push trouvent un dépôt stable.
 CUR_PID=""; CUR_PGID=""
-# shellcheck disable=SC2317 # appelée par trap
+# shellcheck disable=SC2317,SC2329 # appelée par trap
 on_cancel() {
   trap '' INT TERM HUP
   # Le runner envoie SIGKILL ~10 s après l'annulation : grâce courte.

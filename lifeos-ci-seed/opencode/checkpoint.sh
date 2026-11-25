@@ -30,7 +30,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 die() { printf 'checkpoint: %s\n' "$2" >&2; exit "$1"; }
 cmd="${1:-}"; [ -n "$cmd" ] || die 2 "commande manquante (write|verdict|resume-text|show)"
 shift
-JOB=""; STEP=""; LABEL=""; SUMMARY=""; STATUS=done; REPO="${TARGET_DIR:-${ANTENLY_DIR:-$(pwd)}}"; AGENT=""
+JOB=""; STEP=""; LABEL=""; SUMMARY=""; STATUS="done"; REPO="${TARGET_DIR:-${ANTENLY_DIR:-$(pwd)}}"; AGENT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --job) JOB="${2:-}"; shift 2 ;;
@@ -184,6 +184,7 @@ case "$cmd" in
     [ -f "$DC" ] || die 3 "validateur indépendant introuvable"
     if [ -f /opt/fullrun-tools/done-check-call.sh ]; then DC_CALL_LIB=/opt/fullrun-tools/done-check-call.sh; else DC_CALL_LIB="$HERE/done-check-call.sh"; fi
     # shellcheck source=done-check-call.sh
+    # shellcheck disable=SC1091
     . "$DC_CALL_LIB"
     out=$(OC_DONE_AGENTS="$AGENT" OC_DONE_ONLY=verdict OC_DONE_REPO="$REPO" fullrun_done_check "$DC" 2>/dev/null | head -n1)
     [ "$out" = "done_check=ok" ] || die 3 "verdict $AGENT non vérifiable dans le stockage opencode (${out:-aucune sortie}) : refusé"

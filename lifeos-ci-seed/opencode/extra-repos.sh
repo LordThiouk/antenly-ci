@@ -22,6 +22,7 @@ if [ ! -f "$allowed" ]; then
   exit 1
 fi
 # shellcheck source=opencode/allowed-repos.sh
+# shellcheck disable=SC1091
 . "$allowed"
 set +e -u -o pipefail
 type allowed_repo >/dev/null 2>&1 || { echo "allowed-repos.sh incomplet" >&2; exit 1; }
