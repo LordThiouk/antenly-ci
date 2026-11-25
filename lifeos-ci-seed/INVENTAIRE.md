@@ -131,3 +131,16 @@ chemins) ; les exceptions où une autre source est plus complète sont signalée
 - `redact-log.sh` — À garder : **seed = antonly** (`afafc1e213b1`, 79 l.) : masque aussi les noms de fichiers du corpus audio (faux positifs `generic-api-key` de gitleaks). galass (`274df9e222a1`, 72 l.) ne les masque pas.
 - `run-fullrun.sh` — À garder : **seed** (`dafa081b3bb9`, 827 l.) : accepte `TARGET_DIR` et `ANTENLY_DIR`, source `allowed-repos`, gère `stop_after_step`/`target_agent`, versions de boucle les plus récentes. antenly (`af0f9f89c23a`, 822 l.) n'accepte que `ANTENLY_DIR` ; galass (`9016ef94020b`, 728 l.) est plus ancien.
 
+### Lot 4 (fichiers 31 à 40)
+
+- `stall-resume-test.sh` — À garder : **seed ≈ antonly** (`1b465f3da981`, 444 l.) : env `ANTENLY_DIR`/`OC_MODEL_CHAIN` (compatibles seed), cas de repli simple. galass (`37325bd6c057`, 442 l.) utilise `TARGET_DIR`/`OC_MODEL_FALLBACK`.
+- `start-step-test.sh` — À garder : **seed** (`3212b83b081a`, 53 l.) = meilleure version + profondeur (`../../..`). Aucun écart fonctionnel.
+- `stop-after-step-test.sh` — À garder : **seed** (`865e8ecd7749`, 257 l.) = antonly + profondeur de chemin.
+- `stop-step-target-agent-test.sh` — À garder : **seed** (`ed63cba540c7`, 64 l.) = galass + profondeur de chemin.
+- `turn-end-test.sh` — À garder : **seed ≈ antonly** (`e287e9d5b6cc`, 122 l.) : env `ANTENLY_DIR`/`OC_MODEL_CHAIN`. galass (`56fc0687db83`) utilise `TARGET_DIR`/`OC_MODEL_FALLBACK`.
+- `unit-contract-test.sh` — À garder : **seed** (`474de53f948c`, 145 l.) = galass + profondeur de chemin.
+- `watchdog-test.sh` — À garder : **seed = galass** (`5027f602ed38`, 87 l.) : accepte `passage interrompu` selon coreutils 9.4 et vérifie réellement la relance. antonly (`fe753b0d040b`, 84 l.) exige le texte exact `relance`, instable sur runner.
+- `wippush-test.sh` — À garder : **seed = galass** (`9562e1787a9a`, 176 l.) : ~12 l. de cas en plus vs antonly (`df14225a4adf`, 164 l.).
+- `wippush.sh` — À garder : **seed** (`e58054e959fc`, 274 l.) : `REMOTE` dérivé de `TARGET_REPO`/liste blanche via `allowed-repos.sh`, garde-fous. galass (`54307e994db6`, 270 l.) est proche ; antonly (`97e0dc2de590`, 254 l.) reste figé sur antenly.
+- `with-emulators-test.sh` — À garder : **seed** (`3f687c1b4838`, 610 l.) = galass + profondeur de chemin.
+
