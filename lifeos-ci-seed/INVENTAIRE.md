@@ -377,4 +377,22 @@ Recommandation : garder un seul workflow CI (ou deux workflows mais un job commu
 les steps communs ; le commentaire d'en-tête de `ci-scripts.yml` (« Distinct de ci.yml, qui teste
 antenly lui-même ») est d'ailleurs **faux dans le seed**, où `ci.yml` teste aussi les scripts.
 
+### `isa-human-tick.yml`
+
+**Base à garder : `galass-ci/.github/workflows/isa-human-tick.yml`** (9 steps). C'est la version
+la plus complète et la plus sûre.
+
+À porter depuis **galass** (absents d'antenly) :
+
+- `Checkout galass-ci (allowed-repos.sh)` — le checkout des outils de la liste blanche
+  (à décliner en `Checkout lifeos-ci` pour le seed) ;
+- `Valider target_repo (liste blanche unique)` avant tout checkout de la cible ;
+- `gitleaks (diff de ce tick uniquement, épinglé, sha256 vérifié)` — antenly n'épingle pas le
+  binaire (`gitleaks (diff de ce tick uniquement)`, sans sha256).
+
+Le seed ne contient **pas** `isa-human-tick.yml` : si lifeos-ci doit garder le human-tick, le
+porter depuis galass. Le jeton de push cible de galass est `GALASS_TOKEN` ; pour lifeos-ci,
+utiliser `CI_TOKEN` (comme `_agent-run.yml`) et garder `LIFEOS_READ_TOKEN` uniquement pour le
+checkout en lecture du dépôt lifeos.
+
 
