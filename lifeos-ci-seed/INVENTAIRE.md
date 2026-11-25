@@ -395,4 +395,52 @@ porter depuis galass. Le jeton de push cible de galass est `GALASS_TOKEN` ; pour
 utiliser `CI_TOKEN` (comme `_agent-run.yml`) et garder `LIFEOS_READ_TOKEN` uniquement pour le
 checkout en lecture du dépôt lifeos.
 
+### Points de sécurité : `with_emulators`, sudoers et jetons
+
+- **`with_emulators` n'existe que dans galass** : entrée `boolean` (`opencode-fullrun.yml` l. 100),
+  env `WITH_EMULATORS` (l. 196), bloc de préparation e2e (l. 820-850). Absent d'antenly et du seed.
+- **Sudoers** : le fullrun antenly **et** seed posent `/etc/sudoers.d/fullrun-preannot`
+  (une seule commande `preannot`, `env_reset`, `secure_path` strict). Galass ajoute
+  `/etc/sudoers.d/fullrun-emu-e2e` (sous-ensemble `emu-e2e.sh run|resolve-refs|status *`) pour
+  `with_emulators`. Le seed n'a donc **que** le sudoers preannot.
+- **Référence morte dans le seed** : `opencode-fullrun.yml` l. 2027 teste `IN_WITH_EMU`, mais ni
+  l'entrée `with_emulators` ni l'env `WITH_EMULATORS`/`IN_WITH_EMU` n'existent dans le fichier
+  seed. La branche emu est donc toujours fausse et l'identifiant de run e2e n'est jamais
+  persistant dans l'état de chaînage : fonctionnalité perdue à la copie depuis galass.
+- **Jeton de `ci-scripts.yml`** : `secrets.LIFEOS_READ_TOKEN` (l. 46) → à remplacer par
+  `secrets.CI_TOKEN`. Le seed utilise déjà `CI_TOKEN` dans `ci.yml` (l. 36), `_agent-run.yml`
+  (garde l. 156, push l. 522) et `_next.yml` (l. 79).
+- **Jetons du fullrun seed** : encore spécifiques antenly (`ANTENLY_TOKEN`, `ANTENLY_PUSH_TOKEN`,
+  `ANTENLY_CI_DISPATCH_TOKEN`, plus `LIFEOS_READ_TOKEN`) ; galass utilise `GALASS_TOKEN` pour la
+  cible. Pour lifeos-ci, converger vers `CI_TOKEN` (cible) + `LIFEOS_READ_TOKEN` (lecture lifeos).
+- Les jetons restent hors d'opencode : fichiers root `0600` (`/opt/fullrun-live/…`), `env -i`,
+  `::add-mask::` de l'en-tête base64. Ne pas réintroduire de jeton dans l'étape opencode.
+
+## Synthèse Workflows et steps
+
+- **Volumes** : antenly 118 steps / 9 workflows ; galass 59 / 4 ; seed 67 / 7.
+- **Bases recommandées par rôle** :
+  - FullRun monolithique : **seed** `opencode-fullrun.yml`, + `with_emulators`/sudoers
+    `fullrun-emu-e2e`, `extra_repos` (validation, checkout, push, PR) et jeton générique
+    `CI_TOKEN` venus de galass ;
+  - tâche simple : **seed** `_agent-run.yml` + `task.yml`, + ffmpeg/corpus HF/acr-senegal
+    d'antenly et refus `.github/workflows` de galass ;
+  - CI scripts : **seed** `ci.yml` + `ci-scripts.yml` fusionnés, + `gitleaks detect` de galass,
+    et `LIFEOS_READ_TOKEN` → `CI_TOKEN` ;
+  - human-tick : **galass** `isa-human-tick.yml` (validation liste blanche + gitleaks épinglé).
+- **Doublons internes au seed** :
+  - deux moteurs FullRun complets (`opencode-fullrun.yml` vs `_agent-run.yml` + `fr-plan-vera.yml`
+    + `_next.yml`) qui dupliquent checkout cible, clone lifeos, installation opencode,
+    configuration, exécution, porte gitleaks/push/PR, notification et statut final ;
+  - `ci.yml` et `ci-scripts.yml` dupliquent checkout LifeOS, installation `age`, `ripgrep`,
+    `setup-bun` et marqueur root (et se déclenchent tous deux sur PR/push) ;
+  - `age` est installé 3 fois (ci, ci-scripts, fullrun) et `ripgrep` 3 fois ; ffmpeg
+    statique+apt est dupliqué entre `ci.yml` et `opencode-fullrun.yml` ;
+  - `task.yml` et `fr-plan-vera.yml` dupliquent le schéma d'entrées (un seul wrapper paramétré
+    suffirait).
+- **Cap de convergence** : garder `opencode-fullrun.yml` (seed) comme base FullRun tant que
+  `_agent-run.yml` n'a pas rattrapé l'état de chaînage, le corpus HF, le journal chiffré et le
+  sudoers preannot ; utiliser `_agent-run.yml` pour les tâches simples ; supprimer l'un des deux
+  moteurs ensuite.
+
 
