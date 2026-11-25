@@ -888,6 +888,7 @@ jobs:
             "$CI_DIR/opencode/leaklog.sh" "$CI_DIR/opencode/livelog.sh" "$CI_DIR/opencode/progress.sh" \
             "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/done-check-call.sh" "$CI_DIR/opencode/checkpoint.sh" \
             "$CI_DIR/opencode/bench-capped" \
+            "$CI_DIR/opencode/allowed-repos.sh" "$CI_DIR/opencode/merge-signed-carry.sh" \
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
           # CLI de verdict lifeos (source unique du verdict lu par done_check.sh) : bundle autonome construit ici,
@@ -1594,6 +1595,10 @@ jobs:
         run: |
           set +x
           export PATH=/usr/bin:/bin
+          # Liste blanche figée hors du cwd : le push ne source jamais le checkout ci/.
+          T=/opt/fullrun-tools
+          # shellcheck disable=SC1091
+          . "$T/allowed-repos.sh"
           # Mêmes règles que la garde d'entrée, revérifiées ici (la valeur vient de l'entrée, pas de $GITHUB_ENV).
           [[ "$IN_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "::error::branche invalide : push refusé"; exit 1; }
           case "${IN_BRANCH,,}" in
@@ -1663,6 +1668,10 @@ jobs:
         run: |
           set +x
           export PATH=/usr/local/bin:/usr/bin:/bin
+          # Liste blanche figée hors du cwd : la PR ne source jamais le checkout ci/.
+          T=/opt/fullrun-tools
+          # shellcheck disable=SC1091
+          . "$T/allowed-repos.sh"
           command -v gh >/dev/null 2>&1 || { echo "::warning::gh absent : pas de PR"; exit 0; }
           [ -n "${PUSH_TOKEN:-}" ] || { echo "::warning::ANTENLY_PUSH_TOKEN absent : pas de PR"; exit 0; }
           base="$IN_BASE"
