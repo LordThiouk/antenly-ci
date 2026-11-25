@@ -157,3 +157,11 @@ Points non bloquants à traiter : message mort `opencode-fullrun.yml:282` (**low
 
 La mécanique `chain_prompts` elle-même est correcte (entrées, garde, redispatch), et `ci.yml`
 (déclencheurs, concurrence, absence de fuite de secret, `CI_TOKEN`) est conforme.
+
+## Re-revue 2026-11-25
+
+1. **Jeton** (`8218748`) : écrit en root (`umask 077`), `chown root:root`, `chmod 0600`, jamais imprimé, uniquement sous `with_emulators` → conforme.
+2. **Sudoers** (`3d406a7`) : règle réduite à `status [0-9]*` ; `emu-e2e.sh` exige `^[0-9]{1,20}$` et sort `rc 2` avant `gh` ; sudo lance le script sans shell → aucune escalade résiduelle.
+3. **`_next.yml`** (`a7e2103`) : `-F lifeos_write="$LIFEOS_WRITE"` transmet le booléen en champ brut, test de chaîne à jour → conforme.
+
+Verdict : merge OK
