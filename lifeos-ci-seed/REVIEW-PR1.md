@@ -107,3 +107,53 @@ root:root 0755), et `/opt` est rendu non inscriptible en `:894-895`.
 
 **Verdict section 3 : OK pour `ci.yml`** ; deux points `low` hors `ci.yml` (`opencode-fullrun`
 non convergé, `-f` dans `_next.yml`).
+
+## 4. Doublons encore présents (constat, non corrigé)
+
+Constat sur l'état réel de `lifeos-ci` au commit `fd3f9ce` ; `INVENTAIRE.md` sert de référence,
+mais il est en partie périmé (il décrit encore `ci-scripts.yml`, supprimé par `983f0f5`).
+
+- **Deux moteurs FullRun complets** (`INVENTAIRE.md:431-436`) : `opencode-fullrun.yml`
+  (monolithique) et `_agent-run.yml` + `fr-plan-vera.yml` + `_next.yml`. Ils dupliquent checkout
+  cible, clone lifeos, installation opencode, exécution, gitleaks/push/PR, notification et statut
+  final. Aucun des deux n'est supprimé dans cette PR.
+- **`task.yml` et `fr-plan-vera.yml`** (`INVENTAIRE.md:334-336`, `:439-440`) : même schéma
+  d'entrées, seul `agent:` et le bloc `next` diffèrent. Un wrapper paramétré suffirait.
+- **`age` installé deux fois** : `ci.yml:86-94` et `opencode-fullrun.yml:402-410` (le troisième
+  exemplaire de `ci-scripts.yml` a disparu avec le fichier).
+- **`ripgrep` installé deux fois** : `ci.yml:57-58` et `opencode-fullrun.yml:380-386`.
+- **`ffmpeg` statique + secours apt dupliqué** : `ci.yml:103-118` et `opencode-fullrun.yml:414-429`.
+- **`setup-bun` deux fois** : `ci.yml:80` et `opencode-fullrun.yml:363`.
+- **Collision de nom `allowed-repos.sh`** (`INVENTAIRE.md:160-161`, `:181-183`) :
+  `opencode/allowed-repos.sh` (bibliothèque sourcée) et `targets/allowed-repos.sh` (CLI). Rôles
+  distincts, pas un doublon de contenu ; ne pas fusionner.
+- **Copies octet pour octet d'upstream** (`INVENTAIRE.md:162-171`) : 21 scripts distincts
+  (27 instances), délibérés dans la graine. Exemples — identiques antenly **et** galass :
+  `done-check-call.sh`, `leaklog.sh`, `lib.sh`, `split-diff.sh`, `split-diff-test.sh`,
+  `subagent-fail-test.sh` ; identiques antenly seul : `done_check.sh`, `internals-test.sh`,
+  `memcap-livelog-test.sh`, `memcap-test.sh`, `redact-log.sh`, `redact-test.sh`,
+  `step-agents.sh` ; identiques galass seul : `allowed-repos.sh`, `autosave.sh`,
+  `autosave-test.sh`, `emu-e2e.sh`, `install-hook-profile.sh`, `merge-signed-carry.sh`,
+  `progress.sh`, `watchdog-test.sh`.
+- **Doublons déjà résolus** (pour éviter de les re-signaler) : `ci.yml` vs `ci-scripts.yml`
+  (`INVENTAIRE.md:364-370`) n'existent plus — `ci-scripts.yml` est supprimé en `983f0f5` et fondu
+  dans `ci.yml`. Le « marqueur root » n'est donc plus dupliqué que dans `ci.yml:98`.
+
+Aucun de ces doublons n'a été corrigé (consigne : lister, ne pas corriger).
+
+## Verdict final
+
+**à corriger.**
+
+Motifs à corriger avant merge :
+1. `opencode-fullrun.yml:982` : wildcard `status *` dans une règle sudoers `NOPASSWD` root
+   (**high**) — le point de revue exige « no wildcard ».
+2. `with_emulators=true` inutilisable : jeton `/opt/fullrun-live/emu-e2e.token` et état
+   `/opt/fullrun-tools/emu-e2e.state` jamais provisionnés (**high**).
+
+Points non bloquants à traiter : message mort `opencode-fullrun.yml:282` (**low**), convergence
+`CI_TOKEN` de `opencode-fullrun.yml` (**low**), `-f` au lieu de `-F` dans `_next.yml:130`
+(**low**), et la liste de doublons du §4.
+
+La mécanique `chain_prompts` elle-même est correcte (entrées, garde, redispatch), et `ci.yml`
+(déclencheurs, concurrence, absence de fuite de secret, `CI_TOKEN`) est conforme.
