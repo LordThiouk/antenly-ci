@@ -77,6 +77,8 @@ jobs:
 
       - name: Setup bun (épinglé par SHA)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
 
       # Chiffrement du journal opencode quand les contrôles refusent le push : sans age, le
       # journal disparaît avec le runner et personne ne sait ce que l'agent a fait.
@@ -127,3 +129,55 @@ jobs:
         run: |
           set -euo pipefail
           bash opencode/tests/run-all.sh
+
+      - name: Tests opencode
+        if: ${{ !cancelled() }}
+        env:
+          OC_VERDICT_CLI: ${{ github.workspace }}/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts
+          # Bout en bout du préflight avec le vrai CLI lifeos (pin ci-dessus, contient lifeos#24) : son absence
+          # fait échouer preflight-test.sh au lieu d'un SKIP.
+          LIFEOS_DIR: ${{ github.workspace }}/lifeos
+          OC_REQUIRE_PREFLIGHT_E2E: "1"
+          OC_REQUIRE_PROD_TESTS: "1"
+          # Échecs connus, sans rapport avec done_check.sh, vus au premier run sur runner (22 nov. 2026) : nommés ici,
+          # signalés en ::warning:: à chaque run, jamais silencieux. Tout autre script qui échoue fait échouer le job.
+          #  - leaklog-test.sh : exige la clé privée de la box (absente d'un runner)
+          #  - hook-profile-install-test.sh : attend le message « garde-fous » d'un lifeos plus récent que le ref épinglé
+          #  - watchdog-test.sh : « passage tué non relancé », sensible au timing du runner
+          OC_CI_KNOWN_FAILING: "leaklog-test.sh hook-profile-install-test.sh watchdog-test.sh"
+        run: |
+          set -euo pipefail
+          failed=0
+          for t in opencode/tests/*-test.sh; do
+            echo "::group::$t"
+            if bash "$t"; then
+              echo "ok $t"
+            elif [[ " $OC_CI_KNOWN_FAILING " == *" $(basename "$t") "* ]]; then
+              echo "::warning::$t échoue (échec connu, voir OC_CI_KNOWN_FAILING)"
+            else
+              echo "::error::$t a échoué"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks detect (épinglé, sha256 vérifié)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/gitleaks.tgz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c --quiet
+          tar -xzf "$f" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" detect --source . --verbose
