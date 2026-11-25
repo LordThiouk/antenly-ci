@@ -2318,3 +2318,20 @@ Bilan vérification seule :
 - Même `actionlint` depuis une copie de `lifeos-ci-seed/` à la racine : **PASS**, exit=0.
 
 Aucune correction n'a été apportée.
+
+## Fix2b (2026-11-25)
+
+### Tests nécessitant bun
+
+Bun n'est pas installé dans ce run (`command -v bun` → absent), conformément à la consigne
+« n'installe pas bun ». Les tests suivants s'arrêtent dès le chargement de
+`opencode/tests/upstream-fullrun/verdict-cli.lib` sur
+`ko bun introuvable (requis par done_check.sh)`, avant toute assertion :
+
+- `opencode/tests/upstream-fullrun/checkpoint-watchdog-verdict-test.sh` — **besoin de bun**
+- `opencode/tests/upstream-fullrun/done-check-test.sh` — **besoin de bun**
+- `opencode/tests/upstream-fullrun/unit-contract-test.sh` — **besoin de bun**
+
+`preflight-test.sh` n'a pas besoin de bun : il fabrique un faux `bun` pour la logique du step et
+ne lance la section « vrai CLI lifeos » que si `bun` et `FullRunPreflight.ts` sont présents.
+Bun sera ajouté à `ci.yml` au run suivant.
