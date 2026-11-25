@@ -37,13 +37,15 @@ jobs:
 
       - name: Installer actionlint (binaire officiel épinglé)
         env:
-          ACTIONLINT_VERSION: "1.7.7"
+          ACTIONLINT_VERSION: "1.7.12"
         run: |
           set -euo pipefail
-          f="$RUNNER_TEMP/actionlint.tgz"
-          curl -sSfL -o "$f" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          tar -xzf "$f" -C "$RUNNER_TEMP" actionlint
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/checksums.txt" "${base}/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          curl -sSfL -o "$RUNNER_TEMP/${archive}" "${base}/${archive}"
+          (cd "$RUNNER_TEMP" && grep " ${archive}\$" checksums.txt | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/${archive}" -C "$RUNNER_TEMP" actionlint
           sudo install -o root -g root -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
           actionlint --version
 
@@ -52,7 +54,11 @@ jobs:
           set -euo pipefail
           actionlint .github/workflows/*.yml
 
+      - name: Setup bun (épinglé par SHA)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
       - name: Tests shell
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           bash opencode/tests/run-all.sh
