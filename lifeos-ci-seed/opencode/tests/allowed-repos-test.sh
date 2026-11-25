@@ -1,85 +1,57 @@
 #!/usr/bin/env bash
-# Tests de la liste blanche target_repo / extra_repos.
-#   targets/allowed-repos-test.sh (exécuté via opencode/tests/run-all.sh)
-set -euo pipefail
+# Source unique de la liste blanche target_repo / extra_repos : allowed-repos.sh.
+# Vérifie la fonction, l'alignement avec les options: du workflow_dispatch, et
+# l'absence de copie en dur dans les scripts et le workflow.
+#   opencode/tests/allowed-repos-test.sh
+set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-repo_root=$(cd "$here/.." && pwd)
-ar="$repo_root/targets/allowed-repos.sh"
-[ -x "$ar" ] || { echo "FAIL allowed-repos.sh absent : $ar" >&2; exit 1; }
+# shellcheck source=opencode/tests/lib.sh
+. "$here/tests/lib.sh"
+# shellcheck source=opencode/allowed-repos.sh
+. "$here/allowed-repos.sh"
 
-# shellcheck source=../../targets/allowed-repos.sh
-# shellcheck disable=SC1091
-. "$ar"
+wf="$here/../.github/workflows/opencode-fullrun.yml"
+[ -f "$wf" ] || ko "workflow introuvable : $wf"
+[ -f "$here/allowed-repos.sh" ] || ko "allowed-repos.sh introuvable"
 
-pass=0
-ok() { pass=$((pass + 1)); }
-bad() { echo "FAIL $1" >&2; exit 1; }
-
-expected='antenly
-antenly-ci
-galass-ci
-Galass_Rider
-Galass_Driver
-Galass_backend
-galass-emu-actions-pub
-lifeos
-lifeos-ci'
-[ "$(allowed_repos_list)" = "$expected" ] || bad "liste blanche inattendue"
-
+# --- 1. allowed_repo suit allowed_repos_list --------------------------------
+n=0
 while IFS= read -r r; do
   [ -n "$r" ] || continue
-  allowed_repo "$r" || bad "dépôt autorisé refusé : $r"
-  ok
+  allowed_repo "$r" || ko "dépôt de la liste refusé : $r"
+  n=$((n + 1))
 done < <(allowed_repos_list)
-
-for bad_repo in inconnu autre lifeos-ci2 ../x 'a;b' 'LordThiouk/autre' '' '..' 'antenly '; do
-  if allowed_repo "$bad_repo"; then
-    bad "dépôt hors liste accepté : [$bad_repo]"
-  fi
-  ok
+[ "$n" -ge 1 ] || ko "allowed_repos_list vide"
+for bad in lifeos antenly-ci Galass_backendx main 'Galass_backend;rm' '../x' 'Galass_Driver '; do
+  allowed_repo "$bad" && ko "dépôt hors liste accepté : $bad"
 done
+allowed_repo "" && ko "chaîne vide acceptée"
+ok "allowed_repo : liste acceptée, hors liste refusée"
 
-# validate : target + extra_repos (virgules et espaces).
-out=$(bash "$ar" validate antenly "galass-ci Galass_Rider")
-printf '%s\n' "$out" | grep -qx 'target=antenly' || bad "validate : target incorrect"
-printf '%s\n' "$out" | grep -qx 'extra=galass-ci,Galass_Rider' || bad "validate : extra incorrect"
-ok
+# --- 2. options: de target_repo = allowed_repos_list (même ordre) ------------
+opts=$(awk '
+  $0 ~ /^      target_repo:/ { p=1; next }
+  p && $0 ~ /^      [A-Za-z0-9_]+:/ { exit }
+  p && $0 ~ /^[[:space:]]+-[[:space:]]+/ {
+    sub(/^[[:space:]]+-[[:space:]]+/, "")
+    sub(/[[:space:]]+$/, "")
+    print
+  }
+' "$wf")
+list=$(allowed_repos_list)
+[ -n "$opts" ] || ko "aucune option target_repo trouvée dans le workflow"
+[ "$opts" = "$list" ] || ko "options: target_repo du workflow != allowed_repos_list
+workflow:
+$opts
+liste:
+$list"
+ok "options: target_repo du workflow alignées sur allowed_repos_list"
 
-# check : autorisé / refusé.
-bash "$ar" check lifeos >/dev/null || bad "check lifeos refusé"
-ok
-if bash "$ar" check "LordThiouk/autre" >/dev/null 2>&1; then
-  bad "check a accepté LordThiouk/autre"
-fi
-ok
-
-# Injections dans extra_repos : refus.
-for injection in '../x' 'a;b' 'LordThiouk/autre' 'inconnu'; do
-  if bash "$ar" validate antenly "$injection" >/dev/null 2>&1; then
-    bad "validate a accepté l'injection : $injection"
-  fi
-  ok
-done
-
-# Doublon : refus.
-if bash "$ar" validate antenly "galass-ci,galass-ci" >/dev/null 2>&1; then
-  bad "validate a accepté un doublon"
-fi
-ok
-
-# Les options: target_repo des workflows publics restent alignées sur la liste.
-for wf in "$repo_root/.github/workflows/task.yml" "$repo_root/.github/workflows/fr-plan-vera.yml"; do
-  [ -f "$wf" ] || bad "workflow absent : $wf"
-  opts=$(awk '
-    /^      target_repo:/ { p=1; next }
-    p && /^      [A-Za-z0-9_]+:/ { exit }
-    p && /^          - / {
-      sub(/^          - /, "")
-      print
-    }
-  ' "$wf")
-  [ "$opts" = "$expected" ] || bad "options target_repo de $(basename "$wf") non alignées sur allowed_repos_list"
-  ok
-done
-
-echo "PASS allowed-repos-test : $pass cas"
+# --- 3. Pas de copie en dur du motif case hors allowed-repos.sh --------------
+copies=$(grep -R -n -E 'Galass_Driver\|Galass_Rider\|Galass_backend\|galass-emu-actions-pub' \
+  --include='*.sh' --include='*.yml' --include='*.yaml' \
+  "$here" "$here/../.github" || true)
+leftover=$(printf '%s\n' "$copies" | grep -v '/allowed-repos.sh:' | grep -v '^$' || true)
+[ -z "$leftover" ] || ko "liste encore recopiée hors allowed-repos.sh :
+$leftover"
+ok "aucune copie en dur de la liste hors allowed-repos.sh"

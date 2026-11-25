@@ -1,0 +1,58 @@
+# Jamais dans un commit wip automatique (autosave.sh). Une glob par ligne, insensible à la casse.
+#  - sans « / » : vaut pour le nom du fichier ET pour chaque dossier du chemin (vendor = tout vendor/)
+#  - avec « / » : vaut pour le chemin entier ou son début (dossier)
+# Un fichier refusé reste dans l'arbre de travail, intact et non suivi : rien n'est supprimé.
+# Complète cette liste si besoin : la garde est « refus par défaut pour ce qui ressemble à du secret ».
+
+# Clés, jetons, identifiants, configuration d'environnement
+.env
+keys.json
+.env.*
+auth.json
+*credential*
+*secret*
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.jks
+*.keystore
+key.properties
+google-services.json
+googleservice-info.plist
+*service-account*
+*serviceaccount*
+*firebase-adminsdk*
+*.mobileprovision
+id_rsa*
+id_ed25519*
+*.token
+.netrc
+# Secrets PSP (Wave / Orange Money) : admin gateway_parameter seulement, jamais dans le dépôt
+*gateway_parameter*
+
+# Sauvegardes et bases locales
+*.sqlite
+*.sqlite3
+*dump*.sql
+*.bak
+
+# Binaires de build et dépendances
+*.apk
+*.aab
+*.ipa
+*.zip
+*.tar
+*.gz
+vendor
+node_modules
+build
+.dart_tool
+.gradle
+storage/logs
+storage/framework
+
+# Dossiers techniques et journaux du run
+.git
+.fullrun/
