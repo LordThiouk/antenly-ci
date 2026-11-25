@@ -881,6 +881,7 @@ jobs:
           ISA_STAMP_KEY: ${{ secrets.ISA_STAMP_KEY }}
           BASE_SHA: ${{ steps.prep.outputs.base }}
           GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           set +x
           T=/opt/fullrun-tools; L=/opt/fullrun-live
@@ -973,13 +974,36 @@ jobs:
           else
             echo "::warning::GITHUB_TOKEN absent : preannot.sh sans jeton (dispatch impossible)"
           fi
-          # with_emulators : sudoers strict pour emu-e2e.sh, copié de galass-ci (/etc/sudoers.d/fullrun-emu-e2e).
+          # with_emulators : jeton CI_TOKEN hors d'opencode (fichier root 0600), état figé, sudoers strict.
+          # Provisioning copié de galass-ci (opencode-fullrun.yml l.820-842) : sans le jeton et l'état,
+          # with_emulators=true échoue dès le premier `emu-e2e.sh run`.
           if [ "${WITH_EMULATORS:-}" = "true" ]; then
+            [ -x "$CI_DIR/opencode/emu-e2e.sh" ] || { echo "::error::emu-e2e.sh absent : impossible d'activer with_emulators"; exit 1; }
+            [ -n "${CI_TOKEN:-}" ] || { echo "::error::secret CI_TOKEN absent : impossible d'activer with_emulators"; exit 1; }
+            printf '::add-mask::%s\n' "$CI_TOKEN"
+            printf '%s\n' "$CI_TOKEN" | sudo sh -c 'umask 077; cat > /opt/fullrun-live/emu-e2e.token'
+            # Chaînage : run e2e du lien précédent encore en vol → emu-e2e.sh run le reprend (root 0600).
+            if [[ "${IN_EMU_RUN:-}" =~ ^[0-9]{1,20}$ ]]; then
+              printf '%s\n' "$IN_EMU_RUN" | sudo sh -c 'umask 077; cat > /opt/fullrun-live/emu-resume'
+              echo "run e2e ${IN_EMU_RUN} repris du lien précédent"
+            fi
+            sudo chown root:root /opt/fullrun-live/emu-e2e.token
+            sudo chmod 0600 /opt/fullrun-live/emu-e2e.token
+            {
+              printf 'OC_BRANCH=%s\n' "$IN_BRANCH"
+              printf 'EMU_E2E_MODEL=deepseek-v4.1-flash-free\n'
+              printf 'EMU_E2E_TIMEOUT_SEC=10800\n'
+              printf 'EMU_E2E_POLL_SEC=30\n'
+              printf 'EMU_LOG_TAIL=80\n'
+              printf 'EMU_LOG_WIDTH=300\n'
+            } | sudo tee "$T/emu-e2e.state" >/dev/null
+            sudo chown root:root "$T/emu-e2e.state"
+            sudo chmod 0644 "$T/emu-e2e.state"
             u=$(id -un)
             {
               printf 'Defaults!/opt/fullrun-tools/emu-e2e.sh env_reset\n'
               printf 'Defaults!/opt/fullrun-tools/emu-e2e.sh secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
-              printf '%s ALL=(root) NOPASSWD: /opt/fullrun-tools/emu-e2e.sh run, /opt/fullrun-tools/emu-e2e.sh resolve-refs, /opt/fullrun-tools/emu-e2e.sh status *\n' "$u"
+              printf '%s ALL=(root) NOPASSWD: /opt/fullrun-tools/emu-e2e.sh run, /opt/fullrun-tools/emu-e2e.sh resolve-refs, /opt/fullrun-tools/emu-e2e.sh status [0-9]*\n' "$u"
             } | sudo tee /etc/sudoers.d/fullrun-emu-e2e >/dev/null
             sudo chmod 0440 /etc/sudoers.d/fullrun-emu-e2e
             sudo visudo -cf /etc/sudoers.d/fullrun-emu-e2e >/dev/null
