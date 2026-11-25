@@ -27,8 +27,9 @@ ou `target:<chemin>` (branche cible).
 - `false` (défaut) : lifeos est cloné en lecture seule (`chmod -R a-w`), sans
   identifiants dans le remote. `target_repo=lifeos` et tout `lifeos` en
   `extra_repos` sont refusés. Aucun push ni PR vers `LordThiouk/lifeos`.
-- `true` : push sur une branche de fonctionnalité puis PR brouillon vers lifeos
-  autorisés. Jamais `main`/`master`, jamais de fusion automatique.
+- `true` : les changements lifeos sont committés par le workflow sur une branche
+  dédiée `lifeos-ci/<job_name>`, poussés par le workflow puis ouverts en PR
+  brouillon vers lifeos. Jamais `main`/`master`, jamais de fusion automatique.
 - Dans tous les cas, `main`/`master` sont des destinations interdites. Le
   workflow pousse en fast-forward et ouvre la PR ; opencode ne pousse jamais.
 

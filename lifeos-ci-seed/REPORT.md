@@ -78,3 +78,46 @@ exit=0
   d'exécution (il ne reste que l'option de cible et la liste blanche).
 - Aucun fichier modifié hors de `lifeos-ci-seed/`.
 - Scripts exécutables (`chmod +x`) et en `set -euo pipefail`.
+
+## Fix1 (2026-11-25)
+
+Correctifs du socle : notification qui remonte le code HTTP (sans avaler l'erreur),
+transmission complète de `lifeos_write` dans la chaîne FullRun, et écriture LifeOS
+sur une branche dédiée poussée par le workflow puis ouverte en PR brouillon.
+
+### `bash opencode/tests/run-all.sh`
+
+```text
+$ bash opencode/tests/run-all.sh
+==> allowed-repos-test.sh
+PASS allowed-repos-test : 28 cas
+<== ok allowed-repos-test.sh
+==> lifeos-chain-test.sh
+PASS lifeos-chain-test : 23 cas
+<== ok lifeos-chain-test.sh
+==> lifeos-guard-test.sh
+PASS lifeos-guard-test : 23 cas
+<== ok lifeos-guard-test.sh
+==> notify-test.sh
+PASS notify-test : 21 cas
+<== ok notify-test.sh
+==> quota-test.sh
+PASS quota-test : 8 cas
+<== ok quota-test.sh
+PASS : 5 suite(s) de tests
+exit=0
+```
+
+### `shellcheck` (version 0.11.0)
+
+```text
+$ shellcheck -x opencode/*.sh targets/*.sh opencode/tests/*.sh
+exit=0
+```
+
+### `actionlint` (version 1.7.7)
+
+```text
+$ actionlint .github/workflows/*.yml   # depuis une copie à la racine du futur dépôt
+exit=0
+```

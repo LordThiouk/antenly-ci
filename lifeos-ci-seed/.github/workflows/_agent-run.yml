@@ -221,6 +221,9 @@ jobs:
           if [ -f "$RUNNER_TEMP/agent-extra-base.txt" ]; then
             cat "$RUNNER_TEMP/agent-extra-base.txt" >> "$RUNNER_TEMP/agent-repos.txt"
           fi
+          if [ "$LIFEOS_WRITE" = true ] && [ -d lifeos/.git ]; then
+            git -C lifeos rev-parse HEAD > "$RUNNER_TEMP/lifeos-base.txt"
+          fi
 
       - name: Préparer le prompt (préambule + prompt + ISA)
         run: |
@@ -243,6 +246,8 @@ jobs:
             printf -- '- lifeos de référence : lifeos/ (lecture seule si lifeos_write=false).\n'
             if [ "$LIFEOS_WRITE" = false ]; then
               printf -- '- lifeos est en lecture seule : ne tente jamais de le modifier.\n'
+            else
+              printf -- '- lifeos/ est modifiable : le workflow committe tes changements sur une branche dédiée et ouvre la PR ; ne pousse jamais toi-même.\n'
             fi
             if [ -n "$EXTRA_REPOS_NORM" ]; then
               printf '\n## Dépôts supplémentaires\n\n'
@@ -324,6 +329,10 @@ jobs:
             git -C "$dir" config user.name "Papa Diop"
             git -C "$dir" config user.email "76528706+LordThiouk@users.noreply.github.com"
           done < "$RUNNER_TEMP/agent-repos.txt"
+          if [ "$LIFEOS_WRITE" = true ] && [ -d lifeos/.git ]; then
+            git -C lifeos config user.name "Papa Diop"
+            git -C lifeos config user.email "76528706+LordThiouk@users.noreply.github.com"
+          fi
 
       - name: Exécuter opencode (quota et bascule unique)
         id: oc
@@ -378,6 +387,13 @@ jobs:
               c=$(git -C "$dir" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
               new_commits=$((new_commits + c))
             done < "$RUNNER_TEMP/agent-repos.txt"
+            if [ "$LIFEOS_WRITE" = true ] && [ -f "$RUNNER_TEMP/lifeos-base.txt" ] && [ -d lifeos/.git ]; then
+              c=$(git -C lifeos rev-list --count "$(cat "$RUNNER_TEMP/lifeos-base.txt")..HEAD" 2>/dev/null || echo 0)
+              new_commits=$((new_commits + c))
+              if [ -n "$(git -C lifeos status --porcelain 2>/dev/null)" ]; then
+                new_commits=$((new_commits + 1))
+              fi
+            fi
             if [ "$rc" -eq 0 ] && { [ "$new_commits" -gt 0 ] || [ -f /tmp/task_done.md ]; }; then
               status="ok"
             elif [ ! -s "$log" ]; then
@@ -438,6 +454,45 @@ jobs:
               fi
             fi
           done < "$RUNNER_TEMP/agent-repos.txt"
+
+          # Écriture LifeOS : commit sur une branche dédiée, push par le workflow,
+          # puis PR brouillon. Jamais main/master comme destination.
+          if [ "$LIFEOS_WRITE" = true ] && [ -d lifeos/.git ] && [ -f "$RUNNER_TEMP/lifeos-base.txt" ]; then
+            lifeos_branch="lifeos-ci/$(printf '%s' "$IN_JOB" | tr -c 'A-Za-z0-9_-' '-')"
+            base=$(cat "$RUNNER_TEMP/lifeos-base.txt")
+            git -C lifeos checkout -B "$lifeos_branch" >/dev/null 2>&1
+            if [ -n "$(git -C lifeos status --porcelain)" ]; then
+              git -C lifeos add -A
+              git -C lifeos commit -m "lifeos-ci ${IN_AGENT} ${IN_JOB}" >/dev/null
+            fi
+            lh=$(git -C lifeos rev-parse HEAD)
+            lcount=$(git -C lifeos rev-list --count "$base..$lh")
+            if [ "$lcount" -eq 0 ]; then
+              echo "lifeos : aucun nouveau commit"
+            else
+              bash ci/opencode/lifeos-guard.sh destination "$LIFEOS_WRITE" "LordThiouk/lifeos" "$lifeos_branch"
+              gitleaks detect --source lifeos --log-opts="$base..$lh" --no-banner >/dev/null
+              GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" \
+                git -C lifeos push "https://x-access-token@github.com/LordThiouk/lifeos.git" \
+                "HEAD:refs/heads/$lifeos_branch"
+              echo "Push OK : lifeos@$lifeos_branch (${lh:0:7}, $lcount commit(s))"
+              if command -v gh >/dev/null 2>&1; then
+                existing=$(gh pr list --repo "LordThiouk/lifeos" --head "$lifeos_branch" \
+                  --state open --json number --jq 'length' 2>/dev/null || echo 0)
+                if [ "$existing" = "0" ]; then
+                  base_branch=$(gh api "repos/LordThiouk/lifeos" --jq .default_branch 2>/dev/null || echo main)
+                  gh pr create --repo "LordThiouk/lifeos" --draft \
+                    --base "$base_branch" --head "$lifeos_branch" \
+                    --title "lifeos-ci ${IN_AGENT} ${IN_JOB}" \
+                    --body "Run automatique lifeos-ci. PR en brouillon : revue humaine obligatoire, jamais de fusion automatique." \
+                    >/dev/null || echo "::warning::lifeos : PR non créée (déjà ouverte ou droits insuffisants)"
+                else
+                  echo "lifeos : PR déjà ouverte pour $lifeos_branch"
+                fi
+              fi
+            fi
+          fi
+
           rm -f "$askpass"
           echo "head_sha=$head" >> "$GITHUB_OUTPUT"
 
@@ -458,7 +513,7 @@ jobs:
           OC_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -x ci/opencode/notify.sh ]; then
-            bash ci/opencode/notify.sh || true
+            bash ci/opencode/notify.sh
           fi
 
       - name: Statut final
