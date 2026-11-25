@@ -46,7 +46,7 @@ pass=$((pass + 1))
 
 # _next.yml transmet lifeos_write et tous les autres inputs au maillon suivant.
 need_line "$next" "lifeos_write:" "_next déclare lifeos_write"
-need_line "$next" '-f lifeos_write="$LIFEOS_WRITE"' "_next transmet lifeos_write au maillon suivant"
+need_line "$next" '-F lifeos_write="$LIFEOS_WRITE"' "_next transmet lifeos_write (booléen) avec -F au maillon suivant"
 for input in target_repo extra_repos branch prompt_path isa_path job_name lifeos_ref timeout_minutes; do
   need_line "$next" "-f ${input}=" "_next transmet ${input}"
 done

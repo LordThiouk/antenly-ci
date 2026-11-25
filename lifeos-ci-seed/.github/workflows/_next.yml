@@ -127,7 +127,7 @@ jobs:
           gh workflow run "$next_wf" --repo "$GITHUB_REPOSITORY" \
             -f target_repo="$IN_TARGET" \
             -f extra_repos="$IN_EXTRA" \
-            -f lifeos_write="$LIFEOS_WRITE" \
+            -F lifeos_write="$LIFEOS_WRITE" \
             -f branch="$IN_BRANCH" \
             -f prompt_path="$IN_PROMPT" \
             -f isa_path="$IN_ISA" \
