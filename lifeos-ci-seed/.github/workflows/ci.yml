@@ -39,6 +39,11 @@ jobs:
           set -euo pipefail
           shellcheck -x opencode/*.sh targets/*.sh
 
+      # ripgrep n'est plus fourni par l'image ubuntu-latest : les tests shell l'appellent (rg -q), et le step
+      # extrait par preflight-test.sh tourne avec PATH=/usr/bin:/bin, d'où apt (binaire dans /usr/bin).
+      - name: Installer ripgrep (tests shell)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep && rg --version | head -1
+
       - name: Installer actionlint (binaire officiel épinglé)
         env:
           ACTIONLINT_VERSION: "1.7.12"
@@ -73,6 +78,11 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/age-keygen
           age --version
 
+      # Marqueur root (non inscriptible) sans lequel done_check.sh refuse le mode test sous GITHUB_ACTIONS :
+      # posé ici pour la seule suite de tests, jamais par opencode-fullrun.yml.
+      - name: Marqueur root du mode test (suite de tests seulement)
+        run: sudo install -o root -g root -m 0644 /dev/null /etc/fullrun-done-test-mode
+
       # ffmpeg/ffprobe : le banc fingerprint décode des .opus. Même schéma que ci.yml
       # (binaire statique épinglé, secours apt). Échec franc si l'un des deux manque.
       - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
@@ -95,6 +105,13 @@ jobs:
 
       - name: Tests shell
         if: ${{ !cancelled() }}
+        env:
+          OC_VERDICT_CLI: ${{ github.workspace }}/lifeos/LIFEOS/TOOLS/FullRunVerdict.ts
+          # Bout en bout du préflight avec le vrai CLI lifeos (pin ci-dessus, contient lifeos#24) : son absence
+          # fait échouer preflight-test.sh au lieu d'un SKIP.
+          LIFEOS_DIR: ${{ github.workspace }}/lifeos
+          OC_REQUIRE_PREFLIGHT_E2E: "1"
+          OC_REQUIRE_PROD_TESTS: "1"
         run: |
           set -euo pipefail
           bash opencode/tests/run-all.sh
