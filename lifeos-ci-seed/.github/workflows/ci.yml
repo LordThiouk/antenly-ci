@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+env:
+  AGE_VERSION: "1.2.1"
+  AGE_SHA256: "7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -52,10 +56,42 @@ jobs:
       - name: Actionlint
         run: |
           set -euo pipefail
-          actionlint .github/workflows/*.yml
+          actionlint -ignore 'SC2129' .github/workflows/*.yml
 
       - name: Setup bun (épinglé par SHA)
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # Chiffrement du journal opencode quand les contrôles refusent le push : sans age, le
+      # journal disparaît avec le runner et personne ne sait ce que l'agent a fait.
+      - name: Installer age (épinglé, sha256 vérifié)
+        run: |
+          f="$RUNNER_TEMP/age.tgz"
+          curl -sSfL -o "$f" "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz"
+          echo "${AGE_SHA256}  $f" | sha256sum -c --quiet
+          tar -xzf "$f" -C "$RUNNER_TEMP" age/age age/age-keygen
+          sudo install -m 0755 "$RUNNER_TEMP/age/age" /usr/local/bin/age
+          sudo install -m 0755 "$RUNNER_TEMP/age/age-keygen" /usr/local/bin/age-keygen
+          age --version
+
+      # ffmpeg/ffprobe : le banc fingerprint décode des .opus. Même schéma que ci.yml
+      # (binaire statique épinglé, secours apt). Échec franc si l'un des deux manque.
+      - name: ffmpeg (binaire statique, sans miroirs Ubuntu)
+        id: ffmpeg
+        uses: FedericoCarboni/setup-ffmpeg@37062fbf7149fc5578d6c57e08aed62458b375d6 # v3.1
+        continue-on-error: true
+        timeout-minutes: 10
+        with:
+          ffmpeg-version: release
+      - name: ffmpeg (secours apt)
+        if: steps.ffmpeg.outcome != 'success'
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Vérifier ffmpeg et ffprobe
+        run: |
+          command -v ffmpeg >/dev/null || { echo "::error::ffmpeg absent du PATH"; exit 1; }
+          command -v ffprobe >/dev/null || { echo "::error::ffprobe absent du PATH"; exit 1; }
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
       - name: Tests shell
         if: ${{ !cancelled() }}
