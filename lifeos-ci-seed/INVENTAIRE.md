@@ -144,3 +144,43 @@ chemins) ; les exceptions où une autre source est plus complète sont signalée
 - `wippush.sh` — À garder : **seed** (`e58054e959fc`, 274 l.) : `REMOTE` dérivé de `TARGET_REPO`/liste blanche via `allowed-repos.sh`, garde-fous. galass (`54307e994db6`, 270 l.) est proche ; antonly (`97e0dc2de590`, 254 l.) reste figé sur antenly.
 - `with-emulators-test.sh` — À garder : **seed** (`3f687c1b4838`, 610 l.) = galass + profondeur de chemin.
 
+### Fichiers de noms différents mais de même rôle
+
+- Aucun couple renommé détecté : tous les tests et outils partagés portent le même nom de fichier
+  d'une source à l'autre (les écarts sont des versions, pas des renommages).
+- Seule collision de nom dans le seed : `opencode/allowed-repos.sh` (bibliothèque sourcée, 27 l.,
+  `67623897a7ff`) et `targets/allowed-repos.sh` (CLI, 105 l., `5e889d46ef8f`). Même nom, rôles
+  différents : ne pas fusionner ; le CLI `targets/` est un sur-ensemble fonctionnel (liste plus
+  large, `validate`/`normalize_extra_repos`).
+
+### Doublons dans `lifeos-ci-seed/`
+
+- **Aucun doublon de contenu interne** : sur les 66 scripts `*.sh/*.ts/*.py` du seed (65 dans le
+  périmètre `opencode/` + `targets/allowed-repos.sh`), aucun sha256 n'apparaît deux fois.
+- **Aucun doublon de nom de base** dans `opencode/` ; la seule collision est `allowed-repos.sh`
+  (`opencode/` vs `targets/`), aux rôles distincts.
+- **21 scripts distincts (27 instances) sont des copies octet pour octet d'un fichier upstream**
+  (doublons délibérés de la graine) :
+  - identiques à antenly **et** galass : `done-check-call.sh`, `leaklog.sh`, `lib.sh`,
+    `split-diff-test.sh`, `split-diff.sh`, `subagent-fail-test.sh` ;
+  - identiques à antenly seul : `done_check.sh`, `internals-test.sh`, `memcap-livelog-test.sh`,
+    `memcap-test.sh`, `redact-log.sh`, `redact-test.sh`, `step-agents.sh` ;
+  - identiques à galass seul : `allowed-repos.sh`, `autosave-test.sh`, `autosave.sh`,
+    `emu-e2e.sh`, `install-hook-profile.sh`, `merge-signed-carry.sh`, `progress.sh`,
+    `watchdog-test.sh`.
+- Les 25 fichiers de `opencode/tests/upstream-fullrun/` sont des copies **relocalisées** de tests
+  upstream (écart limité à la profondeur de chemin `../`→`../../`, plus quelques versions plus
+  récentes prises à galass : `hmac-state`, `leaklog`, `livelog`, `prompt-contract`, `watchdog`,
+  `wippush`). Ils ne doublonnent aucun test plat du seed (aucun nom de base commun avec
+  `opencode/tests/`).
+
+## Synthèse
+
+- Noms de fichier : **65** ; instances scannées : **151**.
+- Identiques (tous shas présents égaux) : **13** ; différents : **40** ; uniques à une source : **12**.
+- Doublons internes de contenu dans le seed : **0** ; collision de nom : **1** (`allowed-repos.sh`,
+  rôles distincts) ; copies octet pour octet d'upstream : **21** scripts (27 instances).
+- Base recommandée : **seed** (fusion la plus complète et adaptée aux chemins).
+  À porter depuis galass : les cas supplémentaires de `chain-step-test.sh` et le repli
+  `REPORT.md` (`done_check.sh` + tests 9e/9f de `done-check-test.sh`).
+
