@@ -76,3 +76,34 @@ root:root 0755), et `/opt` est rendu non inscriptible en `:894-895`.
   Ce n'est pas un défaut de sécurité ; une validation explicite serait plus lisible.
 
 **Verdict section 2 : à corriger** (fonctionnel OK ; message `:282` à mettre à jour).
+
+## 3. `ci.yml` — déclencheurs, concurrence, secrets, `CI_TOKEN`
+
+- **Déclencheurs : OK.** `ci.yml:2-6` : `push` limité à `branches: [main]`, `pull_request`,
+  `workflow_dispatch`. Un push sur une branche de fonctionnalité ne déclenche donc plus deux fois
+  la CI (push + `pull_request`) : une seule CI par commit, conformément au commit `afcbaa0`.
+- **Concurrence : OK.** `ci.yml:15-17` : `group: ci-${{ github.workflow }}-${{ github.ref }}` +
+  `cancel-in-progress: true`. Un nouveau push sur la même réf annule l'ancien run.
+- **Aucun secret imprimé : OK.** `ci.yml` ne fait aucun `set -x` et n'affiche ni `CI_TOKEN` ni un
+  autre secret ; le seul usage est `token: ${{ secrets.CI_TOKEN }}` pour le checkout privé lifeos
+  (`ci.yml:37`), géré par `actions/checkout`. Le job `gitleaks` (`ci.yml:166-184`) n'utilise aucun
+  secret et scanne tout l'historique (`fetch-depth: 0`, `:172`).
+- **`CI_TOKEN` : OK dans `ci.yml` et les moteurs `_agent-run`.** `ci.yml:37`, `_agent-run.yml:152`
+  (garde), `:196`/`:201` (checkout + clone), `:522-523` (push/PR), `_next.yml:79` utilisent tous
+  `secrets.CI_TOKEN`.
+- **[low] `opencode-fullrun.yml` n'est pas convergé vers `CI_TOKEN`.** Il utilise encore
+  `secrets.ANTENLY_TOKEN` (`:349`), `secrets.LIFEOS_READ_TOKEN` (`:359`), `secrets.GITHUB_TOKEN`
+  (`:883`, preannot même dépôt), `secrets.ANTENLY_PUSH_TOKEN` (`:998`, `:1036`, `:1603`, `:1685`)
+  et `secrets.ANTENLY_CI_DISPATCH_TOKEN` (`:1798`). C'est déjà signalé dans `INVENTAIRE.md:296-299`
+  (« à converger »), non corrigé ici (revue en lecture seule). Les jetons restent hors d'opencode
+  (fichiers root 0600, `env -i`, `::add-mask::` en `:950` et `:2049`).
+- **[low] `_next.yml:130` : booléen passé avec `-f`.** `lifeos_write` est déclaré `type: boolean`
+  (`_next.yml:36-39`) mais redispatché avec `-f lifeos_write=...` au lieu de `-F`. Défaut latent
+  (déjà listé dans `INVENTAIRE.md:334-336`) ; en pratique `_next.yml` s'arrête avant, car les
+  workflows `fr-<phase>-<agent>.yml` ciblés n'existent pas dans le seed.
+- **[low] `pull_request` depuis un fork.** Le checkout lifeos privé (`ci.yml:31-40`) exige
+  `CI_TOKEN`, absent pour un fork ; la CI échouera sur une PR externe. Acceptable pour un dépôt
+  privé, à documenter si les forks sont autorisés.
+
+**Verdict section 3 : OK pour `ci.yml`** ; deux points `low` hors `ci.yml` (`opencode-fullrun`
+non convergé, `-f` dans `_next.yml`).
