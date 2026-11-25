@@ -369,10 +369,11 @@ set +e
 OC_BRANCH=x EMU_E2E_GH="$tmp/mock-gh-wait" "$sh" status '55; id' >/dev/null 2>&1; bad_rc=$?
 OC_BRANCH=x MOCK_MODE=broken MOCK_COUNT="$tmp/view.count" EMU_E2E_GH="$tmp/mock-gh-wait" "$sh" status 55 >/dev/null 2>&1; unread_rc=$?
 set -e
-[ "$bad_rc" -ne 0 ] || ko "status doit refuser un identifiant non numérique"
+[ "$bad_rc" -eq 2 ] || ko "status doit refuser un identifiant non numérique (rc=$bad_rc, attendu 2)"
 [ "$unread_rc" -eq 1 ] || ko "status illisible : rc=$unread_rc (attendu 1)"
-grep -q 'emu-e2e.sh status \*' "$wf" || ko "sudoers : status absent de la liste autorisée"
-ok "status : lecture seule, id numérique, illisible → rc 1, autorisé via sudoers"
+grep -q 'emu-e2e.sh status \[0-9\]\*' "$wf" || ko "sudoers : status [0-9]* absent de la liste autorisée"
+grep -q 'emu-e2e.sh status \*' "$wf" && ko "sudoers : wildcard status * encore présent"
+ok "status : lecture seule, id numérique (rc 2 sinon), illisible → rc 1, autorisé via sudoers sans wildcard large"
 
 # Prompt : lancement détaché sans sous-shell, et règle des 2 cycles sur log figé.
 blk=$("$sh" prompt-block)

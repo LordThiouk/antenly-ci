@@ -386,7 +386,9 @@ watchdog_start() {
 
 status_run() {
   local id="${1:-}" view
-  [[ "$id" =~ ^[0-9]{1,20}$ ]] || fail "status : identifiant de run numérique requis"
+  # Validation stricte (un seul argument, chiffres uniquement) : la règle sudoers n'autorise que
+  # `status [0-9]*`, mais l'outil doit refuser tout le reste avant d'appeler gh (rc 2 dédié).
+  [[ "$id" =~ ^[0-9]{1,20}$ ]] || { echo "status : identifiant de run numérique requis" >&2; exit 2; }
   load_config
   read_token
   view=$(view_run "$id" 2>/dev/null) || { echo "status=illisible run=${id}"; return 1; }
