@@ -105,3 +105,16 @@ chemins) ; les exceptions où une autre source est plus complète sont signalée
 - `done-check-test.sh` — À garder : **seed = antonly** (`e048f4e5c3b6`, 800 l.) qui couvre le code actuel (`OC_DONE_AGENTS_ANY`, sans repli `REPORT.md`). galass (`480c9fd841b5`, 790 l.) contient les cas 9e/9f du repli `REPORT.md` que le `done_check.sh` seed n'implémente pas → à porter avec la fonctionnalité, sinon ils échouent.
 - `done_check.sh` — À garder : **seed = antonly** (`1a6a42108cb4`, 389 l.) : `OC_DONE_AGENTS_ANY` + `OC_DONE_ONLY`. galass (`478489ea9637`, 348 l.) possède en plus le repli automatique `REPORT.md` absent de seed → candidat à porter (avec ses tests 9e/9f).
 
+### Lot 2 (fichiers 11 à 20)
+
+- `extra-repos-test.sh` — À garder : **seed** (`8dafc0f57687`, 436 l.) = galass + profondeur de chemin. Aucun test manquant.
+- `extra-repos.sh` — À garder : **seed** (`57f2d8cebc8a`, 480 l.) : cherche `allowed-repos.sh` dans `opencode/` puis `../targets/`, `set +e` après le source. galass (`978399e958d2`, 476 l.) ne regarde que `opencode/allowed-repos.sh`.
+- `ffmpeg-install-test.sh` — À garder : **seed** (`559a95187587`, 41 l.) = antonly + profondeur de chemin (`../../..`). Aucun écart fonctionnel.
+- `first-link-prompt-test.sh` — À garder : **seed ≈ antonly** (`147 l.`) : vérifie le rc de `prep`, `IN_CHAIN_PROGRESS`, noms d'environnement récents. galass (`c5e657464170`, 148 l.) utilise `IN_CHAIN_COUNT`/`OC_MODEL_FALLBACK` et ne teste pas le rc.
+- `hmac-state-test.sh` — À garder : **seed = galass** (`de9f9db80da7`, 319 l.) : ~49 l. de cas supplémentaires. antonly (`6b1f78d363f3`, 270 l.) n'a pas ces assertions (signature/clé ISA).
+- `hook-profile-install-test.sh` — À garder : **seed** (`e2bd67e2032f`, 98 l.) = antonly/galass + profondeur de chemin. Identique fonctionnellement.
+- `install-hook-profile.sh` — À garder : **seed = galass** (`080e532c3b38`, 94 l.) : le refus est aussi écrit sur `stderr` (lisible par les appelants et les tests). antonly (`c288bbe74040`, 92 l.) n'émet que l'annotation `::error::` sur stdout.
+- `internals-test.sh` — À garder : **seed = antonly** (`3022d090e4ef`, 61 l.) : env `ANTENLY_DIR`/`OC_MODEL_CHAIN`. galass (`248efa5d0631`) utilise `TARGET_DIR`/`OC_MODEL_FALLBACK` ; aucun test manquant.
+- `leaklog-test.sh` — À garder : **seed = galass** (`2f500e83322b`, 92 l.) : fabrique une paire `age` jetable pour vérifier le déchiffrement partout. antonly (`63b64f0d6df0`, 82 l.) dépend de la clé privée de la box (`~/.config/age/fullrun-logs.key`) et ne peut pas déchiffrer en CI.
+- `livelog-test.sh` — À garder : **seed = galass** (`c509cf896be8`, 164 l.) : ~21 l. de cas en plus vs antonly (`01f5c07a498b`, 143 l.).
+
