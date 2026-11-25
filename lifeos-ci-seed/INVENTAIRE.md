@@ -302,4 +302,38 @@ l'assainissement `safe_raw` des raisons de chaînage, et les contrôles `m1`/`m2
 `ANTENLY_PUSH_TOKEN`, `ANTENLY_CI_DISPATCH_TOKEN`) ; il n'est pas encore générique lifeos-ci.
 La version galass est, elle, générique (dépôt cible + dépôts supplémentaires).
 
+### `opencode-task.yml` → `task.yml` + `_agent-run.yml`
+
+**Base à garder : `lifeos-ci-seed/.github/workflows/_agent-run.yml` (15 steps) + le wrapper
+`task.yml`.** C'est la seule version générique (dépôt cible + `extra_repos` + `lifeos_write`),
+réutilisable par `task.yml` et par les `fr-*.yml`, avec quota, garde-fou lifeos, gitleaks épinglé,
+`--redact`, `merge-base --is-ancestor`, push en copie nue `env -i`, `--no-verify` et PR brouillon.
+Le wrapper `task.yml` (0 step local) ne fait que transmettre les entrées à `_agent-run.yml`.
+
+À porter depuis **antenly** (`opencode-task.yml`) :
+
+- `ffmpeg (binaire statique, sans miroirs Ubuntu)` + `ffmpeg (secours apt)` +
+  `Vérifier ffmpeg et ffprobe` ;
+- `Installer la CLI Hugging Face (cible antenly)` et
+  `Télécharger le corpus HF (cible antenly, optionnel)` ;
+- `Checkout acr-senegal en lecture seule` + `Préparer acr-senegal (branches + lecture seule)`
+  (uniquement si la cible antenly reste supportée) ;
+- installation explicite de Node/Python/uv (`Installer Node, Python/uv, opencode et gitleaks`),
+  le seed ne fait qu'un `npm install -g opencode-ai` en supposant Node présent sur le runner.
+
+À porter depuis **galass** (`opencode-task.yml`) :
+
+- refus explicite des modifications `.github/workflows` avant push (galass l. 326-327) : c'est
+  la seule protection de la porte gitleaks encore absente de `_agent-run.yml` ;
+- `Garde du secret` (galass : `GALASS_TOKEN` ; à décliner en `CI_TOKEN`).
+
+Défauts constatés dans le seed, à corriger avec ce lot :
+
+- `_next.yml` dispatche `-f lifeos_write="$LIFEOS_WRITE"` alors que l'entrée est `type: boolean`
+  (il faut `-F`) ;
+- `task.yml` et `fr-plan-vera.yml` dupliquent le même schéma d'entrées et ne diffèrent que par
+  `agent:` et le bloc `next` : un seul wrapper paramétré suffirait ;
+- `fr-plan-vera.yml` conditionne l'enchaînement à `needs.vera.outputs.status == 'ok'` sans
+  vérifier `needs.vera.result == 'success'`.
+
 
