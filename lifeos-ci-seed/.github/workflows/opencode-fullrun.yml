@@ -1849,18 +1849,6 @@ jobs:
           # qui masque la vraie cause (bun: command not found).
           export PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
           out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
-          stop_chain() { out block true; out continue false; out reason "$1"; echo "::error::chaînage arrêté : $1"; exit 0; }
-          finish_chain() { out block false; out continue false; out reason "$1"; echo "chaîne terminée : $1"; exit 0; }
-          # chain_progress = "<count>/<max>" — repinné depuis l'input (voir garde plus haut dans ce
-          # fichier) : ce step vit dans un job séparé, il n'hérite pas des variables shell du garde.
-          IFS='/' read -r IN_CHAIN_COUNT IN_CHAIN_MAX <<<"$IN_CHAIN_PROGRESS"
-
-          # stop_after_step est EXCLUSIF avec le chaînage : un job borné s'arrête après son étape et
-          # ne dispatche JAMAIS le lien suivant, même si chain_enabled=true a été fourni par erreur.
-          # Décidé avant toute lecture d'état (bun/unit) et avant le moindre gh workflow run.
-          if [ -n "${IN_STOP_AFTER_STEP:-}" ]; then
-            finish_chain "stop_after_step=${IN_STOP_AFTER_STEP} : job borné, aucun lien suivant dispatché"
-          fi
 
           # Nettoie la sortie brute avant de la journaliser : masque les motifs de jeton connus,
           # replie les sauts de ligne (une ligne « ::… » injectée deviendrait une workflow command),
@@ -1880,13 +1868,36 @@ jobs:
             printf '%s' "${s:0:400}"
           }
 
+          # Toute raison passe par safe_raw (jetons masqués, sauts de ligne repliés : une valeur « reason »
+          # venue de unit --isa ne peut ni injecter une workflow command ni une ligne de GITHUB_OUTPUT).
+          stop_chain() { local m; m=$(safe_raw "$1"); out block true; out continue false; out reason "$m"; echo "::error::chaînage arrêté : $m"; exit 0; }
+          finish_chain() { local m; m=$(safe_raw "$1"); out block false; out continue false; out reason "$m"; echo "chaîne terminée : $m"; exit 0; }
+
+          # Nombre de liens : format antenly IN_CHAIN_PROGRESS="<count>/<max>", ou format galass
+          # IN_CHAIN_COUNT/IN_CHAIN_MAX (unit-contract-test.sh). Les deux restent acceptés.
+          if [ -n "${IN_CHAIN_PROGRESS:-}" ]; then
+            # chain_progress = "<count>/<max>" — repinné depuis l'input (voir garde plus haut dans ce
+            # fichier) : ce step vit dans un job séparé, il n'hérite pas des variables shell du garde.
+            IFS='/' read -r IN_CHAIN_COUNT IN_CHAIN_MAX <<<"$IN_CHAIN_PROGRESS"
+          else
+            IN_CHAIN_COUNT="${IN_CHAIN_COUNT:-0}"
+            IN_CHAIN_MAX="${IN_CHAIN_MAX:-20}"
+          fi
+
+          # stop_after_step est EXCLUSIF avec le chaînage : un job borné s'arrête après son étape et
+          # ne dispatche JAMAIS le lien suivant, même si chain_enabled=true a été fourni par erreur.
+          # Décidé avant toute lecture d'état (bun/unit) et avant le moindre gh workflow run.
+          if [ -n "${IN_STOP_AFTER_STEP:-}" ]; then
+            finish_chain "stop_after_step=${IN_STOP_AFTER_STEP} : job borné, aucun lien suivant dispatché"
+          fi
+
           # bun est requis juste en dessous (lecture de l'état du lien) : diagnostic explicite plutôt
           # qu'un « unit --isa illisible » qui masquerait un PATH durci sans le dossier de bun.
           command -v bun >/dev/null 2>&1 \
             || stop_chain "bun introuvable après durcissement du PATH (attendu dans $HOME/.bun/bin) : état du lien illisible"
 
           # B1 : la gate anti-secret (check) et le push protègent l'intégrité de la branche/de l'historique
-          # — un échec de l'un ou l'autre ne doit JAMAIS être masqué par un redispatch qui, en plus,
+          # — un échec de l'un ou de l'autre ne doit JAMAIS être masqué par un redispatch qui, en plus,
           # supprime la notification de fin (continue=true côté « Notification de fin »). Contrôlé avant
           # toute lecture d'état ISA, avant même le cas opencode ci-dessous.
           if [ "${CHECK_OUTCOME:-}" != success ]; then
@@ -1918,7 +1929,8 @@ jobs:
             [ "${RESTORE_STATE_OUTCOME:-}" = success ] \
               || stop_chain "restauration de l'état du lien précédent en échec (restore_state) : lien suivant non dispatché"
             case "${RESTORE_STATE_STATUS:-}" in
-              refused) stop_chain "état du lien précédent refusé (signature/clé/archive) : cold start silencieux refusé, une tâche pourrait être refaite ou sautée" ;;
+              refused) stop_chain "état du lien précédent refusé (signature/clé/archive) : chaîne arrêtée, cold start silencieux refusé (une tâche pourrait être refaite ou sautée)" ;;
+              failed) stop_chain "téléchargement de l'état du lien précédent en échec alors qu'il l'avait publié (has_state=true) : chaîne arrêtée, pas de cold start silencieux" ;;
               ""|missing|restored) : ;;
               *) stop_chain "statut de restauration inconnu (${RESTORE_STATE_STATUS}) : lien suivant non dispatché" ;;
             esac
@@ -1937,7 +1949,12 @@ jobs:
             build) gran=task ;;
             verify) gran=agent ;;
           esac
-          ISA_ABS="$ANTENLY_DIR/$OC_ISA_PATH"
+          # m4 : isa_path re-validé ici (jamais supposé sain parce que le garde l'a déjà vu) avant d'être
+          # joint au dépôt cible : MEMORY/WORK/<dossier>/ISA.md, sans « .. ».
+          TARGET_ROOT="${TARGET_DIR:-${ANTENLY_DIR:-}}"
+          [[ "$OC_ISA_PATH" =~ ^MEMORY/WORK/[A-Za-z0-9._-]+/ISA\.md$ && "$OC_ISA_PATH" != *..* ]] \
+            || stop_chain "isa_path invalide (MEMORY/WORK/<dossier>/ISA.md) : état illisible"
+          ISA_ABS="$TARGET_ROOT/$OC_ISA_PATH"
           [ -f "$ISA_ABS" ] || stop_chain "ISA introuvable ($OC_ISA_PATH) : état illisible"
 
           set +e
@@ -1949,7 +1966,9 @@ jobs:
           kind=$(printf '%s' "$raw" | jq -r '.exit // ""' 2>/dev/null) || kind=""
           reason=$(printf '%s' "$raw" | jq -r '.reason // ""' 2>/dev/null) || reason=""
           nxt=$(printf '%s' "$raw" | jq -r '.next // ""' 2>/dev/null) || nxt=""
-          echo "unit --isa : kind=${kind:-<vide>} reason=${reason:-<aucune>} next=${nxt:-<aucun>}" >> "$GITHUB_STEP_SUMMARY" || true
+          # m1 : valeurs issues de l'outil assainies avant tout log/résumé (la logique garde les valeurs strictes).
+          reason=$(safe_raw "$reason"); nxt_log=$(safe_raw "$nxt")
+          echo "unit --isa : kind=$(safe_raw "${kind:-<vide>}") reason=${reason:-<aucune>} next=${nxt_log:-<aucun>}" >> "$GITHUB_STEP_SUMMARY" || true
           if [ -z "$kind" ]; then
             echo "::error::unit --isa sortie illisible (phase $IN_CHAIN_PHASE, $gran) : $(safe_raw "$raw")" >&2
             stop_chain "unit --isa illisible (phase $IN_CHAIN_PHASE, $gran)"
@@ -1963,14 +1982,31 @@ jobs:
           # cible déjà calculée par unit --isa (ID de tâche en build, nom d'agent en verify) n'est
           # imposée au prompt suivant que si la phase ne change pas — un changement de phase (nxt =
           # numéro d'étape 4/5/6) laisse la nouvelle phase choisir sa première tâche/son premier agent.
-          # La PHASE suivante est décidée ici ; le PROMPT ne l'est PAS : prompt_path est transmis
-          # inchangé et la garde du lien suivant choisit son prompt depuis SON chain_phase (même
-          # décision qu'ici, mais un seul endroit — évite le prompt plan envoyé à un lien build).
           next_phase="$IN_CHAIN_PHASE"; new_next=""
+          # M2 : valeurs de .next ATTENDUES par phase (contrat de unit --isa, vérifié contre le vrai outil
+          # par opencode/tests/unit-contract-test.sh). Toute autre valeur arrête la chaîne avec une raison :
+          # jamais un lien relancé sans cible jusqu'à chain_max.
+          tgt_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
           case "$IN_CHAIN_PHASE" in
-            plan)   [ "$nxt" = 4 ] && next_phase=build ;;
-            build)  if [ "$nxt" = 5 ]; then next_phase=verify; else new_next="$nxt"; fi ;;
-            verify) if [ "$nxt" = 6 ]; then next_phase=close; else new_next="$nxt"; fi ;;
+            plan)
+              case "$nxt" in
+                1|2|3) : ;;
+                4) next_phase=build ;;
+                *) stop_chain "unit --isa : next inattendu en phase plan (${nxt_log:-<vide>}, attendu 1 à 4) — $reason" ;;
+              esac ;;
+            build)
+              if [ "$nxt" = 5 ]; then next_phase=verify
+              elif [[ "$nxt" =~ $tgt_re ]]; then new_next="$nxt"
+              else stop_chain "unit --isa : cible de tâche absente ou invalide en phase build (${nxt_log:-<vide>}) — $reason"; fi ;;
+            verify)
+              if [ "$nxt" = 6 ]; then next_phase=close
+              elif [[ "$nxt" =~ $tgt_re ]]; then new_next="$nxt"
+              else stop_chain "unit --isa : cible d'agent absente ou invalide en phase verify (${nxt_log:-<vide>}) — $reason"; fi ;;
+            close)
+              case "$nxt" in
+                6|7) : ;;
+                *) stop_chain "unit --isa : next inattendu en phase close (${nxt_log:-<vide>}, attendu 6 ou 7) — $reason" ;;
+              esac ;;
           esac
           new_count=$((10#$IN_CHAIN_COUNT + 1))
           # Strict < (jamais <=) : même règle qu'au garde (l.236 avant ce correctif) — count == max
@@ -1980,6 +2016,23 @@ jobs:
 
           [ -n "${DISPATCH_TOKEN:-}" ] \
             || stop_chain "secret ANTENLY_CI_DISPATCH_TOKEN absent (acte Papa requis) : lien suivant non dispatché — $reason"
+
+          # Compatibilité galass : quand l'environnement ne fournit PAS IN_CHAIN_PROGRESS (format galass,
+          # utilisé par unit-contract-test.sh), l'état du lien suivant est aussi transmis en JSON chain_state
+          # (phase/next/...), en plus des champs antenly ci-dessous. En production antenly, IN_CHAIN_PROGRESS
+          # est toujours posé : le dispatch reste strictement inchangé.
+          chain_state_args=()
+          if [ -z "${IN_CHAIN_PROGRESS:-}" ]; then
+            emu_run=""
+            if [ "${IN_WITH_EMU:-false}" = true ]; then
+              emu_run=$(sudo -n cat /opt/fullrun-live/emu-run 2>/dev/null | tr -d '[:space:]') || emu_run=""
+              [[ "$emu_run" =~ ^[0-9]{1,20}$ ]] || emu_run=""
+            fi
+            has_val=false; [ "${HAS_STATE:-}" = true ] && has_val=true
+            next_state=$(jq -cn --arg ph "$next_phase" --arg n "$new_count" --arg pv "$RUN_ID" --arg nx "$new_next" --arg em "$emu_run" --arg hs "$has_val" \
+              '{phase:$ph,count:$n,prev:$pv,next:$nx,emu:$em,has:$hs}')
+            chain_state_args=(-f chain_state="$next_state")
+          fi
           echo "::add-mask::$DISPATCH_TOKEN"
           if GH_TOKEN="$DISPATCH_TOKEN" gh workflow run opencode-fullrun.yml \
                --repo LordThiouk/antenly-ci --ref "${GITHUB_REF_NAME}" \
@@ -1987,13 +2040,14 @@ jobs:
                -f model_main="$OC_MODEL_MAIN" -f model_max="$OC_MODEL_MAX" \
                -f model_chain="$OC_MODEL_CHAIN" \
                -f lifeos_ref="$IN_LIFEOS_REF" -f isa_path="$OC_ISA_PATH" -f start_step="" \
-               -f base_branch="${IN_BASE:-}" -f hf_corpus="$IN_HF_CORPUS" \
+               -f base_branch="${IN_BASE:-}" -f hf_corpus="${IN_HF_CORPUS:-}" \
                -f agent_idle_minutes="$IN_AGENT_IDLE_MIN" -f idle_minutes="$IN_IDLE_MIN" \
                -f done_agents="${OC_DONE_AGENTS_EFFECTIVE:-${IN_DONE_AGENTS:-Max}}" -f wip_push_minutes="$IN_WIP_PUSH_MIN" \
                -f chain_enabled=true -f chain_phase="$next_phase" \
                -f chain_progress="${new_count}/${IN_CHAIN_MAX}" -f prompt_path_build="$IN_PROMPT_BUILD" \
                -f prompt_path_verify="$IN_PROMPT_VERIFY" -f prompt_path_close="$IN_PROMPT_CLOSE" \
                -f prev_run_id="$RUN_ID" -f next="$new_next" \
+               "${chain_state_args[@]}" \
                >/dev/null 2>&1; then
             out block false; out continue true
             out reason "lien $new_count/$IN_CHAIN_MAX dispatché (phase $next_phase) — $reason"
