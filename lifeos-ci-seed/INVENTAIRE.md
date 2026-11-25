@@ -184,3 +184,92 @@ chemins) ; les exceptions où une autre source est plus complète sont signalée
   À porter depuis galass : les cas supplémentaires de `chain-step-test.sh` et le repli
   `REPORT.md` (`done_check.sh` + tests 9e/9f de `done-check-test.sh`).
 
+---
+
+# Workflows et steps — antenly-ci / galass-ci / lifeos-ci-seed
+
+- Date : 2026-11-25
+- Branche : `seed/lifeos-ci-2026-11-24`
+- Périmètre : fichiers `.github/workflows/*.yml` des trois sources.
+- Sources : `antenly-ci` = dépôt courant (`.`), `galass-ci` = clone `/tmp/galass-ci`
+  (`https://github.com/LordThiouk/galass-ci`, profondeur 1), `lifeos-ci-seed` = `lifeos-ci-seed/`.
+- Exclus des recherches : `node_modules`, `.git`, `dist`, `build`, `.venv`.
+- Méthode : extraction des lignes `- name:` (numéro de ligne + libellé). `rg` étant absent du
+  runner, l'extraction a été faite avec `grep -nE '^[[:space:]]+- name:'` puis `sed` ; résultat
+  consigné dans `/tmp/steps.txt`. Les steps `uses:` sans `name:` (checkout, setup-bun, etc.) ne
+  sont donc **pas** comptés ; ils sont signalés à part quand ils créent un doublon de rôle.
+
+## Étape A — table de correspondance par fichier de workflow
+
+| Workflow | antenly-ci | galass-ci | lifeos-ci-seed | Rôle / remarque |
+|---|---|---|---|---|
+| `opencode-fullrun.yml` | 32 steps | 33 steps | 32 steps | FullRun monolithique (même lignée antenly→seed) |
+| `opencode-task.yml` | 16 steps | 12 steps | — | Tâche simple ; remplacé dans le seed par `task.yml` + `_agent-run.yml` |
+| `ci.yml` | 16 steps | 5 steps | 14 steps | **Rôles différents** : antenly = CI de l'app (Postgres/RLS/preannot) ; galass = tests opencode ; seed = shellcheck/actionlint + tests shell |
+| `ci-scripts.yml` | 5 steps | — (rôle assuré par `ci.yml`) | 5 steps | Tests opencode ; antenly et seed sont **identiques** |
+| `isa-human-tick.yml` | 7 steps | 9 steps | — | human-tick / human-verify |
+| `_agent-run.yml` | — | — | 15 steps | Moteur réutilisable appelé par `task.yml` et `fr-*.yml` |
+| `_next.yml` | — | — | 1 step | Chaînage vers le prochain agent |
+| `fr-plan-vera.yml` | — | — | 0 step local | Wrapper : délègue à `_agent-run.yml` puis `_next.yml` |
+| `task.yml` | — | — | 0 step local | Wrapper : délègue à `_agent-run.yml` |
+| `inventory-pass2.yml` | 11 steps | — | — | Inventaire (spécifique antenly) |
+| `inventory-probe.yml` | 13 steps | — | — | Inventaire (spécifique antenly) |
+| `language.yml` | 17 steps | — | — | Détection de parole (spécifique antenly) |
+| `pr-dispatch.yml` | 1 step | — | — | Redispatch CI (spécifique antenly) |
+| **Total** | **118 steps / 9 fichiers** | **59 steps / 4 fichiers** | **67 steps / 7 fichiers** | |
+
+### Steps présents dans une seule source (même nom de workflow)
+
+Comparaison par **nom exact** de step. Un step présent une seule fois parmi les sources qui
+possèdent le fichier est listé ci-dessous.
+
+- `ci-scripts.yml` (antenly, seed) : **aucun step unique** — les deux fichiers sont identiques.
+- `opencode-fullrun.yml` (antenly, galass, seed) :
+  - antenly : aucun ;
+  - seed : aucun ;
+  - galass (8) : `Garde du secret GALASS_TOKEN`, `Checkout galass-ci`,
+    `Valider target_repo et extra_repos (liste blanche unique)`,
+    `Checkout du dépôt cible (lecture seule)`, `Checkout des dépôts supplémentaires`,
+    `Préparer le dépôt cible et le prompt`,
+    `Contrôles et push des dépôts supplémentaires (jamais main, jamais force)`,
+    `PR en brouillon des dépôts supplémentaires (jamais fusionnées)`.
+    → Ce sont les steps **extra_repos** + **jeton/validation** propres à galass, absents du
+    fullrun antenly/seed.
+- `opencode-task.yml` (antenly, galass) :
+  - antenly (11) : `Checkout du dépôt cible (branche)`,
+    `Checkout acr-senegal en lecture seule (cible antenly)`,
+    `Préparer acr-senegal (branches + lecture seule)`, `Préparer prompt et SHA de départ`,
+    `Installer Node, Python/uv, opencode et gitleaks`, les deux steps ffmpeg,
+    `Vérifier ffmpeg et ffprobe`, `Installer la CLI Hugging Face (cible antenly)`,
+    `Télécharger le corpus HF (cible antenly, optionnel)`,
+    `Contrôle gitleaks et push fast-forward` ;
+  - galass (7) : `Garde du secret GALASS_TOKEN`, `Checkout galass-ci`,
+    `Valider target_repo (liste blanche unique)`, `Checkout du dépôt cible (lecture seule)`,
+    `Préparer le prompt et le SHA de départ`,
+    `Installer opencode et gitleaks (épinglés, sha256 vérifié)`,
+    `Contrôle gitleaks et push en avance rapide`.
+- `isa-human-tick.yml` (antenly, galass) :
+  - antenly (1) : `gitleaks (diff de ce tick uniquement)` ;
+  - galass (3) : `Checkout galass-ci (allowed-repos.sh)`,
+    `Valider target_repo (liste blanche unique)`,
+    `gitleaks (diff de ce tick uniquement, épinglé, sha256 vérifié)`.
+- `ci.yml` (antenly, galass, seed) : les trois fichiers n'ont pas le même rôle, la comparaison
+  par nom est donc peu significative :
+  - antenly (12) : `Statut pending sur le commit antenly`, `ffmpeg/ffprobe présents avant pytest`,
+    `Audit de sécurité interne (ISC-27)`, `Pile de dev (Postgres 16.4, ClickHouse 24.8, SeaweedFS 3.80)`,
+    `Migrations (...)`, `Sondes d'intégration RLS (...)`, `Arrêt de la pile`,
+    `Pipeline preannot présent ?`, `Dépendances ina + TensorFlow CPU`,
+    `test_preannot_pipeline.py avec le vrai segmenteur`, `Python licences (deny GPL/AGPL)`,
+    `Statut sur le commit antenly` ;
+  - galass (2) : `Tests opencode`, `gitleaks detect (épinglé, sha256 vérifié)` ;
+  - seed (9) : `Checkout`, `Installer ShellCheck si absent`, `ShellCheck`,
+    `Installer ripgrep (tests shell)`, `Installer actionlint (binaire officiel épinglé)`,
+    `Actionlint`, `Setup bun (épinglé par SHA)`, `Vérifier ffmpeg et ffprobe`, `Tests shell`.
+
+### Workflows présents dans une seule source
+
+- antenly uniquement : `inventory-pass2.yml`, `inventory-probe.yml`, `language.yml`,
+  `pr-dispatch.yml`.
+- seed uniquement : `_agent-run.yml`, `_next.yml`, `fr-plan-vera.yml`, `task.yml`.
+- Aucun workflow unique à galass (ses 4 fichiers ont un équivalent de nom dans les autres sources).
+
