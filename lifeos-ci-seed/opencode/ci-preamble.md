@@ -45,6 +45,20 @@ Tu tournes sur un runner GitHub Actions public, pas sur la box. Suis le FullRun.
 - Modèles : principal et Forge `$OC_MODEL_MAIN`, Max `$OC_MODEL_MAX` (gratuits opencode).
 - Pas de VPS, pas de FreeLLM, pas de Mac. Pas de merge, pas de déploiement.
 
+## Preannot (seulement si le run en a besoin)
+
+Le preannot (`ci.yml`, job `preannot-ina` : vrai inaSpeechSegmenter + TensorFlow CPU) tourne
+sur GitHub, pas sur ce runner. Si ta tâche a besoin de ce verdict, appelle seulement :
+
+    /opt/fullrun-tools/preannot.sh run
+
+L'outil déclenche `ci.yml` sur `$OC_BRANCH` (toute la CI ; le job `preannot-ina` en fait partie),
+attend un délai borné, télécharge les artefacts éventuels dans le dossier du job et n'affiche
+qu'un verdict + un court extrait. Tu n'as aucun jeton : pas de `gh` toi-même, pas de copie du
+script.
+
+---
+
 ## Contrat de prompt (non négociable)
 
 Dans cet ordre de priorité :
