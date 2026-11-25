@@ -46,3 +46,14 @@ de l'agent) → `done_check.sh` (verdict réel) → carry/checkpoint signé → 
   dépendent du build.
 - Vague 4 : `agent-max` (dépend de tous les verify), puis `agent-close` (même workflow Max).
 - `agent-nix` orchestre, ne se lance pas en parallèle des vagues.
+
+## Questions ouvertes
+
+- Clone lifeos impossible (dépôt privé, aucun `CI_TOKEN`/`GH_TOKEN` exposé) : chemins `agents/*.md`
+  et noms exacts à confirmer ; le mapping vient de `step-agents.sh`/`_next.yml`.
+- Vera/Serena : agents ou phases ? `step-agents.sh` attribue leurs verdicts à Algorithm/Architect.
+- Faut-il un workflow pour les agents hors FullRun (Artist, chercheurs, BrowserAgent déprécié) ?
+- `_agent-run.yml` actuel n'expose pas `stop_after_step`/`target_agent`/`chain_phase` : inputs à
+  ajouter pour un vrai run par agent.
+- Parallélisme build : branches/PR séparées nécessaires, sinon conflits de push et de carry.
+- `agent-close` séparé ou étape de `agent-max` ? Le pipeline fusionne 6 `max` et 7 `close`.
