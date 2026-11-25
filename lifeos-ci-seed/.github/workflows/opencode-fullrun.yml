@@ -522,6 +522,7 @@ jobs:
           set +x
           # Verdict du step, consommé par la gate du step chain : restored (état transporté),
           # missing (aucun artefact — cas normal des premiers liens, sans état runtime à transmettre)
+          # failed (has_state=true mais téléchargement en échec : transport/permission, jamais une absence)
           # ou refused (artefact présent mais NON fiable : clé absente, signature invalide, archive
           # ou déchiffrement illisible). Un refus arrête la chaîne : repartir en cold start ferait
           # refaire ou sauter une tâche, sans trace lisible dans le résumé.
@@ -531,6 +532,12 @@ jobs:
           mkdir -p "$D"
           name="fullrun-state-${IN_JOB}"
           if ! gh run download "$PREV_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$name" --dir "$D" >/tmp/dl.log 2>&1; then
+            if [ "${HAS_STATE_PREV:-}" = true ]; then
+              out status failed
+              echo "::error::le lien précédent ($PREV_RUN_ID) a publié un état (has_state=true) mais le téléchargement échoue (permission actions, réseau ou artefact expiré) : chaîne arrêtée, pas de cold start silencieux — $(tr '\r\n' '  ' </tmp/dl.log | cut -c1-200)"
+              sum "- État FullRun : **téléchargement en échec** alors que le run $PREV_RUN_ID l'avait publié (chaîne arrêtée)"
+              exit 1
+            fi
             out status missing
             echo "::warning::artefact d'état introuvable pour le run précédent ($PREV_RUN_ID) : reprise sans état (cold start — build_plan/build_tasks/dispatches du lien précédent non transmis)"
             sum "- État FullRun : artefact introuvable pour le run $PREV_RUN_ID (cold start assumé)"
@@ -547,7 +554,7 @@ jobs:
           # diagnostic ne soit jamais confondu avec un artefact réellement falsifié.
           if [ -z "${ISA_STAMP_KEY:-}" ]; then
             out status refused
-            echo "::warning::ISA_STAMP_KEY absente ou vide : vérification HMAC impossible, reprise sans état (jamais une signature acceptée sans clé pour la vérifier)"
+            echo "::warning::ISA_STAMP_KEY absente ou vide : vérification HMAC impossible, chaîne arrêtée (jamais une signature acceptée sans clé pour la vérifier)"
             sum "- État FullRun : **non restauré** — ISA_STAMP_KEY absente, artefact non vérifiable (chaîne arrêtée)"
           else
             ok=0
@@ -580,14 +587,19 @@ jobs:
               sum "- État FullRun : restauré depuis le run $PREV_RUN_ID"
             else
               out status refused
-              echo "::warning::artefact d'état manquant, signature invalide ou archive illisible, ou déchiffrement en échec : reprise sans état (jamais accepté sans preuve — fichier modifié ou autre clé)"
+              echo "::warning::artefact d'état manquant, signature invalide ou archive illisible, ou déchiffrement en échec : chaîne arrêtée (jamais accepté sans preuve — fichier modifié ou autre clé)"
               sum "- État FullRun : **non restauré** — artefact présent mais refusé (signature invalide, clé différente, déchiffrement ou archive illisible) : chaîne arrêtée plutôt qu'un cold start silencieux"
             fi
           fi
           # Usage unique, acceptée ou non : jamais repris par un autre lien ou un run concurrent.
           art_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREV_RUN_ID/artifacts" --jq ".artifacts[] | select(.name==\"$name\") | .id" 2>/dev/null | head -1) || true
           if [ -n "${art_id:-}" ]; then
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$art_id" >/dev/null 2>&1 || true
+            if ! gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$art_id" >/dev/null 2>&1; then
+              echo "::warning::suppression de l'artefact d'état $art_id en échec (permission actions: write ou réseau) : l'usage unique n'est PAS garanti pour ce lien"
+              sum "- État FullRun : **suppression de l'artefact $art_id en échec** (usage unique non garanti)"
+            fi
+          else
+            echo "::warning::artefact d'état du run $PREV_RUN_ID introuvable à la suppression (déjà supprimé ou expiré)"
           fi
 
       - name: Préparer le dépôt antenly et le prompt
