@@ -40,7 +40,7 @@
 # sinon code d'opencode (124/125 d'opencode lui-même deviennent 1 pour ne pas être confondus avec
 # une décision du moniteur).
 #
-# Variables obligatoires : ANTENLY_DIR, OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
+# Variables obligatoires : TARGET_DIR (repli ANTENLY_DIR), OC_PROMPT_FILE, OC_LOG, OC_MODEL_MAIN, OC_DEADLINE_EPOCH,
 # OC_IDLE_MIN. Optionnelles : OC_BIN, OC_POLL_SEC, OC_KILL_GRACE, OC_IDLE_SEC (tests),
 # OC_ERROR_IDLE_SEC, OC_SUBAGENT_IDLE_SEC, OC_STALL_RESUMES, OC_CONTINUE_PROBE_SEC, OC_MODEL_CHAIN,
 # OC_STORE_DIR, OC_AGENT_DIR, OC_INTERNAL_LOG,
@@ -59,7 +59,11 @@ set +x
 set -uo pipefail
 export LIFEOS_FULLRUN=1
 export LIFEOS_HOOK_PROFILE="${LIFEOS_HOOK_PROFILE:-fullrun}"
-: "${ANTENLY_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" \
+# TARGET_DIR (version galass) ou ANTENLY_DIR (version antenly) : les deux noms restent acceptés,
+# pour ne pas casser les tests/appelants historiques qui ne fournissent que l'un des deux.
+TARGET_DIR="${TARGET_DIR:-${ANTENLY_DIR:-}}"
+ANTENLY_DIR="${ANTENLY_DIR:-$TARGET_DIR}"
+: "${TARGET_DIR:?}" "${OC_PROMPT_FILE:?}" "${OC_LOG:?}" "${OC_MODEL_MAIN:?}" \
   "${OC_DEADLINE_EPOCH:?}" "${OC_IDLE_MIN:?}"
 OC_BIN="${OC_BIN:-opencode}"
 POLL="${OC_POLL_SEC:-30}"; GRACE="${OC_KILL_GRACE:-60}"
@@ -178,7 +182,7 @@ AGENT_RUNNING=""; AGENT_LOOKUP_AT=0; AGENT_LIMIT="$EFFECTIVE_IDLE"; AGENT_NOTED=
 # comme « actifs » ; un enfant bloqué (sleep, attente réseau) n'en gagne pas.
 CHILD_CPU_MIN="${OC_CHILD_CPU_MIN:-10}"
 [[ "$CHILD_CPU_MIN" =~ ^[0-9]{1,6}$ ]] || CHILD_CPU_MIN=10
-cd "$ANTENLY_DIR" || exit 90
+cd "$TARGET_DIR" || exit 90
 # opencode ne reçoit pas les fichiers de commandes du runner : il ne peut ni poser de variables
 # ou de PATH pour les steps suivants, ni écrire dans le Summary public, ni de sorties de step.
 unset GITHUB_ENV GITHUB_PATH GITHUB_OUTPUT GITHUB_STATE GITHUB_STEP_SUMMARY
@@ -476,7 +480,7 @@ done_check() {
   [ -f "$DONE_CHECK_BIN" ] || return 1
   OC_STORE_DIR="$OC_STORE_DIR" \
   OC_HOOKS_LOG="${OC_HOOKS_LOG:-$HOME/.local/state/opencode-lifeos/hooks.log}" \
-  OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$ANTENLY_DIR" \
+  OC_REPORT="${OC_REPORT:-}" OC_DONE_REPO="$TARGET_DIR" \
   OC_ISA="${OC_ISA:-${OC_ISA_PATH:-}}" OC_DONE_VERIFY="${OC_DONE_VERIFY:-}" \
   OC_MAX_SUBAGENT="${OC_MAX_SUBAGENT:-Max}" OC_DONE_AGENTS="${OC_DONE_AGENTS:-}" \
   OC_DONE_AGENTS_ANY="${OC_DONE_AGENTS_ANY:-}" \
@@ -722,7 +726,7 @@ resume_context() {
     if [ -f /opt/fullrun-tools/checkpoint.sh ]; then bin=/opt/fullrun-tools/checkpoint.sh
     else bin="$(cd "$(dirname "$0")" && pwd)/checkpoint.sh"; fi
   fi
-  [ -f "$bin" ] && bash "$bin" resume-text --job "${OC_JOB:-fullrun}" --repo "$ANTENLY_DIR" 2>/dev/null \
+  [ -f "$bin" ] && bash "$bin" resume-text --job "${OC_JOB:-fullrun}" --repo "$TARGET_DIR" 2>/dev/null \
     | head -c 6000 || true
 }
 
