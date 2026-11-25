@@ -1,61 +1,63 @@
 # antenly-ci
 
 CI publique (minutes GitHub Actions gratuites) pour le dépôt privé `LordThiouk/antenly`.
-Ce dépôt ne contient que des workflows : le code reste dans `antenly`, récupéré au run
-avec le secret `ANTENLY_TOKEN` (jeton fine-grained limité à `antenly`).
+Ce dépôt ne contient que la CI **produit** : le code reste dans `antenly`, récupéré au
+run avec le secret `ANTENLY_TOKEN` (jeton fine-grained limité à `antenly`).
 
-- `ci.yml` : statut `antenly-ci` pending, puis rust, python (ISC-1 à ISC-21 et ISC-27, `tests/security` + audit interne), security-stack (ISC-22 à ISC-24, RLS Postgres/ClickHouse/SeaweedFS sur la vraie pile de dev `docker compose`, 0 skip sous `ANTENLY_DEV_STACK=1`), preannot-ina (vrai inaSpeechSegmenter + TensorFlow CPU), licences, secrets (gitleaks), puis success/failure sur le commit d'`antenly` testé.
-- `pr-dispatch.yml` : cron toutes les 15 min (ou à la main), lance `ci.yml` pour chaque SHA de tête de PR ouverte d'`antenly` sans statut `antenly-ci`. GitHub suspend les crons d'un dépôt public après 60 jours sans activité : le réactiver dans l'onglet Actions.
-- `inventory-probe.yml` : passe 1 (cron lundi 04:00 UTC, ou à la main).
-- `inventory-pass2.yml` : passe 2 1 h plus tard (cron lundi 05:00 UTC), rapport, gates, PR `inventory/auto-update` sur `antenly`.
-- `opencode-fullrun.yml` : longs jobs opencode (FullRun LifeOS) sur une branche de fonctionnalité d'`antenly`, à la main uniquement (voir plus bas).
-- `opencode-task.yml` : tâches opencode courtes hors FullRun, à la main uniquement, sur une branche de fonctionnalité d'`antenly` (défaut) ou d'`antenly-ci` (input `target_repo`).
+Ce dépôt ne porte que la CI produit ; les runs opencode / FullRun (machinerie,
+scripts, prompts, agents et garde-fous) vivent dans `LordThiouk/lifeos-ci`. Voir
+`CLEANUP.md` pour l'inventaire du nettoyage.
 
-Les logs et artifacts de ce dépôt sont publics. Aucun push direct sur une branche de base d'`antenly` ; le merge reste manuel.
+## Workflows produit
+
+- `ci.yml` : statut `antenly-ci` pending, puis rust, python (ISC-1 à ISC-21 et ISC-27,
+  `tests/security` + audit interne), security-stack (ISC-22 à ISC-24, RLS
+  Postgres/ClickHouse/SeaweedFS sur la vraie pile de dev `docker compose`, 0 skip sous
+  `ANTENLY_DEV_STACK=1`), preannot-ina (vrai inaSpeechSegmenter + TensorFlow CPU),
+  licences, secrets (gitleaks), puis success/failure sur le commit d'`antenly` testé.
+- `pr-dispatch.yml` : cron toutes les 15 min (ou à la main), lance `ci.yml` pour chaque
+  SHA de tête de PR ouverte d'`antenly` sans statut `antenly-ci`. GitHub suspend les
+  crons d'un dépôt public après 60 jours sans activité : le réactiver dans l'onglet Actions.
+- `inventory-probe.yml` : passe 1 de la sonde d'inventaire produit (cron lundi 04:00 UTC,
+  ou à la main).
+- `inventory-pass2.yml` : passe 2 1 h plus tard (cron lundi 05:00 UTC), rapport, gates,
+  PR `inventory/auto-update` sur `antenly`.
+- `language.yml` : passe de langue produit sur le corpus `full-v1` d'`antenly`.
+
+Les logs et artifacts de ce dépôt sont publics. Aucun push direct sur une branche de
+base d'`antenly` ; le merge reste manuel.
 
 ## Passe de langue (`language.yml`)
 
 Détection de langue des segments `parole` du corpus `full-v1` (`facebook/mms-lid-256`
 par défaut), pour l'artefact `data/annotation/language/full-v1.json` attendu par
-`antenly` (ISC-6). La détection tourne ici, le code et le corpus restent dans
-`antenly` et sur le dataset privé `LordThiouk/antenly-corpus`.
+`antenly` (ISC-6). La détection tourne ici, le code et le corpus restent dans `antenly`
+et sur le dataset privé `LordThiouk/antenly-corpus`.
 
-**Prérequis antenly.** Le SHA pointé par `ref` doit inclure les flags CLI
-`--offset` et `--limit` dans `scripts/corpus/language_pass.py` (par ex. la branche
-`fullrun/annotation-tool-f2` ou un descendant). Un commit plus ancien (ex. `d58da6d`
-seul) ne les expose pas : le workflow échouera sur `detect`.
+**Prérequis antenly.** Le SHA pointé par `ref` doit inclure les flags CLI `--offset` et
+`--limit` dans `scripts/corpus/language_pass.py`.
 
 **Lancer.** Onglet Actions → `Language pass` → `Run workflow` :
 
 - `ref` : branche ou commit d'`antenly` à analyser (défaut `main`).
-- `model` : détecteur Hugging Face ; il doit lister `wol` (`mms-lid-256` le fait,
-  `faster-whisper` non).
-- `limit` : `0` = run complet découpé en tranches ; `>0` = smoke test (une tranche
-  par station, artefact explicitement `partial: true`, jamais accepté tel quel par
-  `merge` sur un run de production).
-- `chunk_size` : nombre max de segments `parole` par job `detect` quand `limit=0`
-  (défaut `250`, réglable sans modifier le YAML — Love FM ~289 segments / ~30 min
-  sert de repère pour rester sous le plafond 350 min par job).
+- `model` : détecteur Hugging Face ; il doit lister `wol` (`mms-lid-256` le fait).
+- `limit` : `0` = run complet découpé en tranches ; `>0` = smoke test.
+- `chunk_size` : nombre max de segments `parole` par job `detect` quand `limit=0`.
 - `stations` : filtre CSV optionnel, séparé par des virgules (vide = toutes).
 
-Le job `prepare` résout un SHA unique, calcule une matrice JSON de tranches
-`{station, offset, limit}` couvrant tous les segments `parole` (sans trou ni
-chevauchement), publie le sha256 de `segments.csv`, et **échoue** si le nombre de
-jobs dépasserait 256 (plafond matrice GitHub) en demandant d'augmenter `chunk_size`.
-Chaque job matrice `detect` appelle `language_pass.py` avec `--stations`,
-`--offset`, `--limit`, télécharge **seulement** les fichiers audio de sa station via
-`huggingface_hub.hf_hub_download(repo_type="dataset")`, puis publie un fragment
-`<station>-o<offset>-language`. Le job `merge` télécharge toutes les tranches et
-concatène via `--merge-dir` ; il **échoue** si une tranche manque, est marquée
-`partial: true`, ou s'il reste un segment `parole` sans langue.
+Le job `prepare` résout un SHA unique, calcule une matrice de tranches
+`{station, offset, limit}` sans trou ni chevauchement, publie le sha256 de
+`segments.csv`, et échoue au-delà du plafond de 256 jobs matrice. Chaque job `detect`
+télécharge uniquement les fichiers audio de sa station, puis publie un fragment. Le job
+`merge` échoue si une tranche manque, est `partial: true`, ou laisse un segment `parole`
+sans langue.
 
 **Secret requis.** `HF_TOKEN` (lecture du dataset privé `LordThiouk/antenly-corpus`).
-Si le secret est absent, le job `prepare` échoue explicitement avec
-`HF_TOKEN absent de antenly-ci (acte Papa requis)` — jamais un faux vert.
-`ANTENLY_TOKEN` reste nécessaire pour lire le dépôt privé `antenly`.
+S'il est absent, `prepare` échoue explicitement — jamais un faux vert. `ANTENLY_TOKEN`
+reste nécessaire pour lire `antenly`.
 
-**Récupérer et committer l'artefact.** Télécharger l'artifact
-`language-full-v1` du run, puis dans `antenly` :
+**Récupérer et committer l'artefact.** Télécharger l'artifact `language-full-v1` du run,
+puis dans `antenly` :
 
 ```bash
 mkdir -p data/annotation/language
@@ -63,437 +65,7 @@ cp full-v1.json data/annotation/language/full-v1.json
 cd api && ANTENLY_REQUIRE_LANGUAGE=1 uv run pytest tests/annotation/test_language.py -q
 ```
 
-La dernière commande est la face corpus d'ISC-6 : elle échoue si l'artefact est
-absent, d'une autre entrée (`source_segments_sha256`) ou s'il laisse un segment
-`parole` sans langue. Committer ensuite le fichier dans `antenly`. Ce dépôt
-n'écrit jamais dans `antenly` : aucun push, aucun PAT d'écriture, `main` intact.
-
-**Coût/temps.** Un run complet détecte les 5 066 segments `parole` des 6
-stations (fenêtre plafonnée à 30 s par segment). Chaque job est plafonné à
-350 min ; les grosses stations (ex. `sudfm`, ~1 142 segments) sont découpées en
-plusieurs jobs selon `chunk_size`. Utiliser `limit` pour un smoke test avant un
-run complet. Les dépendances sont épinglées dans
-`scripts/corpus/language-requirements.txt` (torch CPU 2.5.1, installé à part
-depuis `download.pytorch.org/whl/cpu` dans un venv Python 3.12 : cette roue
-n'existe pas pour Python 3.14, défaut actuel de `ubuntu-latest`).
-
-## Tâches opencode hors FullRun (`opencode-task.yml`)
-
-Pour une tâche simple (récupérer des écrans, corriger un setup, un fix court) : pas un FullRun.
-Seul `LordThiouk` peut lancer. Onglet Actions → `opencode Task (hors FullRun)` → `Run workflow` :
-
-- `target_repo` : `antenly` (défaut) ou `antenly-ci` seulement ;
-- `branch` : branche de fonctionnalité déjà poussée, jamais `main`/`master` ;
-- `prompt_path` : `prompts:<chemin>` (fichier sur la branche `fullrun-prompts` du dépôt
-  cible, jamais fusionnée dans `main`), ou `antenly:<chemin>` / `antenly-ci:<chemin>`
-  sur la branche de travail, selon la cible ;
-- `job_name`, `model_main` / `model_chain` (uniquement `opencode/*-free`),
-  `timeout_minutes` (10 à 90, défaut 45).
-
-**Cible `antenly`.** Comportement inchangé : checkout et push avec `ANTENLY_TOKEN`
-(limité à `antenly`). Toute modification de `.github/workflows` est refusée avant le
-push.
-
-**Cible `antenly-ci`.** Checkout et push avec le `GITHUB_TOKEN` du workflow
-(`contents: write`, `pull-requests: write`). La modification de `.github/workflows`
-est autorisée pour cette cible uniquement. Les prompts `prompts:<chemin>` sont lus
-sur `antenly-ci@fullrun-prompts` (branche dédiée, jamais fusionnée dans `main`).
-
-Gardes communes : acteur `LordThiouk`, jamais `main`/`master`, modèles
-`opencode/*-free`, timeout 10–90 min, gitleaks avant tout push, avance rapide
-seulement, `gh` refusé à opencode. La sortie d'opencode reste sur le runner
-(dépôt public).
-
-```bash
-gh workflow run opencode-task.yml -R LordThiouk/antenly-ci \
-  -f target_repo=antenly-ci -f branch=… -f prompt_path=prompts:… -f job_name=…
-```
-
-## FullRun opencode (`opencode-fullrun.yml`)
-
-Fait tourner un long job opencode (FullRun LifeOS) pour `antenly` sur un runner GitHub
-standard, à la place de la box (qui se met en pause). Dépôt public : les minutes des
-runners standards sont **gratuites** et ne touchent pas au quota mensuel. Limite : 6 h par
-job (le workflow s'arrête à 350 min ; opencode est arrêté au plus tard à 335 min, pour laisser
-15 min au rapport, aux contrôles et au push).
-
-**Ce qui est versionné ici (public).** Le workflow, `opencode/config/opencode.json`
-(config de la box assainie : sans provider FreeLLM ni VPS, sans MCP `github`/`rea`/
-`playwright`, chemins en `{env:HOME}`, modèle `{env:OC_MODEL_MAIN}`, `git push`/`gh`
-interdits à l'IA), `opencode/ci-preamble.md` (contexte CI ajouté avant le prompt) et
-`opencode/run-fullrun.sh`, `opencode/progress.sh` (suivi filtré) et `opencode/redact-log.sh`
-(préparation du journal privé). Les agents (Nix, Vera, Serena, Forge, Max…), commandes, plugin
-LifeOS et prompt Nix restent **privés** dans `LordThiouk/lifeos`, dossier `opencode/`
-(entrée `lifeos_ref`, défaut `main` : merger `lifeos` PR #3 avant le premier run, ou passer
-`lifeos_ref=ci/opencode-config-2026-11-11` en attendant).
-
-**Secrets à créer (Settings → Secrets → Actions)** — noms seulement, jamais dans un fichier :
-
-| Secret | Contenu | Portée |
-|---|---|---|
-| `ANTENLY_TOKEN` | déjà présent : lecture d'`antenly` | Contents: read |
-| `ANTENLY_PUSH_TOKEN` | jeton fine-grained, **seulement** `LordThiouk/antenly` | Contents: read & write (pas Workflows, pas Administration) |
-| `LIFEOS_READ_TOKEN` | jeton fine-grained, **seulement** `LordThiouk/lifeos` | Contents: read |
-| `ISA_STAMP_KEY` | contenu de `~/.claude/LIFEOS/MEMORY/STATE/.isa-stamp-key` de la box (64 hex) | — |
-| `OC_NOTIFY_URL` | URL du webhook opencode-notify (la même que `OC_NOTIFY_URL` de `~/.oc-run/config` sur la box) | optionnel |
-| `OC_NOTIFY_KEY` | clé du webhook (`OC_NOTIFY_KEY` de `~/.oc-run/config`) | optionnel |
-
-Sans `OC_NOTIFY_URL`/`OC_NOTIFY_KEY`, le run marche pareil mais n'envoie pas de notification de fin
-(avertissement dans le step). Mêmes noms que ceux attendus par `inventory-probe.yml`.
-
-Aucune clé de modèle : les modèles `opencode/*-free` n'en demandent pas. Le workflow
-refuse tout modèle qui n'est pas `opencode/…-free`.
-
-**Protection de `main`.** Un jeton fine-grained ne peut pas être limité à une branche, et
-la protection de branche / les rulesets ne sont pas disponibles sur un dépôt privé en plan
-gratuit. Garde-fous en place : l'IA ne reçoit **aucun** jeton d'écriture (checkout sans
-identifiants, hook `pre-push` bloquant, `git push` refusé dans la config) ; seul le dernier
-step pousse, vers `refs/heads/<branche>` exacte, sans `--force`, après avoir vérifié que la
-branche n'est ni `main` ni `master`, que l'historique part bien du SHA de départ, que
-`.github/workflows/` n'est pas touché et que gitleaks ne trouve rien dans les commits du
-run. Si un jour `antenly` passe en Pro/public : ajouter une règle « interdire les push
-directs sur `main` ».
-
-**Lancer.** Pré-requis : la branche de fonctionnalité existe déjà sur `antenly` et contient
-l'ISA. Onglet Actions → `opencode FullRun` → `Run workflow` (seul `LordThiouk` peut lancer) :
-
-- `branch` : branche d'`antenly` (ex. `fullrun/annotation-tool-f2`), jamais `main`/`master` ;
-- `prompt_path` : `prompts:<chemin>` (recommandé : fichier sur la branche `fullrun-prompts`
-  d'`antenly`, jamais fusionnée, donc aucun prompt sur la branche de travail ; la référence est
-  retirée du checkout avant opencode), sinon `antenly:<chemin>` ou `ci:<chemin>` ;
-- `job_name` : nom court, donne `.fullrun/<job>_DONE.md` ;
-- `model_main` (défaut `opencode/deepseek-v4.1-flash-free`, aussi Forge), `model_max`
-  (défaut `opencode/mimo-v2.6-flash-free`), `model_fallback` (défaut
-  `opencode/glm-5.3-flash-free`, utilisé seulement si la passe principale échoue sur un 429) ;
-- `isa_path` (optionnel) : `MEMORY/WORK/<dossier>/ISA.md` dont le suivi compte les ISC ; vide =
-  l'unique ISA citée par le prompt, sinon l'unique ISA modifiée par le run, sinon `?` ;
-- `hf_corpus` (optionnel, vide par défaut) : chemin, sur la branche `branch` testée, d'un fichier
-  texte listant des chemins du dataset privé `LordThiouk/antenly-corpus` (un par ligne, 400 max,
-  pas d'absolu ni de `..`). S'il est fourni, une étape **avant** opencode télécharge ces fichiers
-  dans `$RUNNER_TEMP/antenly-corpus` (arborescence conservée) et exporte
-  `ANTENLY_CORPUS_DIR` ; le jeton `HF_TOKEN` ne vit que dans cette étape et n'atteint jamais
-  opencode. Les logs publics n'affichent que le nombre de fichiers et la taille totale ;
-- `idle_minutes` (défaut `30`, de 10 à 120) : garde-fou de silence, voir plus bas ;
-- `agent_idle_minutes` (vide par défaut = `Forge=40`) : silence max **par agent**, ex. `Forge=40,Max=30` (1 à 720 min), voir plus bas.
-
-Ou en CLI : `gh workflow run opencode-fullrun.yml -R LordThiouk/antenly-ci -f branch=… -f prompt_path=… -f job_name=…`.
-
-**Preannot (outil figé).** Le preannot n'est pas un workflow à part : c'est le job
-`preannot-ina` de `ci.yml` ci-dessus (vrai inaSpeechSegmenter + TensorFlow CPU). Quand un
-FullRun a besoin de ce verdict, l'agent appelle seulement :
-
-```bash
-/opt/fullrun-tools/preannot.sh run
-```
-
-La copie figée root déclenche `ci.yml` sur la branche de travail (toute la CI, le job
-`preannot-ina` en fait partie), attend un délai borné, télécharge les artefacts éventuels
-dans le dossier du job et n'affiche qu'un verdict + un court extrait en échec. Le jeton est
-le `GITHUB_TOKEN` de ce dépôt (permission `actions: write`, ajoutée au workflow ; aucun
-secret supplémentaire), conservé en root `0600`, jamais dans l'environnement d'opencode.
-Si le déclenchement est refusé, c'est que `actions: write` a été retiré des `permissions`.
-
-**Suivre un run en direct.** Onglet Actions → le run → job `fullrun` → step
-`opencode run (…)`. Une ligne `[suivi]` s'affiche au départ, puis toutes les 10 min, puis à la fin :
-
-```
-[suivi] 09:12 Dakar · +40 min · phase Marking · agent Silas · ISC 7/50 · commits 2 · silence 3 min · 429/limite non
-```
-
-heure de Dakar, minutes écoulées, dernière bannière `LifeOS | Algorithm | <phase>`, dernier agent
-lancé, ISC cochés/total de l'ISA (`- [x]` / `- [ ]`), commits locaux depuis le départ, minutes
-depuis la dernière activité réelle du run (journal, CPU de l'arbre opencode ou fichiers de session),
-et si un vrai 429 / « Free usage limit » est apparu (un « 429 » isolé, numéro ou texte du prompt, ne compte pas).
-La ligne finale donne la raison d'arrêt : `[suivi] fin : terminé`, `fin : bloqué (silence 30 min)`,
-`fin : plafond atteint`, `fin : annulé` ou `fin : erreur opencode`. Chaque valeur passe une liste blanche (phases, agents) ou
-un filtre numérique, sinon elle vaut `?` : aucun texte du modèle, chemin ni code n'est affiché.
-Le même tableau apparaît dans le **Summary** du run une fois le step terminé.
-
-**Garde-fou de silence et plafond.** Un moniteur (`opencode/run-fullrun.sh`) lance opencode dans
-sa propre session et mesure l'activité réelle du run : croissance de son journal (fichier du runner,
-jamais affiché), variation du CPU cumulé de son arbre de processus (un sous-agent qui travaille
-consomme du CPU sans écrire dans le flux principal) ou modification d'un fichier de session sous
-`~/.local/share/opencode`. Une pause de réflexion pure reste donc du silence, un sous-agent actif
-non :
-- si aucune activité pendant `idle_minutes` minutes (défaut 30) : arrêt propre, raison
-  **`bloqué (silence N min)`** ;
-- seuil **par agent** (`agent_idle_minutes`, défaut `Forge=40`) : quand `idle_minutes` est atteint et que la tâche
-  en cours (stockage opencode) est celle d'un agent à seuil plus long, la coupure attend ce seuil (un audit Forge
-  sur un gros delta dépasse 20 min). Les autres agents gardent `idle_minutes` ; un seuil plus court que
-  `idle_minutes` est sans effet ; un plafond `OC_SUBAGENT_IDLE_SEC` posé explicitement reste maître ; l'agent
-  introuvable donne le seuil de base ; toute activité remet le compteur à zéro ; valeur invalide : refus ;
-- au plus tard à 335 min après le début du job (plafond 350 - 15 min de marge pour pousser) : arrêt
-  propre, raison **`plafond atteint`**.
-
-Arrêt propre = SIGINT au groupe de processus d'opencode et à tous ses descendants (même ceux qui ont
-changé de session), puis SIGKILL après 60 s. Le repli 429 n'est jamais tenté après un tel arrêt. La
-raison est décidée par le moniteur (son code de sortie : 125 silence, 124 plafond), jamais lue dans
-un fichier qu'opencode pourrait écrire. Ensuite, comme pour tout échec : rapport, contrôles
-(gitleaks, clé ISA, branche, historique) et push de ce qui est commité, puis le job finit **en
-échec** avec la raison dans le log public, la ligne `[suivi]` finale, le Summary et la notification.
-Une annulation du run est relayée au moniteur, qui arrête opencode avant les steps de rapport et de push.
-
-**Journal complet (privé, branche à part).** À la fin, même si opencode a échoué, a été arrêté ou
-le run annulé, le log opencode est poussé sur une **branche dédiée** d'`antenly`,
-`fullrun-logs/<job>-<run_id>` : un commit contenant `.fullrun/logs/<job>-<run_id>.log`, posé
-par-dessus le dernier instantané du journal en direct (voir plus bas), ou orphelin s'il n'y en a pas. Il ne va **jamais** sur la branche de travail (seul le rapport
-`.fullrun/<job>_DONE.md` y va, avec le nom de la branche de journal). Avant : codes ANSI retirés ;
-jetons `ghp_`/`github_pat_`/`hf_`/`sk-`/AWS/Slack/JWT, en-têtes `Authorization`, identifiants d'URL,
-clé ISA et toute valeur de 64 hex masqués ; au-delà de 5 Mo, début et fin gardés avec une mention de
-troncature. Ce commit passe les mêmes contrôles que le travail (gitleaks avec la config du SHA de
-départ, recherche de la clé ISA, dans un dépôt nu neuf) : s'il est signalé, seul le journal n'est pas
-poussé (le Summary affiche « retiré ») et part chiffré en artefact (voir plus bas) ; le travail, lui,
-est poussé s'il est propre. Jamais de force : si la branche a bougé autrement que par le journal en
-direct, le journal n'est pas poussé (avertissement). Le nom de la
-branche est dans le Summary, le rapport et la notification.
-
-Lire : GitHub → `antenly` → branche `fullrun-logs/…`. **À supprimer après lecture** (par Papa) :
-
-```bash
-git push origin --delete fullrun-logs/<job>-<run_id>
-```
-
-**Journal en direct (privé, pendant le run).** Toutes les 10 min (même rythme que les lignes
-`[suivi]`), un instantané du journal opencode est poussé sur la même branche
-`fullrun-logs/<job>-<run_id>` d'`antenly` (privé) : un commit normal qui remplace le fichier, jamais
-sur la branche de travail ni sur main, jamais de force. La première ligne `[suivi]` l'annonce
-(`· journal en direct : fullrun-logs/<job>-<run_id>`). Chaque instantané passe par
-`redact-log.sh`, puis par gitleaks en mode fichier (`dir --redact`, config d'`antenly` au SHA de
-départ) et la recherche de la clé ISA : si quelque chose est trouvé, l'instantané part **chiffré**
-(`.fullrun/logs/<job>-<run_id>.age`, archive age : journal + rapport) au lieu du clair. Un échec
-d'envoi ne touche pas le run : 2 essais de 60 s au plus, puis on passe au prochain instantané (qui
-rattrape le manqué). Le journal de fin se pose ensuite par-dessus, sans conflit.
-
-**Supervision et priorité des démons.** Les deux démons (`livelog.sh daemon` pour le journal en
-direct, `wippush.sh daemon` pour le push périodique des wip) sont des superviseurs : `$STATE/pid`
-est **leur** pid, et chaque passage (instantané ou push) tourne dans un processus fils borné à
-120 s (`LIVE_PASS_TIMEOUT` / `WIP_PASS_TIMEOUT`). Un passage trop long ou tué est signalé puis
-relancé (réessai court de 15 s) sans arrêter le superviseur ; les contrôles (lecture du journal,
-masquage, gitleaks, diff de clé ISA) sont bornés à 180 s (`LIVE_CTL_TIMEOUT` / `WIP_CTL_TIMEOUT`)
-et un contrôle interrompu ne pousse rien. Les démons tournent en `nice -n 0` et leur superviseur,
-comme `Runner.Worker`, a un `oom_score_adj` négatif : si le runner sature, opencode meurt d'abord
-(scope `MemoryMax=5G` quand `systemd-run` est disponible, sinon repli direct) et les démons peuvent
-encore écrire le rapport. Le jeton reste dans la mémoire du superviseur et n'est repipé sur
-l'entrée standard du fils que pour un passage : jamais dans un fichier d'état, un argument ou
-l'environnement d'opencode. SIGTERM au superviseur arrête le passage courant et la boucle (ligne
-`arrêté`), sans redémarrage.
-
-Le pousseur (`opencode/livelog.sh daemon`) est lancé **avant** opencode, en root, avec ses outils
-copiés en root dans `/opt/fullrun-tools` (gitleaks épinglé et vérifié, scripts, destinataire age).
-Le jeton `ANTENLY_PUSH_TOKEN` lui arrive sur l'entrée standard : il n'est ni dans l'environnement
-d'opencode, ni dans un fichier, ni dans une URL, ni à l'écran ; il ne passe à `git push` que par
-l'environnement de ce process root (en-tête `http.extraheader`, comme le step push). Le journal
-brut est lu avec les droits de l'utilisateur du run (un lien posé par opencode vers un fichier root
-est refusé). Le step de contrôle arrête le superviseur (il coupe le passage en cours, borné) avant le journal
-de fin ; le Summary donne le nombre d'instantanés en clair, chiffrés et en échec.
-
-**Journal chiffré quand un contrôle refuse le push.** Si gitleaks (ou un autre contrôle avant push :
-clé ISA, branche, historique, workflows, lien symbolique) échoue, les commits ne sont **pas** poussés
-— comportement inchangé, le step reste en échec — mais le journal opencode masqué et le rapport
-gitleaks (réduit à fichier, lignes, règle, commit : jamais la valeur) sont chiffrés avec `age` pour
-la clé publique `opencode/log-recipient.txt`, puis publiés en artefact `fullrun-log-<job>-<run>.age`
-(rétention 7 jours). Même chose quand seul le journal de fin est refusé par gitleaks. Seule
-l'archive chiffrée sort du runner (en-tête age vérifié avant publication) : le journal en clair
-n'est jamais publié. age est épinglé (version + sha256 vérifié, comme ripgrep et rtk).
-
-Déchiffrement sur la box (la clé privée reste dans `~/.config/age/`, jamais dans ce dépôt) :
-
-```bash
-# artefact d'un run bloqué
-gh run download <run_id> -R LordThiouk/antenly-ci -n fullrun-log-<job>-<run_id>.age -D log
-mkdir -p journal && age -d -i ~/.config/age/fullrun-logs.key log/fullrun-log-<job>-<run_id>.age | tar -xz -C journal/
-# instantané en direct chiffré (branche fullrun-logs/<job>-<run_id> d'antenly)
-git show origin/fullrun-logs/<job>-<run_id>:.fullrun/logs/<job>-<run_id>.age \
-  | age -d -i ~/.config/age/fullrun-logs.key | tar -xz -C journal/
-```
-
-`journal/` contient `opencode.log`, `gitleaks.json` (quand il y en a un) et `meta.txt`. La
-notification de fin annonce alors `bloqué par gitleaks, journal chiffré en artefact` et le nom de
-l'artefact (`artefact=…`).
-
-Tests locaux (sans réseau réel, sauf téléchargement de gitleaks s'il manque) :
-`opencode/tests/leaklog-test.sh`, `opencode/tests/livelog-test.sh`,
-`opencode/tests/wippush-test.sh` et `opencode/tests/watchdog-test.sh` (timeouts et relance des
-démons).
-
-**Reprise, surveillance, verdicts réels.**
-
-- *Reprise depuis la dernière étape.* Après chaque étape validée, l'agent appelle
-  `/opt/fullrun-tools/checkpoint.sh write --job J --step N …` : `.fullrun/<job>_checkpoint.json`
-  (étape, commit, résumé, verdicts). Pas de saut d'étape (N ≤ dernière + 1). À chaque reprise
-  (`stall_resume`, `new_session`) et à chaque relance du job, le prompt reçoit ce fichier et le début
-  de `_DONE.md` avec l'ordre de reprendre à l'étape suivante ; un verdict encore valable (aucun
-  commit de code depuis son SHA) n'est pas redemandé. Le fichier est un indice, pas une preuve : les
-  portes et `done_check.sh` ne le lisent pas.
-- *Ne pas couper un travail en cours.* Comptent comme activité : le journal, les fichiers de session
-  (sous-agents) et le CPU des processus ENFANTS de l'agent (outils, bancs ; `OC_CHILD_CPU_MIN`, 10
-  ticks par sonde). Coupure après `OC_IDLE_MIN` minutes sans aucune de ces activités. L'ancien seuil
-  fixe de 8 min pour les sous-agents n'est plus appliqué par défaut (il coupait un sous-agent ou un
-  banc encore au travail) ; `OC_SUBAGENT_IDLE_SEC`, s'il est posé, reste un plafond optionnel.
-- *Verdicts réels seulement.* `done_check.sh` exige, pour CHAQUE agent de `OC_DONE_AGENTS` (entrée
-  `done_agents` du workflow ; ex. explicite `Max,Silas`), une vraie tâche terminée dans le
-  stockage opencode (tokens d'un modèle `-free`, PASS explicite, postérieure au dernier commit de
-  code) et la ligne `SUBAGENT done` du plugin. Un PASS écrit par l'agent principal (message, fichier,
-  checkpoint) ne compte pas ; `checkpoint.sh verdict` refuse de l'enregistrer. Verdict manquant ≠ PASS.
-  `done_agents` est vide par défaut : dans un job borné (`stop_after_step`), l'agent exigé est
-  `target_agent` s'il est fourni (l'agent réellement dispatché prime), sinon tout agent autorisé de
-  l'étape `stop_after_step` (un seul PASS suffit, `OC_DONE_AGENTS_ANY=1`) :
-  scaffold/completeness_pre/vera → `Algorithm`, serena → `Architect`, build →
-  `Designer`/`Aditi`/`Engineer`/`Forge`/`Anvil`, verify → `code-reviewer`/`Forge`/`Silas`,
-  max/close → `Max` ; hors job borné (y compris `chain_enabled=false` avec `target_agent`), `Max`,
-  comportement historique inchangé. Le mapping est centralisé dans `opencode/step-agents.sh`
-  (même source pour le prompt, le préflight, le run et le validateur ; son mode par défaut renvoie
-  la liste complète des agents autorisés, jamais un seul agent plus étroit que la règle).
-  Le verdict est lu par le CLI lifeos `LIFEOS/TOOLS/FullRunVerdict.ts` (source unique, même règle que le pipeline). En production `done_check.sh` n'exécute qu'UN couple : `/opt/fullrun-tools/FullRunVerdict.js` (bundle construit à l'étape de gel, échec dur s'il manque) par `/opt/fullrun-tools/bun` avec `/opt/fullrun-tools/bunfig.toml` (vide), dans ce dossier et avec un environnement minimal ; chaque fichier et chaque dossier parent y sont à root, sans lien symbolique ni droit d'écriture pour le groupe ou les autres. `OC_VERDICT_CLI`/`OC_BUN` ne valent que sous `OC_DONE_TEST_MODE=1` (scripts de test ; sous GITHUB_ACTIONS, seulement avec le marqueur root `/etc/fullrun-done-test-mode` posé par `ci.yml`), et chaque appelant (workflow, `run-fullrun.sh`, `checkpoint.sh`) les vide ; aucun repli `~/.claude`. Règle : `pass` = code 0 et sortie `pass`, `unknown` (code 3) = inconclusif, CLI inutilisable = `a:verdict-cli`, jamais PASS.
-- *Un job borné s'arrête à son étape.* Avec `stop_after_step`, le prompt reçoit une consigne
-  explicite (« étape finale imposée », agent validateur nommé, aucune étape suivante) et
-  `run-fullrun.sh` ne relance jamais de session de reprise : sans PASS de l'agent de l'étape, le job
-  s'arrête en `127` (`arret=tour-fini`, `stop_after_no_resume=<étape>`) au lieu de dérouler la suite.
-  `stop_after_step` est exclusif avec le chaînage : même si `chain_enabled=true` est fourni par
-  erreur, le step de chaînage termine la chaîne sans `gh workflow run` (aucun lien suivant) et le
-  statut final exige alors `DONE=ok` (patch r3) : un job borné ne finit jamais vert sans le PASS de
-  l'agent de l'étape.
-
-Test : `opencode/tests/checkpoint-watchdog-verdict-test.sh` (la surveillance y est testée en temps
-réduit : seuil 3 s, activité 9 s).
-
-**Notification de fin.** Dernier step, toujours exécuté (fin, échec, blocage, annulation) : POST au
-webhook opencode-notify, même format que `oc-run` sur la box (`job`, `status` = `fini` / `échec` /
-`bloqué` / `annulé`, `duration` en secondes réelles depuis le début du job, `pr_url` vide,
-`log_tail`, `event_id`, `run_id`, en-têtes `Authorization: Bearer`, `X-Automation-Key`,
-`Idempotency-Key`). `log_tail` est neutre : code de sortie, raison d'arrêt, SHA poussé, branche de
-journal, artefact chiffré éventuel, ISC cochés/total, modèle et URL du run ; jamais de texte du modèle. URL et clé passent à
-curl par l'entrée standard (jamais en argument ni à l'écran). Trois essais au plus (10 s puis 20 s
-d'attente) ; un échec de notification ne change pas le résultat du job.
-
-**Résultat.** Les commits d'opencode et le rapport `.fullrun/<job>_DONE.md` sont poussés sur
-la branche (si une PR est ouverte dessus, `pr-dispatch.yml` lance ensuite la CI habituelle sur le nouveau SHA). Le log du
-run ne montre que des lignes de statut génériques.
-
-**Reprise.** Relancer avec la même branche, le même prompt et le même `job_name` : le
-préambule demande à l'agent de lire `.fullrun/<job>_DONE.md` et l'état de l'ISA, puis de
-reprendre à la première étape non terminée. La session opencode elle-même n'est pas
-conservée entre deux runs. Un run par branche à la fois (`concurrency`).
-
-**Risques connus.**
-- Tout ce qui s'affiche dans le log est public : ne jamais ajouter `cat`/`tee` du log
-  opencode, ni `actions/upload-artifact` d'autre chose que l'archive `.age` (artefacts publics). Le suivi n'affiche que des valeurs de
-  liste blanche ; ajouter un champ à `progress.sh` = le filtrer de la même façon.
-- Le journal privé est sur une branche `fullrun-logs/…` d'`antenly` (jusqu'à 5 Mo par instantané,
-  un commit toutes les 10 min) tant qu'elle n'est pas supprimée ; le masquage est un filet en plus de gitleaks, pas une garantie : un
-  secret de forme inconnue peut y rester. Supprimer la branche après lecture.
-- Le garde-fou de silence mesure l'activité réelle (journal, CPU de l'arbre opencode, fichiers de
-  session) : un opencode qui écrit en boucle sans avancer, ou un outil qui consomme du CPU sans
-  progresser, n'est pas « silencieux » (seul le plafond l'arrête). Un run dont l'arbre entier dort
-  plus de `idle_minutes` est arrêté : monter `idle_minutes` si besoin.
-- Sur les runners GitHub, opencode a `sudo` sans mot de passe : les copies root (`/opt/fullrun-tools`,
-  démon du journal en direct) protègent contre une modification par erreur ou opportuniste, pas
-  contre un agent qui userait délibérément de `sudo` pour lire la mémoire du démon. Comme pour les
-  autres secrets du job, la vraie barrière reste le jeton à droits minimaux (contenu d'`antenly`
-  seulement) et la protection de `main`.
-- Garde-fous contre une IA qui voudrait contourner les contrôles : opencode tourne sans
-  `GITHUB_ENV`/`GITHUB_PATH`/`GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` ; les steps de contrôle et de
-  push reprennent branche, base, dossiers et `PATH` depuis les entrées et sorties de step (qui
-  priment sur `$GITHUB_ENV`) et vident `BASH_ENV`/`LD_PRELOAD` ; hooks et fsmonitor du dépôt sont
-  ignorés ; gitleaks et la recherche de la clé ISA (prise du secret, pas de `$HOME`) tournent dans
-  un dépôt nu neuf (sans `diff.external`/textconv du run) ; le push part d'un autre dépôt nu neuf,
-  env vidé (`env -i`), après vérification du SHA contrôlé, sans force.
-- Garde-fou de silence : opencode a `sudo` et pourrait tuer le moniteur ou écrire dans le fichier
-  de sorties du step ; la raison écrite par le moniteur, après l'arrêt d'opencode, passe en dernier
-  et chaque valeur est revérifiée (liste blanche) par les steps suivants. Le plafond du job (350 min)
-  reste le filet ultime.
-- Limite restante : opencode a `sudo` sur le runner et le même utilisateur que les steps suivants.
-  Un processus laissé en arrière-plan ou un binaire système remplacé pourrait encore lire le jeton
-  de push. Seule parade complète : pousser depuis un **autre job** (VM neuve) qui reçoit les commits
-  chiffrés par clé publique — à faire dans une PR à part (nouveau secret requis).
-- Le prompt FullRun est lu depuis la branche `fullrun-prompts` d'`antenly` (privé, recommandé),
-  depuis `antenly` ou depuis ce dépôt (public) : un prompt mis ici est public.
-- `ANTENLY_PUSH_TOKEN` peut techniquement écrire sur toute branche d'`antenly` ; il n'est
-  exposé qu'au step de push, jamais à opencode.
-- Hooks LifeOS : le service local `localhost:31337` et `cc-diff` n'existent pas sur le runner ;
-  le plugin replie les hooks http sur leur équivalent local (journalisés dans
-  `~/.local/state/opencode-lifeos`). `rtk` est maintenant installé : release officielle `rtk-ai/rtk`
-  **v1.2.0**, binaire `x86_64-unknown-linux-musl`, **sha256 vérifié** dans le workflow (comme
-  ripgrep). Le hook `ContextReduction` peut donc réécrire `git`/`gh` en `rtk git …` / `rtk gh …`
-  sans plus finir en `rtk: command not found` (exit 127) à chaque commande.
-- Permissions CI : `opencode/config/opencode.json` ne contient **aucune** valeur `"ask"`
-  (contrôle automatisé au commit). En mode non interactif (`opencode run`), une règle `ask` est
-  refusée d'office et arrête la session : la CI tranche donc d'avance — lecture autorisée,
-  écriture/action sensible refusée. `doom_loop` est explicitement `deny` (son défaut est `ask`,
-  donc inutilisable en CI), et `external_directory` reste `allow` sauf `~/.ssh`.
-  Sur `~/.claude/settings.json` : les commandes `bash` qui le mentionnent sont autorisées
-  (`*settings.json*` → `allow`, plus de refus par composition), seule l'édition du fichier reste
-  `deny`. Les fichiers `.env` sont lisibles (lecture, édition, bash) : le pool CI en a besoin.
-- Pas de FreeLLM, de VPS, d'ACRCloud, de Playwright ni de MCP GitHub sur le runner.
-
-## Clé de porte : `start_step`
-
-Input facultatif du workflow (vide par défaut). `start_step=verify` (ou `build`, `max`, `close`, `0` à `7` ; jamais `deploy`) demande au run de démarrer à cette étape. C'est une **demande**, pas un forçage : LifeOS (`FullRunCarry.proveStart`) n'ouvre la porte que si chaque étape avant a un verdict signé (HMAC `isa_stamp`) ancré sur le commit actuel ; sinon le run redescend à la première étape non prouvée et la raison est écrite dans le log et dans le mandat de l'agent. Si l'étape demandée échoue, retour au build. La valeur passe par l'environnement d'opencode (`FULLRUN_START_STEP`, posé par `run-fullrun.sh`), que l'agent ne peut pas modifier. Aucune garde n'est affaiblie : Max PASS reste obligatoire à la fin. Nécessite la version de LifeOS qui contient `start_step` (`lifeos_ref`) ; une version plus ancienne ignore simplement la variable.
-
-### Préflight du lien : où la porte démarre vraiment
-
-Un lien lancé avec `start_step=verify`, `chain_phase=verify` et `next=code-reviewer` ne démarre à `verify` que si le carry contient un verdict **signé** pour le build. Tant qu'aucun run n'a passé la porte build, il n'y en a pas : la porte redescend au build (« étape 4 (build) : pas de verdict signé »), et `code-reviewer`, agent de `verify`, y est rejeté (« step build rejects agent »). Deux runs de ~95 min ont été perdus ainsi (22 nov. 2026) sans une seule revue, un troisième était bloqué de la même façon. La redescente est voulue ; ce qui manquait était de le savoir avant de dépenser le run.
-
-Le step **Préflight du lien** (`id: preflight`, avant le gel des outils et avant opencode) appelle `LIFEOS/TOOLS/FullRunPreflight.ts` de LifeOS quand `start_step` et `isa_path` sont donnés. Il est en lecture seule : il n'ouvre aucune porte, n'écrit ni `GITHUB_ENV`, ni ISA, ni carry, et ne reçoit aucun secret.
-
-**Table des codes de sortie** (une seule table, celle du CLI lifeos ; le step la traduit) :
-
-| Code | Sens | Effet sur le job |
-|------|------|------------------|
-| `0` | cohérent : la porte s'ouvre où `start_step` le demande | passe |
-| `2` | la porte ne s'ouvre pas où `start_step` le demande (redescente) ; **échoue seul**, même sans chaînage ou avec `chain_phase=build` ; ligne `relance conseillée : start_step=… chain_phase=… next=(vide)` | échec avant opencode |
-| `3` | agent imposé par le chaînage (`next`, phase verify) inconnu ou refusé par la porte à l'étape de départ (ex. `Max` en verify, faute de frappe) | échec avant opencode |
-| `4` | claims **ouvertes hors périmètre gelé** alors que la porte s'ouvre à verify ou après | échec avant opencode |
-| `5` | `chain_phase` incohérent avec l'étape où la porte s'ouvre (ex. `close` alors qu'elle s'ouvre à `max`) | échec avant opencode |
-| `64` | entrée invalide (ISA absente, `start_step` ou `chain_phase` invalide, option inconnue) | échec avant opencode |
-| `70` | crash interne du CLI (tout autre code inattendu est traité de même) : le contrôle **n'a pas eu lieu** | annotation d'**erreur** `PRÉFLIGHT EN PANNE` et bandeau du résumé ; le run continue, la porte juge seule |
-
-Plusieurs échecs peuvent coexister (le JSON liste tous les codes) ; le code de sortie est le plus prioritaire (2, 4, 3, 5).
-
-Décision sur le périmètre : à verify ou après, **toute claim ouverte hors du périmètre gelé fait échouer (code 4)**. Le build devait la cocher avec preuve, ou elle devait porter un marqueur valide avant le lancement. Au build, ces claims sont le travail du run : pas d'échec.
-
-Le préflight lit **le même état que `initPipeline`** : un état de run restauré (`prev_run_id`) est repris tel quel et `start_step` est alors ignoré, donc pas de faux conflit quand le carry est absent mais l'état est à verify. Sans état, il rejoue la preuve du carry. `phase: complete` : `start_step` ignoré.
-
-- **LifeOS sans `FullRunPreflight.ts`** (`lifeos_ref` ancien) : annotation d'**erreur** `PRÉFLIGHT NON ÉVALUÉ` (jamais silencieux), la porte jugera seule.
-- Sortie publique (journal et résumé du job, publics) : **compteurs et codes seulement** ; aucun identifiant de claim, aucun chemin. Les identifiants ne sortent qu'avec `--details`, en local.
-
-Périmètre : le gel a lieu à l'ouverture du run, dès l'étape 4. Un marqueur `[scope:…]` posé **pendant** le build ne sert qu'au run suivant. Le marquage doit donc être dans l'ISA, sur la branche, **avant** le lancement ; il est écrit par l'auteur de l'ISA, jamais par l'outil. Une claim qui reste dans le périmètre (comme ISC-35 dans l'incident) doit être cochée par le vérificateur avec preuve : le préflight ne coche rien et n'élargit rien.
-
-Paramètres du lien suivant : tant que le carry n'a pas de verdict build signé, `start_step=build`, `chain_phase=build`, `next` vide. Une fois le build passé (carry signé sur le commit courant), `start_step=verify`, `chain_phase=verify`, `next=<agent>` (ex. `code-reviewer`), `done_agents` inchangé. Les liens suivants du chaînage laissent `start_step` vide.
-
-## Relance de validation seule : `OC_DONE_VALIDATE_ONLY` (pas d'input dans ce dépôt)
-
-Quand l'ISA est déjà close (`phase: complete`), `done_check.sh` accepte `OC_DONE_VALIDATE_ONLY=1` (valeur exacte `1`, `true` ne compte pas) et saute alors **uniquement** le contrôle `d:isa-complete` ; le PASS réel de chaque agent de `done_agents`, les hooks, les vérificateurs, l'arbre propre et le rapport restent exigés (tests 9vb à 9vd, et 13o : la variable n'affaiblit jamais un verdict FAIL). `run-fullrun.sh` la transmet. Contrairement à galass-ci, **antenly-ci n'a pas d'input `validate_only`** : `opencode-fullrun.yml` y est déjà à la limite GitHub de 25 inputs `workflow_dispatch` (un 26e rend tout le workflow invalide, vérifié sur le push b79302e). Pour l'exposer, il faut d'abord libérer un input.
-
-## Hypothèse de sécurité : l'agent n'a pas `sudo`
-
-La protection du validateur de fin (copie root dans `/opt/fullrun-tools`, CLI de verdict, `bun` et `bunfig.toml` à root, mode test refusé sous `GITHUB_ACTIONS`, variables d'override vidées à chaque appel) suppose que l'agent opencode ne peut pas devenir root. **Ce n'est pas vrai aujourd'hui** : `opencode-fullrun.yml` lance opencode sous l'UID du step (`setpriv --reuid="$(id -u)"`, dans un scope `systemd-run`), sans utilisateur dédié, et ce même UID utilise `sudo -n` sans mot de passe tout au long du workflow (installation des outils gelés, démons). Le workflow ne retire pas ce `sudo` ; il ajoute seulement des entrées `NOPASSWD` ciblées (`preannot.sh`, `emu-e2e.sh`). Les contrôles ci-dessus arrêtent donc un agent qui triche par l'environnement, le répertoire courant, `~/.claude`, un `bunfig.toml` ou un lien symbolique, mais pas un agent qui lance lui-même `sudo` pour réécrire `/opt/fullrun-tools`. Durcissement à décider (non fait ici) : retirer le `sudo` générique avant de lancer opencode et ne garder que les entrées ciblées.
-
-### Sauvegarde automatique du travail (`opencode/autosave.sh`)
-
-Avant chaque push de wip, le démon (`wippush.sh`, root, hors opencode) appelle `autosave.sh`, qui
-commite localement, en deux groupes : `wip(carry)` (le `fullrun-carry.json` de l'ISA et le
-`.fullrun/<job>_checkpoint.json`, de simples indices de reprise) puis `wip(autosave)` (l'arbre de
-code non commité). Un runner qui tombe ne perd plus le report ISA ni le travail, et la reprise
-repart de la branche poussée.
-
-Garde-fous (tous couverts par `opencode/tests/autosave-test.sh`, avec un vrai gitleaks) :
-
-- jamais `git add -A` : seuls des chemins nommés un à un, déjà filtrés, sont ajoutés ; le commit ne
-  prend que ces chemins (`git commit -- chemins`), l'index de l'agent n'est pas touché ;
-- liste d'exclusion `opencode/autosave-deny.txt` (copie figée dans `/opt/fullrun-tools`) : clés et
-  identifiants, `eval_corpus.py`, `fp_offline`/`fp_engine`, tables SDK, audio radio, `evidence/`…,
-  plus liens symboliques, binaires et fichiers de plus de 5 Mo. Un fichier refusé reste dans l'arbre,
-  intact et non suivi ; liste absente = rien commité ;
-- gitleaks (config et ignores du run) scanne le contenu **indexé** avant le commit : un fichier qui
-  fuit est retiré de l'index, le reste est sauvé ; contrôle impossible = rien commité. Puis le
-  contrôle de plage et celui de la clé ISA de `wippush.sh` s'appliquent comme à tout commit du run ;
-- aucun passage si l'agent tient l'index (`index.lock`), si une fusion ou un rebase est en cours, ou
-  si la branche courante n'est pas la branche de travail ;
-- le démon root travaille comme propriétaire du dépôt (`setpriv`) : aucun fichier root dans `.git` ;
-- les messages ne contiennent aucun mot de la porte de clôture LifeOS et le commit part hors
-  d'opencode : aucune porte ni hook n'est contourné ou modifié.
-
-`WIP_AUTOSAVE=0` coupe la fonction. Effet à connaître : un commit `wip(autosave)` déplace HEAD ; le
-contrôle de clôture exige des verdicts Forge et Max postérieurs au dernier commit, donc du code sauvé
-après un verdict rend ce verdict périmé (voulu : il portait sur un autre état du code).
+La dernière commande échoue si l'artefact est absent, d'une autre entrée
+(`source_segments_sha256`) ou s'il laisse un segment `parole` sans langue. Committer
+ensuite le fichier dans `antenly`. Ce dépôt n'écrit jamais dans `antenly` : aucun push,
+aucun PAT d'écriture, `main` intact.
