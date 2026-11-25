@@ -24,6 +24,31 @@ TESTS=(
   split-diff-test.sh
   subagent-fail-test.sh
   watchdog-test.sh
+  upstream-fullrun/agent-idle-test.sh
+  upstream-fullrun/allowed-repos-cwd-test.sh
+  upstream-fullrun/chain-step-test.sh
+  upstream-fullrun/checkpoint-watchdog-verdict-test.sh
+  upstream-fullrun/done-check-test.sh
+  upstream-fullrun/extra-repos-test.sh
+  upstream-fullrun/ffmpeg-install-test.sh
+  upstream-fullrun/first-link-prompt-test.sh
+  upstream-fullrun/hmac-state-test.sh
+  upstream-fullrun/hook-profile-install-test.sh
+  upstream-fullrun/leaklog-test.sh
+  upstream-fullrun/livelog-test.sh
+  upstream-fullrun/merge-signed-carry-test.sh
+  upstream-fullrun/oc-deadline-test.sh
+  upstream-fullrun/preannot-test.sh
+  upstream-fullrun/preflight-test.sh
+  upstream-fullrun/prompt-contract-test.sh
+  upstream-fullrun/stall-resume-test.sh
+  upstream-fullrun/start-step-test.sh
+  upstream-fullrun/stop-after-step-test.sh
+  upstream-fullrun/stop-step-target-agent-test.sh
+  upstream-fullrun/turn-end-test.sh
+  upstream-fullrun/unit-contract-test.sh
+  upstream-fullrun/wippush-test.sh
+  upstream-fullrun/with-emulators-test.sh
 )
 
 failed=0
