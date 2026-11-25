@@ -86,3 +86,22 @@
 - Différents (au moins deux shas distincts) : **40**
 - Présents dans une seule source : **12**
 
+## Étape B — Fichiers différents (ou de rôle équivalent)
+
+Une ligne par fichier différent : version à garder en priorité, puis ce qui manque aux autres.
+La recommandation générale est de garder la version `lifeos-ci-seed` (déjà fusionnée et adaptée aux
+chemins) ; les exceptions où une autre source est plus complète sont signalées explicitement.
+
+### Lot 1 (fichiers 1 à 10)
+
+- `agent-idle-test.sh` — À garder : **antenly/galass** (`a8e309d493f2`, 118 l.), identiques entre eux. La version seed (`99b8a38a222d`) n'est que le correctif de chemin `$HERE/../`→`$HERE/../../` ; aucun écart de test.
+- `allowed-repos-cwd-test.sh` — À garder : **seed** (`a34cd87ad8fa`, 148 l.) ; seul écart avec galass (`d9b92a32e8a2`) : la profondeur de chemin (`/../`→`/../../`).
+- `allowed-repos-test.sh` — À garder : **seed** (`3ac0f755c9fb`, 67 l.), version restaurée de galass + 10 l. d'assertions adaptées à lifeos-ci. galass (`75e67344837c`, 57 l.) n'a pas ces assertions supplémentaires.
+- `autosave-test.sh` — À garder : **seed = galass** (`c44813c53195`, 190 l.) : liste de fichiers interdits actualisée (`.env`, credentials, google-services, keystores, secrets PSP). antenly (`e019782fe662`, 188 l.) teste l'ancienne liste (`keys.json`, corpus, evidence).
+- `autosave.sh` — À garder : **seed = galass** (`26bcd9c93433`, 249 l.) : réintègre les enregistrements signés via `merge-signed-carry.sh` avant le commit `wip(carry)` + deny list galass. antenly (`2eaa914d11ca`, 239 l.) n'a pas la fusion des carry signés.
+- `chain-step-test.sh` — À garder : **galass** (`18438fa309f6`, 485 l.), nettement plus complet : `start_step` jamais rejoué, `emu_inflight`, `chain_enabled=false`, borne à 25 inputs. seed/antonly (`301 l.`) n'ont pas ces cas → porter les extras dans le fichier seed (déjà adapté aux chemins).
+- `checkpoint-watchdog-verdict-test.sh` — À garder : **seed** (`4e5c46d4c2d2`, 193 l.) : mêmes tests, noms d'environnement `TARGET_DIR`/`OC_MODEL_FALLBACK` attendus par le `run-fullrun` seed. antonly/galass utilisent `ANTENLY_DIR`/`OC_MODEL_CHAIN` ; aucun test manquant.
+- `checkpoint.sh` — À garder : **seed** (`c17b75950428`, 202 l.) : `STATUS="done"` et `REPO` accepte `TARGET_DIR` puis `ANTENLY_DIR`. antonly/galass (`201 l.`) ne lisent que `ANTENLY_DIR`.
+- `done-check-test.sh` — À garder : **seed = antonly** (`e048f4e5c3b6`, 800 l.) qui couvre le code actuel (`OC_DONE_AGENTS_ANY`, sans repli `REPORT.md`). galass (`480c9fd841b5`, 790 l.) contient les cas 9e/9f du repli `REPORT.md` que le `done_check.sh` seed n'implémente pas → à porter avec la fonctionnalité, sinon ils échouent.
+- `done_check.sh` — À garder : **seed = antonly** (`1a6a42108cb4`, 389 l.) : `OC_DONE_AGENTS_ANY` + `OC_DONE_ONLY`. galass (`478489ea9637`, 348 l.) possède en plus le repli automatique `REPORT.md` absent de seed → candidat à porter (avec ses tests 9e/9f).
+
