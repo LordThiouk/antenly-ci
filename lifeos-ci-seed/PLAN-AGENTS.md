@@ -22,3 +22,15 @@ reconstruit depuis `opencode/step-agents.sh`, `_next.yml`, `opencode/config/open
 | Silas | Sécurité offensive, audit | 5 `verify` | `opencode/agents/Silas.md` |
 | code-reviewer | Revue de code | 5 `verify` (`code-review`) | `opencode/agents/code-reviewer.md` |
 | Max | Porte finale et clôture | 6 `max`, 7 `close` | `opencode/agents/Max.md` |
+
+## Workflows à créer
+
+Un wrapper `.github/workflows/agent-<slug>.yml` par agent (`nix`, `vera`, `algorithm`, `serena`,
+`architect`, `engineer`, `anvil`, `forge`, `aditi`, `designer`, `silas`, `code-reviewer`, `max`).
+Aucune duplication : chaque wrapper ne fait que `uses: ./.github/workflows/_agent-run.yml` avec
+`agent`, `phase`, `step`, `target_agent`, puis `uses: ./.github/workflows/_next.yml` si chaînage.
+`_agent-run.yml` exécute les étapes du skill FullRun : validation des entrées → checkout lifeos-ci
+(outils) → checkout du dépôt cible → clone lifeos lecture seule → installation bun/opencode →
+gel des outils root → préflight `FullRunPreflight.ts` → prompt + ISA → `run-fullrun.sh` (dispatch
+de l'agent) → `done_check.sh` (verdict réel) → carry/checkpoint signé → push/PR si `lifeos_write`
+→ notification. Les noms sont slugifiés (`Nix/LifeOS`→`nix`, `code-reviewer` inchangé).
