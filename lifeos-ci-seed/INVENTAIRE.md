@@ -336,4 +336,45 @@ Défauts constatés dans le seed, à corriger avec ce lot :
 - `fr-plan-vera.yml` conditionne l'enchaînement à `needs.vera.outputs.status == 'ok'` sans
   vérifier `needs.vera.result == 'success'`.
 
+### `ci.yml` et `ci-scripts.yml`
+
+Le nom `ci.yml` recouvre **trois rôles différents** ; il ne faut pas les fusionner :
+
+- antenly `ci.yml` (16 steps) = CI de l'application antenly : pile Postgres/ClickHouse/SeaweedFS,
+  migrations, sondes RLS, pipeline preannot, licences Python. Sans équivalent dans le seed :
+  à conserver tel quel pour la cible antenly, pas un candidat à la fusion.
+- galass `ci.yml` (5 steps) = tests des scripts opencode + `gitleaks detect` épinglé.
+- seed `ci.yml` (14 steps) = shellcheck + actionlint + bun + ffmpeg + tests shell.
+
+**Base à garder pour la CI « scripts » : `lifeos-ci-seed/.github/workflows/ci.yml`** (superset
+lint/shell) **et `lifeos-ci-seed/.github/workflows/ci-scripts.yml`** (tests opencode), qui est
+**identique à antenly `ci-scripts.yml`** (5 steps, aucun step unique).
+
+À porter depuis **galass `ci.yml`** :
+
+- `gitleaks detect (épinglé, sha256 vérifié)` — absent de `ci-scripts.yml` (le seed n'a pas de
+  porte de secrets sur les tests opencode).
+
+À porter depuis le **seed `ci.yml`** :
+
+- remplacer `secrets.LIFEOS_READ_TOKEN` par `secrets.CI_TOKEN` dans `ci-scripts.yml` (l. 46) :
+  le seed a déjà migré `ci.yml` (l. 36) et `_agent-run.yml` (`CI_TOKEN`) ; `ci-scripts.yml` est
+  le dernier fichier resté sur l'ancien jeton.
+
+**Doublons internes au seed entre `ci.yml` et `ci-scripts.yml`** (les deux se déclenchent sur
+`pull_request` et `push`) :
+
+- `Checkout LifeOS (lecture seule, CLI de verdict)` : deux fois ;
+- `Installer age (épinglé, sha256 vérifié)` : deux fois (plus une troisième dans
+  `opencode-fullrun.yml`) ;
+- installation de `ripgrep` : deux fois (`Installer ripgrep` / `Installer ripgrep (tests shell)`),
+  plus une troisième dans `opencode-fullrun.yml` ;
+- `Marqueur root du mode test (suite de tests seulement)` : deux fois ;
+- `setup-bun` (via `uses:`, non nommé dans `ci-scripts.yml`) : deux fois ;
+- tests `shell` vs `opencode` : deux jobs qui partagent tout le socle d'installation.
+
+Recommandation : garder un seul workflow CI (ou deux workflows mais un job commun) et y fondre
+les steps communs ; le commentaire d'en-tête de `ci-scripts.yml` (« Distinct de ci.yml, qui teste
+antenly lui-même ») est d'ailleurs **faux dans le seed**, où `ci.yml` teste aussi les scripts.
+
 
