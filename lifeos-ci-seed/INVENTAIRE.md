@@ -273,3 +273,33 @@ possèdent le fichier est listé ci-dessous.
 - seed uniquement : `_agent-run.yml`, `_next.yml`, `fr-plan-vera.yml`, `task.yml`.
 - Aucun workflow unique à galass (ses 4 fichiers ont un équivalent de nom dans les autres sources).
 
+## Étape B — workflows de même rôle
+
+### `opencode-fullrun.yml` — FullRun monolithique
+
+**Base à garder : `lifeos-ci-seed/.github/workflows/opencode-fullrun.yml`** (32 steps).
+C'est la version de la lignée antenly la plus récente et la plus sûre : elle ajoute au fullrun
+antenly la gestion d'un état `has_state=true` dont le téléchargement échoue (arrêt de chaîne au
+lieu d'un cold start silencieux), l'avertissement si la suppression de l'artefact d'état échoue,
+l'assainissement `safe_raw` des raisons de chaînage, et les contrôles `m1`/`m2`/`m4` (valeurs
+`.next` par phase, `isa_path` re-validé, valeurs loggées assainies). Elle source aussi
+`allowed-repos.sh` depuis `/opt/fullrun-tools` avant push/PR.
+
+À porter depuis **galass** (steps/entrées absents du fullrun seed) :
+
+- `with_emulators` (entrée `boolean`, défaut `false`) + env `WITH_EMULATORS` + `IN_WITH_EMU` ;
+- préparation e2e dans « Outils de contrôle figés » : jeton `GALASS_TOKEN` root `0600` dans
+  `/opt/fullrun-live/emu-e2e.token`, fichier `emu-run`/`emu-resume`, état `emu-e2e.state`, et
+  sudoers dédié `/etc/sudoers.d/fullrun-emu-e2e` (sous-ensemble strict de `emu-e2e.sh`) ;
+- `Garde du secret` (galass : `GALASS_TOKEN` ; à adapter en `CI_TOKEN` pour lifeos-ci) ;
+- `Valider target_repo et extra_repos (liste blanche unique)` ;
+- `Checkout du dépôt cible (lecture seule)` et `Checkout des dépôts supplémentaires` ;
+- `Contrôles et push des dépôts supplémentaires (jamais main, jamais force)` ;
+- `PR en brouillon des dépôts supplémentaires (jamais fusionnées)`.
+
+À noter : le fullrun seed reste **figé sur antenly** (`Checkout antenly`,
+`Checkout antenly-ci`, corpus HF « cible antenly », secrets `ANTENLY_TOKEN`,
+`ANTENLY_PUSH_TOKEN`, `ANTENLY_CI_DISPATCH_TOKEN`) ; il n'est pas encore générique lifeos-ci.
+La version galass est, elle, générique (dépôt cible + dépôts supplémentaires).
+
+
