@@ -75,6 +75,11 @@ on:
         description: "Push des commits wip de la branche toutes les N min pendant le run (5 à 120)"
         type: string
         default: "30"
+      with_emulators:
+        description: "Si true, opencode pilote les e2e via galass-emu-actions-pub (emu-e2e.sh, vrai staging). Défaut false."
+        required: false
+        type: boolean
+        default: false
       chain_enabled:
         description: "Jobs courts chaînés (une étape/tâche/agent par job, session opencode neuve à chaque fois) au lieu d'un seul long job. 'true' pour activer — défaut 'false' : comportement inchangé."
         type: string
@@ -88,16 +93,8 @@ on:
         description: "Interne au chaînage : « <liens déjà enchaînés>/<plafond 1-100> », ex. 0/20 au premier dispatch. Ne pas renseigner à la main sauf pour reprendre une chaîne coupée en gardant sa progression."
         type: string
         default: "0/20"
-      prompt_path_build:
-        description: "chain_enabled=true seulement : prompt de la phase build (étape 4, une tâche par job — même format que prompt_path). Requis dès le premier dispatch, même si ce lien démarre en phase plan."
-        type: string
-        default: ""
-      prompt_path_verify:
-        description: "chain_enabled=true seulement : prompt de la phase verify (étape 5, un agent par job — code-reviewer puis Forge puis Silas, même format que prompt_path). Requis dès le premier dispatch."
-        type: string
-        default: ""
-      prompt_path_close:
-        description: "chain_enabled=true seulement : prompt de la phase close (étapes 6-7, Max puis fermeture — même format que prompt_path). Requis dès le premier dispatch."
+      chain_prompts:
+        description: "chain_enabled=true seulement, JSON : {\"build\":\"prompts:<chemin>\",\"verify\":\"prompts:<chemin>\",\"close\":\"prompts:<chemin>\"} — un prompt par phase (build = étape 4, une tâche par job ; verify = étape 5, un agent par job ; close = étapes 6-7), même format que prompt_path. Requis dès le premier dispatch. Regroupe 3 entrées pour tenir sous la limite GitHub de 25 inputs workflow_dispatch."
         type: string
         default: ""
       prev_run_id:
@@ -171,13 +168,14 @@ jobs:
       IN_AGENT_IDLE_MIN: ${{ inputs.agent_idle_minutes }}
       IN_DONE_AGENTS: ${{ inputs.done_agents }}
       IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
+      WITH_EMULATORS: ${{ inputs.with_emulators }}
       IN_HF_CORPUS: ${{ inputs.hf_corpus }}
       IN_CHAIN_ENABLED: ${{ inputs.chain_enabled }}
       IN_CHAIN_PHASE: ${{ inputs.chain_phase }}
       IN_CHAIN_PROGRESS: ${{ inputs.chain_progress }}
-      IN_PROMPT_BUILD: ${{ inputs.prompt_path_build }}
-      IN_PROMPT_VERIFY: ${{ inputs.prompt_path_verify }}
-      IN_PROMPT_CLOSE: ${{ inputs.prompt_path_close }}
+      IN_PROMPT_BUILD: ${{ (fromJSON(inputs.chain_prompts || '{}').build || '') }}
+      IN_PROMPT_VERIFY: ${{ (fromJSON(inputs.chain_prompts || '{}').verify || '') }}
+      IN_PROMPT_CLOSE: ${{ (fromJSON(inputs.chain_prompts || '{}').close || '') }}
       IN_PREV_RUN_ID: ${{ inputs.prev_run_id }}
       IN_NEXT: ${{ inputs.next }}
       ANTENLY_DIR: ${{ github.workspace }}/antenly
@@ -901,6 +899,7 @@ jobs:
             "$CI_DIR/opencode/wippush.sh" "$CI_DIR/opencode/done_check.sh" "$CI_DIR/opencode/done-check-call.sh" "$CI_DIR/opencode/checkpoint.sh" \
             "$CI_DIR/opencode/bench-capped" \
             "$CI_DIR/opencode/allowed-repos.sh" "$CI_DIR/opencode/merge-signed-carry.sh" \
+            "$CI_DIR/opencode/emu-e2e.sh" \
             "$CI_DIR/opencode/preannot.sh" "$CI_DIR/opencode/autosave.sh" "$T/"
           sudo install -o root -g root -m 0644 "$CI_DIR/opencode/log-recipient.txt" "$CI_DIR/opencode/autosave-deny.txt" "$T/"
           # CLI de verdict lifeos (source unique du verdict lu par done_check.sh) : bundle autonome construit ici,
@@ -1258,7 +1257,7 @@ jobs:
           cd "$ANTENLY_DIR"
           # Outils figés avant opencode (root) : gitleaks, masquage, chiffrement, destinataire age, bench-capped.
           T=/opt/fullrun-tools; L=/opt/fullrun-live
-          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped preannot.sh autosave.sh autosave-deny.txt log-recipient.txt; do
+          for tool in gitleaks redact-log.sh leaklog.sh progress.sh wippush.sh done_check.sh bench-capped preannot.sh autosave.sh emu-e2e.sh autosave-deny.txt log-recipient.txt; do
             [ -f "$T/$tool" ] || { echo "::error::outil figé absent ($tool) : push refusé"; exit 1; }
           done
           # Artefact chiffré (journal + rapport gitleaks) : publié seulement si un contrôle refuse.
@@ -1834,9 +1833,9 @@ jobs:
           IN_CHAIN_PROGRESS: ${{ inputs.chain_progress }}
           OC_ISA_PATH: ${{ inputs.isa_path }}
           IN_PROMPT: ${{ inputs.prompt_path }}
-          IN_PROMPT_BUILD: ${{ inputs.prompt_path_build }}
-          IN_PROMPT_VERIFY: ${{ inputs.prompt_path_verify }}
-          IN_PROMPT_CLOSE: ${{ inputs.prompt_path_close }}
+          IN_PROMPT_BUILD: ${{ (fromJSON(inputs.chain_prompts || '{}').build || '') }}
+          IN_PROMPT_VERIFY: ${{ (fromJSON(inputs.chain_prompts || '{}').verify || '') }}
+          IN_PROMPT_CLOSE: ${{ (fromJSON(inputs.chain_prompts || '{}').close || '') }}
           IN_BRANCH: ${{ inputs.branch }}
           IN_JOB: ${{ inputs.job_name }}
           IN_LIFEOS_REF: ${{ inputs.lifeos_ref }}
@@ -1847,6 +1846,7 @@ jobs:
           IN_STOP_AFTER_STEP: ${{ inputs.stop_after_step }}
           IN_WIP_PUSH_MIN: ${{ inputs.wip_push_minutes }}
           IN_PREV_RUN_ID: ${{ inputs.prev_run_id }}
+          IN_WITH_EMU: ${{ inputs.with_emulators == true && 'true' || 'false' }}
           OC_MODEL_MAIN: ${{ inputs.model_main }}
           OC_MODEL_MAX: ${{ inputs.model_max }}
           OC_MODEL_CHAIN: ${{ inputs.model_chain }}
@@ -2044,6 +2044,8 @@ jobs:
               '{phase:$ph,count:$n,prev:$pv,next:$nx,emu:$em,has:$hs}')
             chain_state_args=(-f chain_state="$next_state")
           fi
+          prompts_json=$(jq -cn --arg b "${IN_PROMPT_BUILD:-}" --arg v "${IN_PROMPT_VERIFY:-}" --arg c "${IN_PROMPT_CLOSE:-}" \
+            '{build:$b,verify:$v,close:$c}')
           echo "::add-mask::$DISPATCH_TOKEN"
           if GH_TOKEN="$DISPATCH_TOKEN" gh workflow run opencode-fullrun.yml \
                --repo LordThiouk/antenly-ci --ref "${GITHUB_REF_NAME}" \
@@ -2054,9 +2056,9 @@ jobs:
                -f base_branch="${IN_BASE:-}" -f hf_corpus="${IN_HF_CORPUS:-}" \
                -f agent_idle_minutes="$IN_AGENT_IDLE_MIN" -f idle_minutes="$IN_IDLE_MIN" \
                -f done_agents="${OC_DONE_AGENTS_EFFECTIVE:-${IN_DONE_AGENTS:-Max}}" -f wip_push_minutes="$IN_WIP_PUSH_MIN" \
+               -f with_emulators="${IN_WITH_EMU:-false}" \
                -f chain_enabled=true -f chain_phase="$next_phase" \
-               -f chain_progress="${new_count}/${IN_CHAIN_MAX}" -f prompt_path_build="$IN_PROMPT_BUILD" \
-               -f prompt_path_verify="$IN_PROMPT_VERIFY" -f prompt_path_close="$IN_PROMPT_CLOSE" \
+               -f chain_progress="${new_count}/${IN_CHAIN_MAX}" -f chain_prompts="$prompts_json" \
                -f prev_run_id="$RUN_ID" -f next="$new_next" \
                "${chain_state_args[@]}" \
                >/dev/null 2>&1; then
