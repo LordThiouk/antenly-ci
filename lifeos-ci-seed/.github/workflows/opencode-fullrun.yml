@@ -974,6 +974,17 @@ jobs:
           else
             echo "::warning::GITHUB_TOKEN absent : preannot.sh sans jeton (dispatch impossible)"
           fi
+          # with_emulators : sudoers strict pour emu-e2e.sh, copié de galass-ci (/etc/sudoers.d/fullrun-emu-e2e).
+          if [ "${WITH_EMULATORS:-}" = "true" ]; then
+            u=$(id -un)
+            {
+              printf 'Defaults!/opt/fullrun-tools/emu-e2e.sh env_reset\n'
+              printf 'Defaults!/opt/fullrun-tools/emu-e2e.sh secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+              printf '%s ALL=(root) NOPASSWD: /opt/fullrun-tools/emu-e2e.sh run, /opt/fullrun-tools/emu-e2e.sh resolve-refs, /opt/fullrun-tools/emu-e2e.sh status *\n' "$u"
+            } | sudo tee /etc/sudoers.d/fullrun-emu-e2e >/dev/null
+            sudo chmod 0440 /etc/sudoers.d/fullrun-emu-e2e
+            sudo visudo -cf /etc/sudoers.d/fullrun-emu-e2e >/dev/null
+          fi
           "$T/gitleaks" version
           echo "Outils figés dans $T (root)"
 
