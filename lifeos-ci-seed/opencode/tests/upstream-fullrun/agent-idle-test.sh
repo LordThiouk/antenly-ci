@@ -4,7 +4,7 @@
 # OC_SUBAGENT_IDLE_SEC reste maître ; une valeur invalide est refusée (90). Le watchdog n'est jamais affaibli.
 #   opencode/tests/agent-idle-test.sh
 set -uo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
+HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../../run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok() { echo "OK   $*"; }; ko() { echo "FAIL $*"; fail=1; }
 DIRVAR=$(grep -q 'TARGET_DIR:?' "$R" && echo TARGET_DIR || echo ANTENLY_DIR)
@@ -98,7 +98,7 @@ if [ "$g" -ge 2 ] && [ "$g" -le 7 ] && ! grep -q 'agent_idle_extended' "$T/log.s
   ok "OC_SUBAGENT_IDLE_SEC explicite : le watchdog court reste en place (${g}s)"; else ko "plafond : ${g}s $(st)"; fi
 
 # 6. La garde du workflow (opencode-fullrun.yml) a la même plage que le wrapper : 1..720 min, sans doublon.
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 awk '/# agent_idle_minutes \(facultatif\)/{f=1} /# start_step \(facultatif\)/{f=0} f' "$WF" >"$T/guard.sh"
 [ -s "$T/guard.sh" ] && ok "bloc de garde agent_idle_minutes extrait du workflow" || ko "bloc de garde introuvable"
 guard() { ( fail() { echo "refus: $*"; exit 1; }; IN_AGENT_IDLE_MIN="$1"; . "$T/guard.sh" ) >/dev/null 2>&1; }
@@ -111,7 +111,7 @@ done
 
 # 7. Timeout fournisseur opencode (par requête complète) : 40 min, comme le délai de Forge ; l'ancien 5 min coupait
 #    les audits Forge/Max avec « The operation timed out ».
-python3 - "$HERE/../config/opencode.json" <<'PY' && ok "opencode.json : provider.opencode.options.timeout = 2400000 (40 min)" || ko "opencode.json : timeout fournisseur != 2400000"
+python3 - "$HERE/../../config/opencode.json" <<'PY' && ok "opencode.json : provider.opencode.options.timeout = 2400000 (40 min)" || ko "opencode.json : timeout fournisseur != 2400000"
 import json, sys
 sys.exit(0 if json.load(open(sys.argv[1]))['provider']['opencode']['options']['timeout'] == 2400000 else 1)
 PY

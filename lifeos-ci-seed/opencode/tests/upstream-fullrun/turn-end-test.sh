@@ -5,8 +5,8 @@
 # marqueur de PASS ; le faux done_check.sh ($T/done_check) ne rend ok que si $T/done existe.
 #   opencode/tests/turn-end-test.sh
 set -uo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../../run-fullrun.sh"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 cat >"$T/done_check" <<S

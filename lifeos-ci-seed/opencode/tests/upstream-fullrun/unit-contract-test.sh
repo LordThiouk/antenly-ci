@@ -9,7 +9,7 @@
 #   opencode/tests/unit-contract-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 # shellcheck source=opencode/tests/verdict-cli.lib
 . "$HERE/verdict-cli.lib"
 TOOLS=$(dirname "$OC_VERDICT_CLI"); PIPE="$TOOLS/FullRunPipeline.ts"

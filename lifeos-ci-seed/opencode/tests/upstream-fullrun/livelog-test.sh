@@ -6,7 +6,7 @@
 # lu avec les droits de l'utilisateur (donc refusé).
 #   opencode/tests/livelog-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"
 key="${AGE_KEY:-$HOME/.config/age/fullrun-logs.key}"

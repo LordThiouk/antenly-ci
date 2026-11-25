@@ -9,7 +9,7 @@
 #   opencode/tests/stop-after-step-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../.." && pwd)
+ROOT=$(cd "$HERE/../../.." && pwd)
 WF="$ROOT/.github/workflows/opencode-fullrun.yml"
 STEP="$ROOT/opencode/step-agents.sh"
 RUN="$ROOT/opencode/run-fullrun.sh"

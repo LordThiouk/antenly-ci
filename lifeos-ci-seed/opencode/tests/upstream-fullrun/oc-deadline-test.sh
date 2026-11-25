@@ -11,7 +11,7 @@
 #   opencode/tests/oc-deadline-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 fail=0
 ok() { echo "OK   $*"; }; ko() { echo "FAIL $*"; fail=1; }
 

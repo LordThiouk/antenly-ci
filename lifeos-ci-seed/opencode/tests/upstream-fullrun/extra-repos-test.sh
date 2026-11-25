@@ -6,7 +6,7 @@
 # dans les arguments ni la sortie, PR en brouillon uniquement (jamais fusionnée).
 #   opencode/tests/extra-repos-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"
 tmp=$(mktemp -d) || exit 1

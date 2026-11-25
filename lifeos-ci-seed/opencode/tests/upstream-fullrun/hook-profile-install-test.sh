@@ -4,7 +4,7 @@
 # est dans disable, et le workflow appelle bien le script.
 #   opencode/tests/hook-profile-install-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 root=$(cd "$here/.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"

@@ -4,7 +4,7 @@
 # l'étape opencode run.
 #   opencode/tests/ffmpeg-install-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/opencode/tests/lib.sh"
 

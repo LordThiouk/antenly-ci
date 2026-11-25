@@ -5,7 +5,7 @@
 # Usage : bash opencode/tests/done-check-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=$(cd "$HERE/../.." && pwd)
+ROOT=$(cd "$HERE/../../.." && pwd)
 DC="$ROOT/opencode/done_check.sh"
 # shellcheck source=verdict-cli.lib
 source "$HERE/verdict-cli.lib"

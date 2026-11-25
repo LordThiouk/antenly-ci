@@ -6,8 +6,8 @@
 #   opencode/tests/prompt-contract-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-PRE="$HERE/../ci-preamble.md"
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+PRE="$HERE/../../ci-preamble.md"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 [ -f "$PRE" ] || { echo "FAIL préambule introuvable : $PRE"; exit 1; }

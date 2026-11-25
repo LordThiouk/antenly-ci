@@ -7,8 +7,8 @@
 #   opencode/tests/first-link-prompt-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
-R="$HERE/../run-fullrun.sh"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
+R="$HERE/../../run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok() { printf 'OK   %s\n' "$*"; }
 ko() { printf 'FAIL %s\n' "$*"; fail=1; }
@@ -58,7 +58,7 @@ fi
 
 # --- 2. Le step prep CONSOMME le prompt effectif (vrai dépôt, vrai git, vraie branche de prompts) ---
 mkdir -p "$T/bin" "$T/ci/opencode" "$T/antenly" "$T/oc"
-cp "$HERE/../ci-preamble.md" "$T/ci/opencode/ci-preamble.md"
+cp "$HERE/../../ci-preamble.md" "$T/ci/opencode/ci-preamble.md"
 cat >"$T/bin/envsubst" <<'S'
 #!/bin/sh
 cat

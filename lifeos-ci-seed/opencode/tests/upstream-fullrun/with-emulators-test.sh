@@ -4,7 +4,7 @@
 # galass-ci, pas de FreeLLM ni d'appel HTTP direct à un modèle.
 #   opencode/tests/with-emulators-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"
 # shellcheck source=opencode/allowed-repos.sh

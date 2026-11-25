@@ -4,7 +4,7 @@
 # Ce test exécute parse / push / pr depuis un autre répertoire.
 #   opencode/tests/allowed-repos-cwd-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 root=$(cd "$here/.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"

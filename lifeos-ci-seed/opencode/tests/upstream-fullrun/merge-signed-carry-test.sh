@@ -3,7 +3,7 @@
 # un persist/export amputé (ex. après retreat) ne doit pas les effacer.
 #   opencode/tests/merge-signed-carry-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/tests/lib.sh"
 MSC="$here/merge-signed-carry.sh"

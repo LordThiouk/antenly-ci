@@ -5,7 +5,7 @@
 # ($T/done_check) ne rend `done_check=ok` que si ce marqueur existe. Les cas qui attendent rc=0
 # décrivent ainsi un VRAI succès (Max PASS confirmé), pas un simple retour du modèle.
 set -uo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
+HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../../run-fullrun.sh"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 # Faux validateur de fin : PASS uniquement si la passe a marqué une fin réussie.
@@ -341,7 +341,7 @@ else
 fi
 
 # 18. la variable est câblée dans l'env du step opencode du workflow (défaut 240 s).
-if grep -q 'OC_ERROR_IDLE_SEC:' "$HERE/../../.github/workflows/opencode-fullrun.yml" \
+if grep -q 'OC_ERROR_IDLE_SEC:' "$HERE/../../../.github/workflows/opencode-fullrun.yml" \
    && grep -q 'OC_ERROR_IDLE_SEC:-240' "$R"; then
   echo "ok 18 OC_ERROR_IDLE_SEC câblée dans le workflow, défaut 240 s"
 else
@@ -423,7 +423,7 @@ fi
 
 # 25. le câblage du workflow reste inconditionnel (aucune garde chain_enabled) : une seule valeur
 #     littérale dans l'env du step oc, identique en chaîné et hors chaîné.
-yml="$HERE/../../.github/workflows/opencode-fullrun.yml"
+yml="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 if [ "$(grep -c 'OC_ERROR_IDLE_SEC:' "$yml")" -eq 1 ] \
     && grep -Eq '^[[:space:]]+OC_ERROR_IDLE_SEC: "240"[[:space:]]*$' "$yml"; then
   echo "ok 25 OC_ERROR_IDLE_SEC=240 sans condition dans le workflow (chaîne courte ou longue)"

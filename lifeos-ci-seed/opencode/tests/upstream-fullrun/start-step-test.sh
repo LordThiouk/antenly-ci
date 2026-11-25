@@ -4,8 +4,8 @@
 # est refusée ; vide = rien n'est exporté (comportement habituel) ; une variable déjà présente n'est pas reprise.
 #   opencode/tests/start-step-test.sh
 set -uo pipefail
-HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../run-fullrun.sh"
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+HERE=$(cd "$(dirname "$0")" && pwd); R="$HERE/../../run-fullrun.sh"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 fail=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok() { echo "OK   $*"; }; ko() { echo "FAIL $*"; fail=1; }
 

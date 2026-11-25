@@ -5,7 +5,7 @@
 # sortie ; `gh` est simulé, aucun appel réseau réel, aucun vrai workflow.
 #   opencode/tests/preannot-test.sh
 set -uo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=opencode/tests/lib.sh
 . "$here/opencode/tests/lib.sh"
 

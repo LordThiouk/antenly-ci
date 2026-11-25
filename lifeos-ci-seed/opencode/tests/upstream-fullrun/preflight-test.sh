@@ -7,7 +7,7 @@
 #   opencode/tests/preflight-test.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-WF="$HERE/../../.github/workflows/opencode-fullrun.yml"
+WF="$HERE/../../../.github/workflows/opencode-fullrun.yml"
 fail=0; nok=0; nko=0; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok() { printf 'OK   %s\n' "$*"; nok=$((nok + 1)); }
 ko() { printf 'FAIL %s\n' "$*"; fail=1; nko=$((nko + 1)); }
@@ -102,7 +102,7 @@ run_pre "$H" true code-reviewer; rc=$?
 [ "$rc" = 0 ] && rg -q "::error::PRÉFLIGHT NON ÉVALUÉ.*lifeos_ref" "$H/out" && ok "lifeos sans FullRunPreflight.ts : erreur d'annotation nommant lifeos_ref, le run n'est pas bloqué" || ko "CLI absent : rc=$rc $(tail -3 "$H/out" | tr '\n' ' ')"
 
 # --- 2b. Le README dit la cause, la règle du périmètre et les paramètres de relance ----------------------
-R="$HERE/../../README.md"
+R="$HERE/../../../README.md"
 rg -q "Préflight du lien" "$R" && rg -q "pas de verdict signé" "$R" && rg -q "step build rejects agent" "$R" && ok "README : la cause de la redescente est documentée" || ko "README : cause absente"
 rg -q "pose \*\*pendant\*\* le build|posé \*\*pendant\*\* le build" "$R" && rg -q "avant\*\* le lancement" "$R" && ok "README : un marqueur de périmètre doit être dans l'ISA avant le lancement (gel dès l'étape 4)" || ko "README : règle du périmètre absente"
 rg -q 'start_step=build`, `chain_phase=build`' "$R" && rg -q 'start_step=verify`, `chain_phase=verify`, `next=<agent>`' "$R" && ok "README : paramètres exacts du prochain lien (build puis verify)" || ko "README : paramètres de relance absents"
