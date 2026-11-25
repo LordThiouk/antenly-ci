@@ -1025,3 +1025,9 @@ exit=0
 Actionlint est lancé depuis une copie du dossier à la racine du futur dépôt :
 imbriqué sous `lifeos-ci-seed/`, il résout `uses: ./.github/workflows/...` par
 rapport à la racine d'`antenly-ci` et ne trouve pas les workflows locaux.
+
+### Commit Fix2
+
+- `515d2d3` — `fix(lifeos-ci): figer les outils, isoler git et l'état, preuves de tests (Fix2)`
+- Auteur : `Papa Diop <76528706+LordThiouk@users.noreply.github.com>`
+- Portée : `lifeos-ci-seed/` uniquement.

@@ -55,7 +55,7 @@ ni le dispatch réel.
 
 ### [x] 2.1. Critique — Scripts/outils du checkout `ci/` modifiables et exécutés après opencode
 
-> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-frozen-tools-test.sh`) :
+> Corrigé (commit `515d2d3`, test `opencode/tests/critical-frozen-tools-test.sh`) :
 > copie root-owned `opencode/`, `targets/` et `models.txt` dans
 > `/opt/lifeos-ci-tools` **avant** opencode (`_agent-run.yml`, step « Outils de
 > confiance figés »), `chmod go-w /opt`, puis toutes les étapes post-opencode
@@ -70,7 +70,7 @@ Correction suggérée : figer les outils avant opencode dans un répertoire root
 
 ### [x] 2.2. Critique — Hooks/filtres git des dépôts agent exécutés avec `CI_TOKEN`
 
-> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-git-isolation-test.sh`) :
+> Corrigé (commit `515d2d3`, test `opencode/tests/critical-git-isolation-test.sh`) :
 > push depuis une copie nue (`git init --bare` + fetch local), environnement
 > `env -i`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
 > `-c core.hooksPath=/dev/null`, `-c core.fsmonitor=false`, `--no-verify` ;
@@ -86,7 +86,7 @@ Correction suggérée : reprendre le modèle galass : copie nue fraîche, `env -
 
 ### [x] 2.3. Critique — État mutable post-opencode (`GITHUB_ENV`, `GITHUB_OUTPUT`, `$RUNNER_TEMP`, checkout `ci/`)
 
-> Corrigé (commit `FIX2_COMMIT`, test `opencode/tests/critical-state-isolation-test.sh`) :
+> Corrigé (commit `515d2d3`, test `opencode/tests/critical-state-isolation-test.sh`) :
 > plus de `GITHUB_ENV` de sécurité ; `extra_repos` normalisé dans un output de
 > step (valeur gérée par Actions), SHA de départ écrits en root dans
 > `/opt/lifeos-ci-state`, opencode lancé avec `env -i` et un `HOME`/`TMPDIR`
