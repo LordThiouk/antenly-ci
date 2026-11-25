@@ -34,3 +34,15 @@ Aucune duplication : chaque wrapper ne fait que `uses: ./.github/workflows/_agen
 gel des outils root → préflight `FullRunPreflight.ts` → prompt + ISA → `run-fullrun.sh` (dispatch
 de l'agent) → `done_check.sh` (verdict réel) → carry/checkpoint signé → push/PR si `lifeos_write`
 → notification. Les noms sont slugifiés (`Nix/LifeOS`→`nix`, `code-reviewer` inchangé).
+
+## Tâches à lancer en parallèle
+
+- Vague 0 (séquentielle) : `agent-vera` → carry plan.
+- Vague 1 : `agent-serena` (dépend de Vera).
+- Vague 2 (parallèle, build) : `agent-engineer`, `agent-anvil`, `agent-forge` (code),
+  `agent-aditi`, `agent-designer` — dépendent de Serena ; parallélisme réel seulement si les
+  scopes `[scope:…]` sont disjoints et les branches séparées.
+- Vague 3 (parallèle, verify) : `agent-silas`, `agent-code-reviewer`, `agent-forge` (audit) —
+  dépendent du build.
+- Vague 4 : `agent-max` (dépend de tous les verify), puis `agent-close` (même workflow Max).
+- `agent-nix` orchestre, ne se lance pas en parallèle des vagues.
