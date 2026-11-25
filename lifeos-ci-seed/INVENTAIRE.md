@@ -118,3 +118,16 @@ chemins) ; les exceptions où une autre source est plus complète sont signalée
 - `leaklog-test.sh` — À garder : **seed = galass** (`2f500e83322b`, 92 l.) : fabrique une paire `age` jetable pour vérifier le déchiffrement partout. antonly (`63b64f0d6df0`, 82 l.) dépend de la clé privée de la box (`~/.config/age/fullrun-logs.key`) et ne peut pas déchiffrer en CI.
 - `livelog-test.sh` — À garder : **seed = galass** (`c509cf896be8`, 164 l.) : ~21 l. de cas en plus vs antonly (`01f5c07a498b`, 143 l.).
 
+### Lot 3 (fichiers 21 à 30)
+
+- `livelog.sh` — À garder : **seed** (`7cf5b455be3d`, 208 l.) : `REMOTE` dérivé de `TARGET_REPO` via `allowed-repos.sh`, jeton `GALASS_TOKEN`, commit `galass.local`. galass (`8592ea047602`, 204 l.) est proche ; antonly (`52a7606a3ef8`, 189 l.) reste figé sur antenly.
+- `merge-signed-carry-test.sh` — À garder : **seed** (`4374ae71e64e`, 221 l.) = galass + profondeur de chemin. Aucun écart fonctionnel.
+- `oc-deadline-test.sh` — À garder : **seed** (`2bc5163e09d0`, 140 l.) ; antonly et galass (`eba03dc58e23`) sont identiques, seed n'ajoute qu'un correctif de profondeur de chemin.
+- `preannot-test.sh` — À garder : **seed** (`1e08dc6404da`, 290 l.) = antonly + profondeur `../../..`. Aucun écart.
+- `preannot.sh` — À garder : **seed** (`40317d227e10`, 340 l.) : 2 commentaires `shellcheck` (`SC2016`, `SC2154`) en plus. antonly (`686e1585d884`, 338 l.) est sinon identique.
+- `preflight-test.sh` — À garder : **seed** (`3b456f7f6c58`, 144 l.) = antonly + profondeur de chemin. Aucun écart.
+- `progress.sh` — À garder : **seed = galass** (`257d9c1e8ca7`, 124 l.) : utilise `TARGET_DIR`, nom préféré du `run-fullrun` seed. antonly (`8ab7bf8f98e3`) utilise `ANTENLY_DIR` ; fonctionnellement identique.
+- `prompt-contract-test.sh` — À garder : **seed = galass** (`9a277ba4e02c`, 96 l.) : section B et substitution multi-variables. antonly (`d37ee3b7caf0`, 86 l.) est l'ancienne version (section 5.D, six variables).
+- `redact-log.sh` — À garder : **seed = antonly** (`afafc1e213b1`, 79 l.) : masque aussi les noms de fichiers du corpus audio (faux positifs `generic-api-key` de gitleaks). galass (`274df9e222a1`, 72 l.) ne les masque pas.
+- `run-fullrun.sh` — À garder : **seed** (`dafa081b3bb9`, 827 l.) : accepte `TARGET_DIR` et `ANTENLY_DIR`, source `allowed-repos`, gère `stop_after_step`/`target_agent`, versions de boucle les plus récentes. antenly (`af0f9f89c23a`, 822 l.) n'accepte que `ANTENLY_DIR` ; galass (`9016ef94020b`, 728 l.) est plus ancien.
+
