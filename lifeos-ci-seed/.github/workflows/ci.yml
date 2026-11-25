@@ -25,6 +25,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # done_check.sh lit le verdict via le CLI lifeos (source unique, LIFEOS/TOOLS/FullRunVerdict.ts) :
+      # les tests qui font tourner le vrai done_check.sh en ont besoin. Dépôt privé : CI_TOKEN, lecture seule.
+      - name: Checkout LifeOS (lecture seule, CLI de verdict)
+        uses: actions/checkout@v4
+        with:
+          repository: LordThiouk/lifeos
+          # Épinglé : lifeos#24 mergée (4fac2d5 : préflight + CLI de verdict de #23). Un `main` mouvant changerait le verdict sous nos pieds.
+          ref: 4fac2d59de94bf6a5fa6c68c7f09874a2f9cd634
+          token: ${{ secrets.CI_TOKEN }}
+          path: lifeos
+          persist-credentials: false
+
       - name: Installer ShellCheck si absent
         run: |
           set -euo pipefail
